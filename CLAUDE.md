@@ -178,6 +178,69 @@ examples do not all agree with shipped packages.
 
 ---
 
+### ATS integration facts — established against a live security, not documentation
+
+Every item below cost a failed call to find. The deployed bond is `0.0.10316440`.
+
+- **The compliance read surface is not what it looks like.** `isAuthorized`,
+  `getKycAccountStatus` and `isPaused` **do not exist** and revert with
+  `FunctionNotFound(bytes4)` = `0x5416eb98`. The real functions are
+  `getControlListType()`, `isInControlList(address)`, `getKycStatusFor(address)` and
+  `paused()`.
+- **Membership alone does not decide eligibility.** `getControlListType()` returns `true`
+  for an allowlist and `false` for a blocklist, and the same list means the opposite thing
+  in each case. Reading only `isInControlList` inverts the answer on a blocklist instrument
+  and admits exactly the party it was configured to exclude.
+- **`getKycStatusFor` returns an enum, not a bool** — `KycStatus { NOT_GRANTED, GRANTED }`,
+  so compare against `1`.
+- **The ATS README's role hashes are wrong for the deployed contracts.** It lists
+  `_CONTROL_LIST_ROLE = 0xca537e1c…`; `constants/roles.sol` defines
+  `ROLE_CONTROL_LIST = 0x6ed9a91e…`. Two parallel naming schemes with different hashes.
+  Granting the README's constant **succeeds and authorises nothing**. Always take role
+  hashes from `contracts/constants/roles.sol`.
+- **`clearingActive: true` blocks direct holds** with `ClearingIsActivated()` = `0x5b2e3086`.
+  Deploy with it off, or grant `ROLE_CLEARING` and call `deactivateClearing()`.
+- **Granting KYC needs a registered issuer.** `grantKyc` reverts with
+  `AccountIsNotIssuer(address)` = `0xcd324f53` until the issuer is added via `addIssuer`,
+  which needs `ROLE_SSI_MANAGER`.
+- **A deployed bond has no supply.** `deployBond` creates the security; `issue(to, amount,
+data)` mints, and costs ~465k gas. Holder and receiver must both be allowlisted and KYC'd.
+- **`createHoldByPartition` acts on the caller's own tokens.** The venue cannot hold a
+  seller's paper unless it is the holder or an authorised ERC-1400 operator.
+- **An ECDSA Hedera account has two EVM addresses** — the alias, derived from the public
+  key, and the long-zero form, derived from the account number. To a Solidity contract they
+  are unrelated keys, so a control-list grant against one is invisible to the other.
+
+### x402
+
+- The facilitator's network id is **`hedera:testnet`**, CAIP-2 style with a colon. The kind
+  lookup is an exact string match, and the hyphenated spelling fails **after** the ATS hold
+  is placed.
+- Pin `@x402/*` at **2.24.0**. Headers are `payment-required` / `payment-signature` /
+  `payment-response`; there is no `X-PAYMENT` at v2.
+- **Blocky402's `/verify` does not check the payer signature.** Unsigned and wrong-key
+  payloads both return `isValid: true`. Settle is the only truth, and paid handlers must be
+  side-effect-free because the handler runs between verify and settle.
+- A signed payload is valid for ~120 seconds. Sign and settle inside one action.
+
+### Circle agent wallets
+
+- **Circle enforces no spending cap here, and the product must not imply it does.** Spending
+  policies are mainnet-only, Arc has no mainnet identifier in Agent Wallets, and
+  developer-controlled wallets have no policy engine at all — Circle's own docs say to
+  enforce such controls in your application. The mandate cap is ours.
+- Use `@circle-fin/developer-controlled-wallets`, not the Agent Wallets CLI.
+- Circle's balance response carries the same USDC **twice** — native at 18 decimals and
+  ERC-20 at 6. Select by contract address; picking wrong is a factor of a trillion.
+
+### Open: two refusal vocabularies
+
+The contracts say `RATING_BELOW_FLOOR`, `TENOR_ABOVE_CEILING`, `INSUFFICIENT_UNALLOCATED`,
+`DEBTOR_LIMIT_EXCEEDED`. `@facture/shared` and the backend say `RATING_BELOW_MANDATE`,
+`TENOR_EXCEEDS_MANDATE`, `EXPOSURE_EXHAUSTED`, `DEBTOR_CONCENTRATION`. Same four decisions,
+two sets of names. The proof view would show one name on-chain and another in the API for a
+single refusal, which undercuts "every refusal names its reason". Pick one.
+
 ## Cut list
 
 Ordered by what leaves the product most intact, not by which track is cheapest to lose. A prize is
