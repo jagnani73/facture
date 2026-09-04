@@ -72,6 +72,15 @@ export const envSchema = z
     X402_HTS_ASSET_ID: ACCOUNT_ID.optional(),
     X402_PAY_TO: ACCOUNT_ID,
     X402_SUPPORTED_TTL_SECONDS: z.coerce.number().int().positive().default(300),
+    /** Smallest-unit exponent of the settlement asset. HBAR is 8; USDC on Hedera is 6. */
+    X402_ASSET_DECIMALS: z.coerce.number().int().min(0).max(18).default(8),
+    /**
+     * Parts-per-million scale on the settled amount. `1_000_000` settles the full amount.
+     * Defaults to `1` — one millionth — because a testnet balance cannot cover a six-figure
+     * receivable, and a demo that silently settles a coincidental number is worse than one
+     * that scales openly.
+     */
+    X402_SETTLEMENT_SCALE_PPM: z.coerce.number().int().positive().default(1),
 
     /*
      * Database — SQLite, so this is a path on disk and not a connection URL. Kept under the

@@ -122,12 +122,53 @@ export interface X402ClientOptions {
   payTo: string;
   assetMode: 'hbar' | 'hts';
   htsAssetId: string | undefined;
+  /** Smallest-unit exponent of the settlement asset. HBAR is 8 (tinybars). */
+  assetDecimals: number;
+  /**
+   * Parts-per-million scale applied to the settled amount, so a testnet account can
+   * actually pay a six-figure receivable. `1_000_000` means settle the full amount.
+   */
+  settlementScalePpm: number;
   timeoutMs?: number;
   logger?: Logger;
 }
 
 /** HBAR as an x402 asset reference on Hedera. */
 export const HBAR_ASSET = '0.0.0';
+
+/** Tinybars. */
+export const HBAR_DECIMALS = 8;
+
+/**
+ * Converts an invoice amount into the settlement asset's smallest unit.
+ *
+ * Two conversions, kept separate on purpose because only one of them is arithmetic.
+ *
+ * The first is a real decimals change: invoice money is minor units of its currency (2 for
+ * USD and EUR) and the asset has its own exponent (8 for HBAR, 6 for USDC). That part is
+ * exact and stays in `bigint`.
+ *
+ * The second is a **declared convention, not a market rate**. One unit of invoice currency
+ * is settled as one unit of the settlement asset. There is no FX here and none is implied;
+ * a real deployment prices the cash leg against an actual rate. `scalePpm` then shrinks the
+ * result so a testnet balance can cover it. Both are surfaced in the challenge description
+ * so a reader of the proof view sees the convention rather than inferring a rate that was
+ * never quoted.
+ *
+ * Before this existed the amount was the invoice's minor units passed through unchanged,
+ * which silently read as tinybars — the same digits meaning a different thing by accident.
+ */
+export const toSettlementAmount = (
+  amountMinor: bigint,
+  currencyDecimals: number,
+  assetDecimals: number,
+  scalePpm: number,
+): bigint => {
+  const scaled = (amountMinor * BigInt(scalePpm)) / 1_000_000n;
+  const shift = assetDecimals - currencyDecimals;
+  if (shift >= 0) return scaled * 10n ** BigInt(shift);
+  return scaled / 10n ** BigInt(-shift);
+};
 
 /**
  * Defaults for the (scheme, network) pair we settle on. `GET /supported` is the authority
@@ -229,17 +270,24 @@ export class X402Client {
    */
   async buildRequirements(input: {
     amountMinor: bigint;
+    currencyDecimals: number;
     resource: string;
     description: string;
     maxTimeoutSeconds?: number;
   }): Promise<{ accepted: PaymentRequirements; resource: ResourceInfo }> {
     const feePayer = await this.feePayer();
+    const amount = toSettlementAmount(
+      input.amountMinor,
+      input.currencyDecimals,
+      this.#opts.assetDecimals,
+      this.#opts.settlementScalePpm,
+    );
     return {
       accepted: {
         scheme: this.#opts.scheme,
         network: this.#opts.network,
         asset: this.asset,
-        amount: input.amountMinor.toString(),
+        amount: amount.toString(),
         payTo: this.#opts.payTo,
         maxTimeoutSeconds: input.maxTimeoutSeconds ?? 120,
         extra: { feePayer },

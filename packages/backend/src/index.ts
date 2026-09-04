@@ -81,6 +81,8 @@ function boot(): void {
     payTo: env.X402_PAY_TO,
     assetMode: env.X402_ASSET_MODE,
     htsAssetId: env.X402_HTS_ASSET_ID,
+    assetDecimals: env.X402_ASSET_DECIMALS,
+    settlementScalePpm: env.X402_SETTLEMENT_SCALE_PPM,
     logger: log,
   });
 

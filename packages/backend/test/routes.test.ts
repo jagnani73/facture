@@ -10,18 +10,33 @@
  * not implemented.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
 import { X402_HEADERS } from '../src/services/x402.js';
 import { call, createHarness, createRefusingGate, type Harness } from './helpers.js';
 
 let h: Harness;
 
+/*
+ * Freeze the clock at the market's own `asOf`.
+ *
+ * The seeded book is priced at MARKET_NOW_ISO and a quote lives five minutes, but the trade
+ * route checks expiry against the real `Date.now()`. Without a frozen clock the suite passes
+ * only while wall-clock UTC happens to sit inside that five-minute window and fails for
+ * everyone afterwards — which is exactly what it started doing. Freezing here makes the
+ * expiry check deterministic without weakening it: the route still refuses a genuinely
+ * expired quote, and there is a test below that advances time to prove it.
+ */
 beforeEach(async () => {
+  // Fake ONLY Date. The issuance queue backs off with real setTimeout, and faking timers
+  // wholesale leaves it never firing.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(MARKET_NOW_ISO));
   h = await createHarness();
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   h.restore();
 });
 

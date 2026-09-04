@@ -13,23 +13,30 @@
  *   added once its instrument exists.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { seedId } from '../src/db/seed.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MARKET_NOW_ISO, seedId } from '../src/db/seed.js';
 import { createStoreIssuanceSink, IssuanceQueue } from '../src/services/issuance.js';
 import { settlementService } from '../src/services/settlement.js';
 import { call, createHarness, type Harness } from './helpers.js';
 
 let h: Harness;
 
+/* Same reason as routes.test.ts: a quote lives five minutes and the route checks expiry
+ * against the real clock, so an unfrozen suite passes only inside that window. */
 beforeEach(async () => {
+  // Fake ONLY Date. The issuance queue backs off with real setTimeout, and faking timers
+  // wholesale leaves it never firing.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(MARKET_NOW_ISO));
   h = await createHarness();
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   h.restore();
 });
 
-const asOf = `?asOf=${encodeURIComponent('2026-09-01T09:32:00.000Z')}`;
+const asOf = `?asOf=${encodeURIComponent(MARKET_NOW_ISO)}`;
 
 describe('maturity', () => {
   it('routes to the current holder and marks the invoice matured', async () => {

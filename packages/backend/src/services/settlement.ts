@@ -20,7 +20,8 @@
  * counterparty has already been refused with a receipt.
  */
 
-import type { SettlementLegState } from '@facture/shared';
+import type { Currency, SettlementLegState } from '@facture/shared';
+import { CURRENCY_DECIMALS } from '@facture/shared';
 import { explorer } from '../chain.js';
 import { getConfig } from '../config.js';
 import { getStore } from '../db/store.js';
@@ -160,10 +161,13 @@ export const buildTradeChallenge = (input: {
 }): Promise<{ accepted: PaymentRequirements; resource: ResourceInfo }> =>
   getX402Client().buildRequirements({
     amountMinor: input.proceedsMinor,
+    currencyDecimals: CURRENCY_DECIMALS[input.currency as Currency] ?? 2,
     resource: tradeResourceUrl(input.tradeId),
     description:
       `Purchase of receivable ${input.invoiceId} at ${input.proceedsMinor} ` +
-      `${input.currency} minor units against face ${input.faceValue}.`,
+      `${input.currency} minor units against face ${input.faceValue}. ` +
+      `The cash leg settles one unit of ${input.currency} as one unit of the settlement ` +
+      `asset — a declared convention, not a quoted rate — scaled for testnet.`,
     maxTimeoutSeconds: CHALLENGE_WINDOW_SECONDS,
   });
 
@@ -464,6 +468,7 @@ export const settlementService: SettlementService = {
     const holder = await store.getBuyer(holderTrade.buyerId);
     const challenge = await getX402Client().buildRequirements({
       amountMinor: invoice.faceValue,
+      currencyDecimals: CURRENCY_DECIMALS[invoice.currency as Currency] ?? 2,
       resource: tradeResourceUrl(holderTrade.id),
       description:
         `Maturity of receivable ${invoiceId}: face ${invoice.faceValue} payable to the ` +
