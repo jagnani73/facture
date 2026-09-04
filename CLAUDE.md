@@ -21,27 +21,54 @@ unique: the interesting claim is that you standardise the _bid_ rather than the 
 invoices into one facility makes the assets fungible instead, which collapses the idea into
 ordinary securitisation.
 
-**This decision is contingent and unverified.** A single `deployBond` fans out into roughly 96
-internal facet-initialisation calls inside one transaction, against Hedera's 15M per-transaction
-gas ceiling. Measure this before building anything on top of it. If it does not fit, the fallback
-is a pooled facility and the product argument has to be rewritten — do not discover this in week
-two.
+**This decision was contingent. It is now confirmed (2026-09-01) and the contingency is closed.**
+
+Measured from the deployed ATS factory's own history rather than by spending: `0.0.9213391` has
+27 `deployBond` calls on the mirror node, 24 successful with charged fees.
+
+- Real Hedera `gasUsed`: **6,956,443 – 7,310,717, median 6,976,378**. `gas_used` equals
+  `gas_consumed` on every call.
+- That is **~47% of the 15M per-transaction ceiling**; fifteen of those calls ran at a full 15M
+  limit. The facet count would have to roughly double before the ceiling binds.
+- Cost is **7.28 – 8.85 HBAR per issuance**.
+- The local-Hardhat figure of 6,978,091 lands within 0.02% of the live median, so it was an
+  accurate Hedera predictor after all.
+
+The pooled-facility fallback is not needed. Heterogeneous per-invoice paper stands.
 
 ---
 
-## Day-one blockers
+## Day-one blockers — ALL RESOLVED 2026-09-01
 
-Resolve all four before feature work. Each can invalidate part of the architecture.
+Kept for the record; none of these gate feature work any more. Full evidence lives outside the
+repo in `facture-prep/BLOCKERS.md`.
 
-1. **Deploy one ATS bond on Hedera testnet and measure gas + wall clock.** Decides whether the
-   per-invoice model survives (see above).
-2. **Ask Circle in Discord whether a fresh project qualifies for the Launch on Mainnet track.**
-   Arc mainnet goes live Sept 16, three days after submissions close, so the track has to mean
-   "mainnet-ready, deployed by Sept 30". One question, $5,000.
-3. **Confirm the Blocky402 testnet facilitator settles the chosen token.** The reference PoC notes
-   that the x402.org testnet facilitator may not handle HBAR and recommends Blocky402's endpoint
-   for it specifically.
-4. **Provision ECDSA keys everywhere.** Not optional, see below.
+1. **Gas / per-invoice model.** Resolved — see the architecture decision above. No transaction
+   needed; the answer was already in the deployed factory's history.
+2. **Arc "Launch on Mainnet" track eligibility.** Still open, but it is a prize question, not an
+   architectural one. The Continuity-only badge is _absent_ from that track, yet its copy reads
+   "Take a project you own — an existing MVP, open source repo, or live product", which a
+   from-scratch entrant cannot satisfy. Genuinely ambiguous; ask Circle before counting the $5,000.
+3. **Blocky402 facilitator.** `GET /supported` returns 200 and advertises `hedera:testnet` under
+   x402 v2, scheme `exact`. Fee payer `0.0.7162784` is ECDSA and holds ~290,667 HBAR, so funding
+   is not the risk. Read `extra.feePayer` at runtime, never hardcode it. **It remains a single
+   point of failure**: `github.com/blockydevs/blocky402` is a 404, so it cannot be self-hosted.
+4. **ECDSA keys.** Resolved. Operator `0.0.10311549`, 1000 HBAR, `ECDSA_SECP256K1` confirmed on
+   the ledger rather than merely in the portal UI. Second party `0.0.10314099`, 10 HBAR, hollow
+   until its first fee payment.
+
+### Corrections to earlier assumptions
+
+- **There is no 20% gas refund cap on this path.** `charged_tx_fee / gas_used` is an exact
+  integer on all 24 calls (104–126 tinybar/gas), tracks the HBAR price, and is independent of the
+  gas limit. Two calls 28 minutes apart with limits of 7,477,718 and 15,000,000 and near-identical
+  gas used were both charged exactly 105 tinybar/gas. **So "set gasLimit 9M not 15M" is not
+  justified on cost** — a generous limit is free and avoids out-of-gas.
+- **Throttling is still open.** Hedera throttles on network gas throughput, and whether that
+  budget is charged against the gas _limit_ or gas _used_ is untested. Issuance pacing stays a
+  real design concern; it just is not a cost concern.
+- **The faucet gives 10 HBAR/day anonymously, not 100.** The 100/day figure in the docs is the
+  signed-in rate. A portal account is needed for a pre-issued book.
 
 ---
 
@@ -60,6 +87,22 @@ Researched, not assumed. Violating these costs days.
 - **Every deployment needs a checksum-valid ISIN** (`onlyValidISIN`) **and a declared SEC
   regulation type** (`onlyValidRegulation` — Reg D 506(b)/506(c) or Reg S). Generate valid fake
   ISINs ahead of time; arbitrary strings are rejected.
+- **Regulation enum values, verified against the deployed factory (v6.0.0 text at
+  `0.0.9213391`):** `RegulationType { NONE, REG_S, REG_D }` = 0,1,2 and
+  `RegulationSubType { NONE, REG_D_506_B, REG_D_506_C }` = 0,1,2. So Reg D 506(b) = `2/1`,
+  506(c) = `2/2`, Reg S = `1/0`.
+- **The regulation block is disclosure metadata, not enforcement.** `regulation.sol` defines only
+  `build*` constructors plus `checkRegulationTypeAndSubType`; there is no check or enforce
+  function for resale hold, accreditation or international investors, and `resaleHoldPeriod`
+  appears nowhere in contract logic. Eligibility is enforced by `ControlList` and `Kyc`, as
+  already decided below. None of it can revert a trade.
+- **Open: Reg S is probably the right declaration, not 506(c).** Per the deployed contract, Reg S
+  is the only one allowing international investors AND the only one without a 6mo–1yr resale
+  hold. Reg D declares a hold that contradicts a holder relisting on day 30, and bars the
+  international buyers the cross-chain argument depends on. The accreditation rationale for
+  506(c) does not survive contact with the source: all three are `ACCREDITATION_REQUIRED`.
+  Scope Reg S geographically with `AdditionalSecurityData.listOfCountries`. Reversible until the
+  first instrument is issued; changes the refusal copy.
 - **`Loan`, `BondFixedRate` and `BondKpiLinkedRate` are not deployable.** They exist in the
   `SecurityType` enum with some backing domain data, but the shipped factory exposes only
   `deployBond` (always `BondVariableRate`), `deployEquity` and `deployDepositToken`. Ignore any
