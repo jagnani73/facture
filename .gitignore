@@ -1,0 +1,26 @@
+node_modules/
+dist/
+build/
+out/
+.next/
+coverage/
+
+# contracts
+artifacts/
+cache/
+cache_hardhat/
+typechain-types/
+broadcast/
+forge-cache/
+
+# env — .env.example is committed, real env files never are
+.env
+.env.*
+!.env.example
+
+# local
+*.log
+*.tsbuildinfo
+.DS_Store
+.turbo/
+.vercel/

@@ -1,0 +1,9 @@
+packages:
+  - packages/*
+
+allowBuilds:
+  esbuild: true
+  keccak: true
+  protobufjs: true
+  secp256k1: true
+  sharp: true
