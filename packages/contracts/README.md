@@ -13,6 +13,7 @@ trade before it is struck rather than after, and settling the two legs across tw
 | Contract                 | Chain  | What it is for                                                                   |
 | ------------------------ | ------ | -------------------------------------------------------------------------------- |
 | `UniquenessRegistry.sol` | Hedera | One receivable, one instrument, forever. The anti-double-pledge control.         |
+| `InvoiceRegistry.sol`    | Hedera | What each listed receivable IS. Attester-written, and the book reads it.         |
 | `MandateBook.sol`        | Hedera | The standing-bid book. Quotes over risk buckets, and the matching engine.        |
 | `AtsComplianceGate.sol`  | Hedera | Asks the ATS instrument whether a buyer may hold it, **before** matching.        |
 | `MandateVault.sol`       | Arc    | Custody of the buyer's USDC. Opens only on an authorisation from the book.       |
@@ -36,6 +37,65 @@ Because the binding is irreversible, writes are permissioned. An open registry c
 the committed fields are all guessable — to bind a hash to a junk address and burn that receivable
 forever. The issuer set can censor, which is visible and recoverable; it can never forge or move an
 existing binding.
+
+### `InvoiceRegistry`
+
+The on-chain source of invoice truth: debtor, seller, face, due date, rating, status, and the
+uniqueness commitment. `MandateBook` reads it inside every evaluation and never takes an invoice
+fact as an argument.
+
+That is the point, and it is why this is a permissioned contract rather than a public mapping.
+"Rating below floor" is a check against reality only if the rating is not supplied by the party who
+wants the match to succeed. The mock in `contracts/mocks/` has an unpermissioned `setInvoice`;
+deploying it would let anyone write an `A` rating onto a defaulted debtor and have the book price,
+match and settle it exactly as designed. **Writes are attester-gated**, following the same
+owner-curates-a-set idiom as `UniquenessRegistry.setIssuer` — a set rather than a single slot,
+because listing and rating are different venue processes and because a key rotates by granting the
+replacement before revoking the incumbent, rather than through a window in which nobody can write.
+
+**`getInvoice` never reverts.** An unknown id returns a zero-filled struct whose `status` decodes to
+`InvoiceStatus.Unknown`, because `previewMatch` is a `view` that has to report `INVOICE_UNKNOWN` as
+a named refusal. A refusal is a product output here; a revert is a failure, and the two are not
+interchangeable. That requirement is on the interface and it is tested against this implementation
+directly, not only against the mock.
+
+Listing is the one place the registry does not take the attester's word for something. `list` reads
+the venue's `UniquenessRegistry` and refuses unless `instrumentOf(uniquenessHash) == instrument`,
+which discharges the obligation `IUniquenessRegistry` states: an orphaned bond whose `claim`
+reverted must never be listed. It also refuses a receivable or an instrument that is already listed
+under another invoice id — the book's double-sale guard is keyed on the invoice id, so it is only
+sound if an id maps to a receivable one-for-one.
+
+Status transitions are validated rather than free:
+
+```
+Draft     → Confirmed | Cancelled          Settled   → Repaid | Defaulted
+Confirmed → Matched   | Cancelled          Cancelled → Draft
+Matched   → Settled   | Confirmed          Repaid, Defaulted: terminal
+```
+
+`list` always writes `Draft`, never `Confirmed` — the debtor's acknowledgement is a separate event
+and it is what removes dispute risk. Nothing may move to `Unknown`, because zero is the "not listed"
+sentinel `getInvoice` leans on. Nothing walks backwards out of a completed trade: a registry that
+can say "for sale" about sold paper is one a reader cannot use. And a no-op transition is refused,
+so the log never carries a change that did not happen.
+
+The one non-obvious edge is `Cancelled → Draft`. Cancellation is a seller withdrawing an **unsold**
+receivable, and because `list` refuses a receivable already spoken for and the bond is permanently
+bound in the uniqueness registry, a terminal `Cancelled` would burn that receivable on this venue
+forever. Re-opening costs nothing: it lands in `Draft`, which is unmatchable, and needs a fresh
+debtor confirmation before it can be quoted again.
+
+Two fields stay mutable, but only while the paper is unpriced. A **rating** moves in `Draft` and
+`Confirmed`, because ratings are earned and shift while paper waits for a bid, and freezes from
+`Matched` onward, where it becomes a fact about a completed trade that a reader needs in order to
+reconstruct why the match was allowed. A **due date** is amendable in `Draft` only, because
+confirmation is the debtor acknowledging an amount _and_ a date. There is no amendment for
+`faceValue` or `debtorId` at all: both are committed to by the uniqueness hash, so a correction to
+either is a different receivable with a different hash and a different instrument.
+
+Ownership is two-step, matching `UniquenessRegistry` — a mistyped one-step transfer would leave the
+attester set permanently unmanageable, and there is no upgrade path to recover through.
 
 ### `MandateBook`
 
@@ -225,7 +285,8 @@ intermediary the venue exists to remove.
   than an enum so a gate can surface a code the venue did not compile in.
 - `contracts/interfaces/IInvoiceRegistry.sol` — the seam onto invoice truth. The book _reads_ facts
   rather than accepting them as arguments; "rating below floor" only means something if the rating
-  is not supplied by the party who wants the match to succeed.
+  is not supplied by the party who wants the match to succeed. `InvoiceRegistry.sol` is the
+  production implementation; the mock beside it is test-only and deliberately unpermissioned.
 - `contracts/interfaces/ats/IAtsFacets.sol` — the three ATS selectors the gate probes, and nothing
   more.
 - `contracts/interfaces/IMandateVault.sol` — the cash leg's contract with the book, and the full
@@ -333,7 +394,7 @@ compiles to about 27KB unoptimised against 15KB optimised, and 24,576 is a hard 
 simulated test chain and Hedera. An unoptimised profile therefore either cannot deploy the venue's
 own book, or has to be told to ignore the ceiling — and ignoring it is worse, because the suite would
 then prove a contract works while saying nothing about whether it can be deployed. The cost that was
-weighed against turned out to be nothing: a clean build of all 18 files takes about two seconds
+weighed against turned out to be nothing: a clean build of all 19 files takes about two seconds
 either way.
 
 Tests use the Node built-in runner (`node:test`) — that is what `hardhat-toolbox-viem` ships, not
@@ -359,18 +420,26 @@ immutables, so the vault has to exist first.
 ```bash
 pnpm --filter @facture/contracts deploy:arc      # DvpEscrow (payment leg), then MandateVault
 # copy the printed vault address into FACTURE_MANDATE_VAULT
-pnpm --filter @facture/contracts deploy:hedera   # registry, gate, DvpEscrow (delivery leg), book
+pnpm --filter @facture/contracts deploy:hedera   # registries, gate, DvpEscrow (delivery leg), book
 ```
 
 The order **inside** each script matters for the same reason. On Arc the escrow deploys before the
-vault, which takes it as an immutable and pays every settled trade into it; on Hedera the escrow
-deploys before the book, which takes it as an immutable and reads every settlement proof out of it.
-The whole chain runs one way and never doubles back: escrow → vault → book, with a second escrow
-beside the book.
+vault, which takes it as an immutable and pays every settled trade into it; on Hedera the uniqueness
+registry deploys before the invoice registry, which verifies claims against it, and the escrow
+deploys before the book, which takes both as immutables and reads every settlement proof out of the
+escrow. The whole chain runs one way and never doubles back: escrow → vault → book, with the two
+registries and a second escrow beside the book.
+
+`FACTURE_INVOICE_REGISTRY` is an **optional** override on the Hedera side. Set it to reuse a registry
+that already holds a listed book of paper; leave it unset and `deploy:hedera` deploys a fresh one and
+grants `FACTURE_ATTESTER` on it. Nothing can be listed until that grant lands, so when the deployer
+is not the owner the script prints the `setAttester` call to run from the owner key.
 
 `--build-profile production` is not optional and is baked into both scripts.
 
-Afterwards the attester relay has to be pointed at both. It watches `MandateVault.Deposited` on Arc
+Afterwards the attester relay has to be pointed at both. It relays invoice facts into
+`InvoiceRegistry` on Hedera — listing, debtor confirmation, earned ratings, and the status mirror of
+what the book decides. It watches `MandateVault.Deposited` on Arc
 and calls `MandateBook.creditFunding`, and it watches `MandatePosted` / `Matched` /
 `ReleaseAuthorised` / `PayoutAuthorised` on Hedera and calls the vault's `registerMandate`,
 `registerMatch` and `execute*`. The two `register*` calls are not optional and are not bookkeeping:
@@ -424,6 +493,12 @@ Signatures, events, errors and storage layout are all deliberate and complete. T
   the mandate and the book credits it back through the ordinary funding path, but the match stays
   `Settled` and the book cannot mint a second payout authorisation for it. Putting a stranded
   settlement right is an operator matter in v1.
+- Invoice facts still originate off-chain. `InvoiceRegistry` bounds who may assert them and what
+  shape an assertion may take — the uniqueness check, the transition table, the frozen rating — but
+  no contract can verify that a debtor really clicked the confirmation link or that a rating matches
+  the payment history behind it. That residual is the same single-trusted-attester assumption as the
+  cash leg, and it closes the same way: threshold attestation, or a signature from the debtor
+  themselves carried into `setStatus`. Neither needs an interface change here.
 - Partial position sales. Storage is shaped so this does not need a migration — a `Match` already
   snapshots `faceValue` and `price` separately — but the instrument-side split is an ATS partition
   concern and out of scope here.

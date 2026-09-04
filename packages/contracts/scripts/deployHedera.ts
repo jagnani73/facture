@@ -1,5 +1,5 @@
 /**
- * Deploy the BOOK, the GATE and the REGISTRY on Hedera testnet.
+ * Deploy the BOOK, the GATE and the TWO REGISTRIES on Hedera testnet.
  *
  *   pnpm --filter @facture/contracts deploy:hedera
  *
@@ -42,7 +42,13 @@ import { getAddress, type Address } from 'viem';
 // Deliberately explicit rather than 'auto'. Estimation over the Hashio relay is not always reliable,
 // and an underestimate on Hedera fails the transaction while still being billed.
 const GAS = {
-  /** Small, storage-light constructors. UniquenessRegistry, AtsComplianceGate, DvpEscrow. */
+  /**
+   * Small, storage-light constructors: UniquenessRegistry, InvoiceRegistry, AtsComplianceGate,
+   * DvpEscrow. Sized off the class's largest runtime bytecode — InvoiceRegistry at 5,075 bytes, so
+   * ~1.02M in code deposit alone at 200 gas/byte, against DvpEscrow's 4,412 — plus intrinsic,
+   * calldata and a two-slot constructor. Roughly 20% headroom, which is the right side of a limit
+   * Hedera bills whether it is used or not.
+   */
   deploySmall: 1_500_000n,
   /** MandateBook: six immutables, several mappings, the largest of the venue's own contracts. */
   deployBook: 3_000_000n,
@@ -79,7 +85,7 @@ async function main(): Promise<void> {
 
   const owner = requireAddress('FACTURE_OWNER');
   const attester = requireAddress('FACTURE_ATTESTER');
-  const invoiceRegistry = requireAddress('FACTURE_INVOICE_REGISTRY');
+  const existingInvoiceRegistry = optionalAddress('FACTURE_INVOICE_REGISTRY');
   const cashLegVault = requireAddress('FACTURE_MANDATE_VAULT');
   const cashLegChainId = BigInt(process.env.FACTURE_CASH_LEG_CHAIN_ID ?? '5042002');
   const settlementWindow = BigInt(process.env.FACTURE_SETTLEMENT_WINDOW ?? '259200');
@@ -97,7 +103,39 @@ async function main(): Promise<void> {
   });
   console.log(`UniquenessRegistry  ${uniquenessRegistry.address}`);
 
-  // --- 2. AtsComplianceGate ----------------------------------------------------------------------
+  // --- 2. InvoiceRegistry ------------------------------------------------------------------------
+  // The source of invoice truth the book reads before it allows a match. It takes the uniqueness
+  // registry as an immutable — listing verifies that the receivable was actually claimed against the
+  // instrument being listed — so it deploys after it and before the book, which records it as an
+  // immutable in turn.
+  //
+  // `FACTURE_INVOICE_REGISTRY` is an OPTIONAL override, for pointing a fresh book at a registry that
+  // already holds a listed book of paper. Left unset, a new one is deployed here. It is never the
+  // mock: `MockInvoiceRegistry.setInvoice` has no access control, so deploying it would let anyone
+  // assert an `A` rating on a defaulted debtor and have the book price, match and settle it.
+  let invoiceRegistry: Address;
+  if (existingInvoiceRegistry === undefined) {
+    const deployed = await viem.deployContract(
+      'InvoiceRegistry',
+      [owner, uniquenessRegistry.address],
+      { gas: GAS.deploySmall },
+    );
+    invoiceRegistry = deployed.address;
+    console.log(`InvoiceRegistry     ${invoiceRegistry}`);
+
+    // The attester relays invoice facts — listing, debtor confirmation, earned ratings. Nothing else
+    // may write. Granted here only when the deployer owns the registry it just deployed; otherwise
+    // it is printed with the rest of the wiring below.
+    if (getAddress(deployer.account.address) === owner) {
+      await deployed.write.setAttester([attester, true], { gas: GAS.adminCall });
+      console.log(`attester granted    ${attester}`);
+    }
+  } else {
+    invoiceRegistry = existingInvoiceRegistry;
+    console.log(`InvoiceRegistry     ${invoiceRegistry}  (reused, from FACTURE_INVOICE_REGISTRY)`);
+  }
+
+  // --- 3. AtsComplianceGate ----------------------------------------------------------------------
   // Stateless and immutable; one instance serves every instrument the venue lists. Must be on this
   // chain, because it staticcalls into the securities' diamonds directly.
   const complianceGate = await viem.deployContract('AtsComplianceGate', [], {
@@ -105,13 +143,13 @@ async function main(): Promise<void> {
   });
   console.log(`AtsComplianceGate   ${complianceGate.address}`);
 
-  // --- 3. DvpEscrow (delivery leg) ---------------------------------------------------------------
+  // --- 4. DvpEscrow (delivery leg) ---------------------------------------------------------------
   // Before the book, which records it as an immutable and reads every settlement proof out of it.
   // The payment-leg twin is deployed on Arc by deployArc.ts. They never communicate.
   const dvpEscrow = await viem.deployContract('DvpEscrow', [], { gas: GAS.deploySmall });
   console.log(`DvpEscrow           ${dvpEscrow.address}`);
 
-  // --- 4. MandateBook ----------------------------------------------------------------------------
+  // --- 5. MandateBook ----------------------------------------------------------------------------
   // `settlementWindow` MUST exceed DvpEscrow's MAX_LOCK_DURATION. If it did not, the book could
   // release an allocation while the delivery leg was still claimable — paying nobody and handing
   // the buyer the bond for free. The constructor enforces this too; the check is repeated here only
@@ -140,12 +178,15 @@ async function main(): Promise<void> {
   );
   console.log(`MandateBook         ${mandateBook.address}`);
 
-  // --- 5. Wiring ---------------------------------------------------------------------------------
+  // --- 6. Wiring ---------------------------------------------------------------------------------
   // Only runs when the deployer is also the owner. On a real deployment the owner is a separate key
   // and these calls are made from it afterwards.
   if (getAddress(deployer.account.address) !== owner) {
     console.log('\nDeployer is not the owner; skipping wiring. Run these from the owner key:');
     console.log(`  uniquenessRegistry.setIssuer(<issuer>, true)`);
+    console.log(
+      `  invoiceRegistry.setAttester(${attester}, true)   # nothing lists until this runs`,
+    );
     console.log(`  mandateBook.setMatcher(<matcher>, true)`);
     console.log(`  mandateBook.setSettler(<keeper>, true)   # early cancel only`);
     return;
@@ -173,9 +214,11 @@ async function main(): Promise<void> {
     console.log(`matcher granted     ${matcher}`);
   }
 
-  // The attester must now be pointed at both contracts off-chain: it watches MandateVault.Deposited
-  // on Arc and calls MandateBook.creditFunding here, then watches ReleaseAuthorised and
-  // PayoutAuthorised here and calls the vault's execute* on Arc.
+  // The attester must now be pointed at these contracts off-chain. It has two jobs here: it relays
+  // invoice facts into InvoiceRegistry (listing, debtor confirmation, earned ratings), and it carries
+  // the cash leg across — watching MandateVault.Deposited on Arc and calling MandateBook.creditFunding
+  // here, then watching ReleaseAuthorised and PayoutAuthorised here and calling the vault's execute*
+  // on Arc.
   console.log('\nDone. Start the attester relay against both addresses.');
 }
 

@@ -18,13 +18,20 @@ import {Rating, InvoiceStatus} from "../libraries/FactureTypes.sol";
  *      succeed. The same argument applies to confirmation, which is the control that removes dispute
  *      risk and therefore justifies advancing the full face value with no holdback.
  *
- *      So the book reads, and something else writes. What writes is out of scope for this package:
- *      ratings are earned from settled payment behaviour and debtor confirmation arrives over a
- *      link, both of which are venue-operated processes. This interface is the seam between them,
- *      and it is intentionally read-only from the book's side.
+ *      So the book reads, and something else writes. What it reads is this interface, which is
+ *      intentionally read-only from the book's side; what writes is {InvoiceRegistry}, where the
+ *      venue's attesters relay facts that originate off-chain - ratings are earned from settled
+ *      payment behaviour, debtor confirmation arrives over a link, and both are venue-operated
+ *      processes no contract can witness directly.
+ *
+ *      The write surface is deliberately NOT declared here. The book must not be able to write to
+ *      its own oracle of facts even accidentally, and keeping the two apart means a reader of this
+ *      file can see the whole of what the book is allowed to do with the registry.
  *
  *      A mock implementation lives in `contracts/mocks/MockInvoiceRegistry.sol` so the book's
- *      refusal paths can be tested without the rest of the venue existing.
+ *      refusal paths can be tested without the rest of the venue existing. It is test-only, and its
+ *      writes are unpermissioned on purpose - deploying it would let anyone forge an invoice
+ *      record. {InvoiceRegistry} is what ships.
  */
 interface IInvoiceRegistry {
     /**

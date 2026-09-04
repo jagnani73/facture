@@ -26,7 +26,7 @@ export default defineConfig({
        * guard on the artifact that actually ships.
        *
        * The cost that reasoning was weighed against turned out to be nothing: a clean build of all
-       * 18 files takes about two seconds either way.
+       * 19 files takes about two seconds either way.
        */
       default: {
         version: '0.8.28',
