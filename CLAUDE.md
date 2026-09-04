@@ -21,9 +21,17 @@ unique: the interesting claim is that you standardise the _bid_ rather than the 
 invoices into one facility makes the assets fungible instead, which collapses the idea into
 ordinary securitisation.
 
-**This decision was contingent. It is now confirmed (2026-09-01) and the contingency is closed.**
+**This decision was contingent. It is now confirmed (2026-09-01), twice over, and the
+contingency is closed.**
 
-Measured from the deployed ATS factory's own history rather than by spending: `0.0.9213391` has
+**Facture has issued a real bond.** `0.0.10316440` /
+`0x9cb3468607a359c214cb27159d5d5853d5e83877`, tx
+`0xbe1c381a87d6ebf9936b2a3436fc2da1cd4d93e45d91e50265a64759a91076be`, Reg S, allowlist on.
+`gasUsed` **7,016,307** — 46.8% of the 15M ceiling — charged **7.928427 HBAR** at exactly
+113.000 tinybar/gas. That lands inside the range predicted from history below, so the
+archaeology was sound.
+
+It was also measured from the deployed factory's own history without spending: `0.0.9213391` has
 27 `deployBond` calls on the mirror node, 24 successful with charged fees.
 
 - Real Hedera `gasUsed`: **6,956,443 – 7,310,717, median 6,976,378**. `gas_used` equals
@@ -60,10 +68,16 @@ repo in `facture-prep/BLOCKERS.md`.
 ### Corrections to earlier assumptions
 
 - **There is no 20% gas refund cap on this path.** `charged_tx_fee / gas_used` is an exact
-  integer on all 24 calls (104–126 tinybar/gas), tracks the HBAR price, and is independent of the
-  gas limit. Two calls 28 minutes apart with limits of 7,477,718 and 15,000,000 and near-identical
-  gas used were both charged exactly 105 tinybar/gas. **So "set gasLimit 9M not 15M" is not
-  justified on cost** — a generous limit is free and avoids out-of-gas.
+  integer on all 24 historical calls (104–126 tinybar/gas), tracks the HBAR price, and is
+  independent of the gas limit. Two calls 28 minutes apart with limits of 7,477,718 and
+  15,000,000 and near-identical gas used were both charged exactly 105 tinybar/gas.
+- **BUT a generous gas limit is NOT free.** Hedera reserves `gasLimit x gasPrice` against the
+  balance _up front_, and only _charges_ `gasUsed x gasPrice`. Discovered the hard way on
+  2026-09-01: a send at gasLimit 9,000,000 with a 20%-padded price bid was refused for
+  insufficient funds on an account holding 9.997 HBAR, because it reserved 12.85 HBAR — against
+  a real fee of 7.93. So the rule is: **fees follow gas used, solvency follows the gas limit.**
+  Pad the limit for safety, not the price, and size the operator balance against
+  `gasLimit x gasPrice`, not against the expected fee.
 - **Throttling is still open.** Hedera throttles on network gas throughput, and whether that
   budget is charged against the gas _limit_ or gas _used_ is untested. Issuance pacing stays a
   real design concern; it just is not a cost concern.
