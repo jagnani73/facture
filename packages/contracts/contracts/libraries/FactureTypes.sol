@@ -81,10 +81,18 @@ enum InvoiceStatus {
  * @notice Lifecycle of a single mandate-to-invoice allocation.
  * @dev An `Open` match holds capital that is neither withdrawable nor spendable by any other match.
  *      It must resolve to `Settled` or `Cancelled`; there is no path that leaks the allocation.
+ *
+ *      `Matured` is APPENDED, per the append-only rule at the top of this file: every ordinal below
+ *      it keeps the value it already had, so no stored `Match` record is reinterpreted. It exists so
+ *      that maturity is a state transition rather than a repeatable role call - the debtor exposure
+ *      a settled position holds must be released exactly once, and a status that can only be entered
+ *      from `Settled` is what enforces that arithmetically rather than by trusting the caller to ask
+ *      only once.
  */
 enum MatchStatus {
     Uninitialised, // 0 - no such match
     Open, // 1 - capital allocated, cross-chain settlement in flight
     Settled, // 2 - price paid out, allocation consumed
-    Cancelled // 3 - settlement failed or timed out, allocation returned to unallocated
+    Cancelled, // 3 - settlement failed or timed out, allocation returned to unallocated
+    Matured // 4 - the position reached its due date and redemption was routed to the holder of record
 }

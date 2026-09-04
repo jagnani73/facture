@@ -6,9 +6,13 @@
  * Run this FIRST. `deploy:hedera` needs the vault address this prints, because the book records it
  * as an immutable at construction.
  *
- * What lands here: `MandateVault` (the buyer's escrowed USDC, which never bridges) and an Arc-side
- * `DvpEscrow` (the payment leg of the cross-chain swap). The book, the gate, the registry and the
- * paper all live on Hedera — see `deployHedera.ts`.
+ * What lands here: an Arc-side `DvpEscrow` (the payment leg of the cross-chain swap) and then
+ * `MandateVault` (the buyer's escrowed USDC, which never bridges). The book, the gate, the registry
+ * and the paper all live on Hedera — see `deployHedera.ts`.
+ *
+ * ORDER WITHIN THIS SCRIPT MATTERS TOO. The escrow deploys before the vault, because the vault takes
+ * it as an immutable and pays every settled trade into it. The whole chain of dependencies runs one
+ * way and never doubles back: escrow, then vault, then the Hedera book that records the vault.
  *
  * GAS. Nothing special. Arc has ordinary EVM refund semantics, so an unused limit costs nothing and
  * estimation is the right default — the opposite of Hedera, where the declared limit is close to
@@ -54,17 +58,19 @@ async function main(): Promise<void> {
   console.log(`chain     ${chainId}`);
   console.log(`deployer  ${deployer.account.address}`);
 
+  // --- DvpEscrow (payment leg) -----------------------------------------------------------------
+  // FIRST, because the vault records it as an immutable: every settled payout leaves the vault into
+  // this escrow and nowhere else. The same contract is deployed on Hedera for the delivery leg. The
+  // two never communicate; only a preimage crosses. See DvpEscrow.sol for the leg-ordering rule an
+  // operator must honour.
+  const escrow = await viem.deployContract('DvpEscrow', []);
+  console.log(`DvpEscrow     ${escrow.address}`);
+
   // --- MandateVault ----------------------------------------------------------------------------
   // Holds every mandate's USDC. Its only exits require an authorisation minted by the Hedera book,
   // which is what makes the book's attested balance safe to match against.
-  const vault = await viem.deployContract('MandateVault', [usdc, attester, owner]);
+  const vault = await viem.deployContract('MandateVault', [usdc, escrow.address, attester, owner]);
   console.log(`MandateVault  ${vault.address}`);
-
-  // --- DvpEscrow (payment leg) -----------------------------------------------------------------
-  // The same contract is deployed on Hedera for the delivery leg. The two never communicate; only a
-  // preimage crosses. See DvpEscrow.sol for the leg-ordering rule an operator must honour.
-  const escrow = await viem.deployContract('DvpEscrow', []);
-  console.log(`DvpEscrow     ${escrow.address}`);
 
   console.log('\nNext: set FACTURE_MANDATE_VAULT and run deploy:hedera.');
   console.log(`  FACTURE_MANDATE_VAULT=${vault.address}`);

@@ -13,7 +13,21 @@ export default defineConfig({
 
   solidity: {
     profiles: {
-      // Fast, unoptimised builds for the test loop.
+      /**
+       * The test-loop build. Optimiser settings deliberately IDENTICAL to `production` below.
+       *
+       * This profile used to be unoptimised, on the usual reasoning that a test loop wants fast
+       * compiles. It does not any more, because `MandateBook` compiles to roughly 27KB unoptimised
+       * against 15KB optimised, and 24,576 is a hard ceiling on both the simulated test chain and
+       * Hedera. An unoptimised profile therefore either cannot deploy the venue's own book at all,
+       * or has to be told to ignore the ceiling — and the second is worse than the first, because it
+       * means the suite proves a contract works while saying nothing about whether it can be
+       * deployed. Keeping the two profiles the same makes the test network's EIP-170 check a real
+       * guard on the artifact that actually ships.
+       *
+       * The cost that reasoning was weighed against turned out to be nothing: a clean build of all
+       * 18 files takes about two seconds either way.
+       */
       default: {
         version: '0.8.28',
         settings: {
@@ -25,7 +39,7 @@ export default defineConfig({
           // rather than to downgrade `evmVersion` — every contract's pragma is `^0.8.24`
           // specifically so that pin remains available without a source change.
           evmVersion: 'cancun',
-          optimizer: { enabled: false },
+          optimizer: { enabled: true, runs: 200 },
         },
       },
       // What actually gets deployed. Deploy scripts must pass `--build-profile production`.

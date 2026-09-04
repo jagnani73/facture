@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.24;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 import {IMandateBook} from "./interfaces/IMandateBook.sol";
 import {IInvoiceRegistry} from "./interfaces/IInvoiceRegistry.sol";
 import {IComplianceGate} from "./interfaces/IComplianceGate.sol";
+import {IDvpEscrow} from "./interfaces/IDvpEscrow.sol";
 import {ReasonCodes} from "./libraries/ReasonCodes.sol";
 import {Rating, MandateStatus, InvoiceStatus, MatchStatus} from "./libraries/FactureTypes.sol";
 
@@ -52,6 +55,15 @@ import {Rating, MandateStatus, InvoiceStatus, MatchStatus} from "./libraries/Fac
  *      a buyer's escrowed capital would be hostage to venue liveness, which would make "escrowed"
  *      read as "confiscated" the first time a keeper went down.
  *
+ *      WHERE THE PROOFS COME FROM. Neither function that ends a position takes a role. {confirmSettlement}
+ *      reads a lock out of the venue's {IDvpEscrow} on this chain and refuses unless that lock is a
+ *      CLAIMED delivery of this match's instrument, from this match's seller to this match's buyer.
+ *      {confirmMaturity} asks the instrument itself who holds it. Both are therefore permissionless.
+ *      Each makes exactly one external read before it writes - to the escrow, whose address is an
+ *      immutable of this contract, or to the instrument, behind a `try` that turns an unreachable
+ *      instrument into a named refusal. Neither can be re-entered into a matching path, because
+ *      matching only ever `staticcall`s.
+ *
  *      TODO(v2): partial position sales. The cut list names an all-or-nothing exit as the first cut
  *      that genuinely costs the product, and the storage here is deliberately shaped so that adding
  *      it does not require a migration: a `Match` already snapshots `faceValue` and `price`
@@ -88,6 +100,14 @@ contract MandateBook is IMandateBook {
     bytes32 public constant MATCH_DOMAIN = keccak256("facture.match.v1");
 
     /**
+     * @notice Gas forwarded to each holder probe at maturity.
+     * @dev Generous next to {AtsComplianceGate-PROBE_GAS}, because an ATS `balanceOf` walks partition
+     *      state rather than reading one mapping slot, and because this probe is not inside the
+     *      matching hot path. See {_probeWord} for what a cap can and cannot buy here.
+     */
+    uint256 public constant HOLDER_PROBE_GAS = 250_000;
+
+    /**
      * @notice Domain separator for vault authorisation ids.
      * @dev Combined with this chain id and this contract's address, it makes an authorisation
      *      minted here unusable against any other vault, chain or redeployment.
@@ -111,6 +131,21 @@ contract MandateBook is IMandateBook {
     /// @dev Source of invoice truth. Immutable: the book's refusals are only meaningful when
     ///      measured against a fixed oracle of facts.
     IInvoiceRegistry private immutable _invoiceRegistry;
+
+    /**
+     * @dev The delivery leg's escrow, on this chain, beside the paper.
+     *
+     *      Immutable for the same reason the registry is: a settlement proof is only worth anything
+     *      if the thing producing it cannot be swapped afterwards. An owner who could re-point this
+     *      could point it at a contract that returns whatever lock is convenient, and every open
+     *      match would settle on demand. The gate is mutable because a permissive gate can only
+     *      admit the wrong buyer; this one moves money, so it is fixed at construction.
+     *
+     *      Only ever READ. The escrow is deployed symmetrically on both chains and knows nothing
+     *      about mandates; making it a caller into this book would couple a general-purpose
+     *      hash-timelock to one venue and put a state-changing call inside `claim`.
+     */
+    IDvpEscrow private immutable _deliveryEscrow;
 
     /**
      * @notice How long an open match may sit before anyone may cancel it and free the capital.
@@ -222,6 +257,10 @@ contract MandateBook is IMandateBook {
     ///         believes holds its capital. Unverifiable on-chain by construction.
     event CashLegDeclared(uint256 chainId, address vault);
 
+    /// @notice Recorded at deployment. Unlike {CashLegDeclared} this one IS verifiable: the escrow
+    ///         is on this chain, and every settlement reads it.
+    event DeliveryEscrowDeclared(address escrow);
+
     /// @notice Exposure to a debtor was released after redemption or default resolution.
     event DebtorExposureReleased(uint256 indexed mandateId, bytes32 indexed debtorId, uint128 amount);
 
@@ -251,6 +290,8 @@ contract MandateBook is IMandateBook {
     /**
      * @param invoiceRegistry_ Source of invoice truth.
      * @param complianceGate_ Pre-trade eligibility gate.
+     * @param deliveryEscrow_ The {IDvpEscrow} on THIS chain. Settlement proofs are read from it, so
+     *        it has to exist before this contract does.
      * @param initialOwner Curator of roles and gate address.
      * @param initialAttester Relay for vault deposits and authorisations.
      * @param cashLegChainId_ Arc's chain id. Declarative; see {cashLeg}.
@@ -260,6 +301,7 @@ contract MandateBook is IMandateBook {
     constructor(
         IInvoiceRegistry invoiceRegistry_,
         IComplianceGate complianceGate_,
+        IDvpEscrow deliveryEscrow_,
         address initialOwner,
         address initialAttester,
         uint256 cashLegChainId_,
@@ -269,14 +311,23 @@ contract MandateBook is IMandateBook {
         if (
             address(invoiceRegistry_) == address(0) ||
             address(complianceGate_) == address(0) ||
+            address(deliveryEscrow_) == address(0) ||
             initialOwner == address(0) ||
             initialAttester == address(0) ||
             cashLegVault_ == address(0)
         ) revert ZeroAddress();
         if (settlementWindow_ == 0 || cashLegChainId_ == 0) revert InvalidTerms();
 
+        // Enforced here rather than left to a deploy script, now that the book knows the escrow.
+        // A cancellation window shorter than the longest lock the escrow will accept would let this
+        // contract hand an allocation back to the buyer while the delivery leg was still claimable -
+        // paying nobody and giving the buyer the bond for free. It is the one deployment parameter
+        // whose misconfiguration loses money silently, so it is a constructor revert.
+        if (settlementWindow_ <= deliveryEscrow_.MAX_LOCK_DURATION()) revert InvalidTerms();
+
         _invoiceRegistry = invoiceRegistry_;
         _complianceGate = complianceGate_;
+        _deliveryEscrow = deliveryEscrow_;
         _owner = initialOwner;
         _attester = initialAttester;
         _cashLegChainId = cashLegChainId_;
@@ -287,6 +338,7 @@ contract MandateBook is IMandateBook {
         emit ComplianceGateChanged(address(0), address(complianceGate_));
         emit AttesterChanged(address(0), initialAttester);
         emit CashLegDeclared(cashLegChainId_, cashLegVault_);
+        emit DeliveryEscrowDeclared(address(deliveryEscrow_));
     }
 
     // -------------------------------------------------------------------------------------------
@@ -630,7 +682,8 @@ contract MandateBook is IMandateBook {
             yieldBps: m.annualisedYieldBps,
             price: e.price,
             faceValue: e.faceValue,
-            debtorId: e.debtorId
+            debtorId: e.debtorId,
+            instrument: e.instrument
         });
 
         emit Matched(
@@ -653,20 +706,16 @@ contract MandateBook is IMandateBook {
     /**
      * @inheritdoc IMandateBook
      *
-     * @dev TODO(settlement-wiring): today this trusts an authorised settler to have verified the
-     *      delivery leg. The intended v1 binding is that {DvpEscrow} on this chain is the only
-     *      settler, and that it calls in only after a preimage has been revealed against the
-     *      delivery lock - so the proof of delivery is the preimage itself rather than a keeper's
-     *      assertion. Wiring that requires the escrow to know the match id, which it already carries
-     *      as `tradeRef`. What is deliberately NOT deferred is the accounting below, because getting
-     *      the allocation arithmetic right is the part that protects buyer capital.
+     * @dev No role, no keeper, no assertion. The proof is `deliveryLockId`, and everything this
+     *      function does after reading it is unconditional. See {IMandateBook-confirmSettlement} for
+     *      why the lock id is presented rather than derived, and for what the proof does not cover.
      */
-    function confirmSettlement(bytes32 matchId) external returns (bytes32 authId) {
-        if (!_isSettler[msg.sender]) revert NotSettler(msg.sender);
-
+    function confirmSettlement(bytes32 matchId, bytes32 deliveryLockId) external returns (bytes32 authId) {
         Match storage mt = _matches[matchId];
         if (mt.status == MatchStatus.Uninitialised) revert MatchUnknown(matchId);
         if (mt.status != MatchStatus.Open) revert MatchNotOpen(matchId, mt.status);
+
+        bytes32 secretHash = _requireDeliveryProof(matchId, deliveryLockId, mt);
 
         Mandate storage m = _mandates[mt.mandateId];
         uint128 price = mt.price;
@@ -683,7 +732,58 @@ contract MandateBook is IMandateBook {
         authId = _nextAuthorisationId();
 
         emit MatchSettled(matchId, mt.mandateId, seller, price);
-        emit PayoutAuthorised(authId, matchId, mt.mandateId, seller, price);
+        emit PayoutAuthorised(authId, matchId, mt.mandateId, seller, price, deliveryLockId, secretHash);
+    }
+
+    /**
+     * @dev The delivery proof, in one place so that nothing downstream re-derives it.
+     *
+     *      Reads the presented lock out of the venue's escrow and checks, in order of how
+     *      fundamental the failure is, that it is a proof of THIS trade's delivery. The order is not
+     *      cosmetic: a caller who presented the wrong id should be told the lock is unknown before
+     *      being told its beneficiary is wrong.
+     *
+     *      Returns the lock's hashlock so the payout authorisation can carry it to the cash leg. The
+     *      book never sees the preimage and never needs to - by the time this succeeds, the buyer
+     *      has already revealed it to take the paper.
+     */
+    function _requireDeliveryProof(
+        bytes32 matchId,
+        bytes32 lockId,
+        Match storage mt
+    ) private view returns (bytes32 secretHash) {
+        IDvpEscrow.Lock memory lock = _deliveryEscrow.getLock(lockId);
+
+        // `Claimed` and nothing else. `None` means the id names no lock at all, `Locked` means the
+        // paper is escrowed but untaken, and `Refunded` means the trade failed and the seller has it
+        // back. Only a claim proves a preimage was revealed and the paper moved.
+        if (lock.status != IDvpEscrow.LockStatus.Claimed) {
+            revert DeliveryNotProven(matchId, lockId, lock.status);
+        }
+
+        // Ties the lock to this match and to the delivery side of it. Without this a claimed lock
+        // from any other trade would settle this one.
+        if (lock.tradeRef != matchId || lock.kind != IDvpEscrow.LegKind.Delivery) {
+            revert DeliveryLockMismatch(matchId, lockId, lock.tradeRef, lock.kind);
+        }
+
+        // The paper has to have come FROM the party being paid, and gone TO the party paying.
+        // Together these are what stop a third party manufacturing a lock that settles someone
+        // else's trade.
+        if (lock.depositor != mt.seller) {
+            revert DeliveryDepositorMismatch(matchId, mt.seller, lock.depositor);
+        }
+        if (lock.beneficiary != mt.buyer) {
+            revert DeliveryBeneficiaryMismatch(matchId, mt.buyer, lock.beneficiary);
+        }
+
+        // Against the instrument SNAPSHOTTED at match time, never a fresh registry read: the
+        // registry is external and mutable, and this is an authorisation decision.
+        if (lock.asset != mt.instrument) {
+            revert DeliveryAssetMismatch(matchId, mt.instrument, lock.asset);
+        }
+
+        return lock.secretHash;
     }
 
     /**
@@ -694,6 +794,12 @@ contract MandateBook is IMandateBook {
      *      `settlementWindow` has elapsed, which is the property that stops escrowed capital being
      *      hostage to venue liveness. A buyer whose keeper has gone dark can free their own capital
      *      without asking permission.
+     *
+     *      This is now the ONLY role left in the settlement lifecycle, and it is the narrow one:
+     *      cancelling returns an allocation to the mandate it came from and can move capital to
+     *      nobody. What it cannot be made to do is prove that no delivery happened - see
+     *      {setSettler} for why a negative like that is not provable against caller-supplied lock
+     *      ids, and for what bounds it.
      */
     function cancelMatch(bytes32 matchId, bytes32 reasonCode) external {
         Match storage mt = _matches[matchId];
@@ -720,30 +826,104 @@ contract MandateBook is IMandateBook {
     }
 
     /**
-     * @notice Release a mandate's exposure to a debtor once a settled position has resolved.
+     * @inheritdoc IMandateBook
      *
-     * @dev Called at maturity - whether the debtor paid or defaulted. Both outcomes end the exposure;
-     *      a default additionally marks the debtor's rating, which happens off this contract in the
-     *      rating engine.
-     *
-     *      TODO(maturity-wiring): the caller is currently an authorised settler asserting that the
-     *      position resolved. It should instead be driven by the instrument's own redemption event,
-     *      which on Hedera arrives via a one-shot Scheduled Transaction at maturity. Left as a role
-     *      call because the maturity path is owned by a different package.
+     * @dev Three proofs and no roles. The status transition is the third of them: only a `Settled`
+     *      position may enter `Matured`, so the debtor exposure a position holds is released exactly
+     *      once no matter how many times this is called. The role call this replaced could be made
+     *      twice, and the second call would silently decrement a DIFFERENT live position's exposure
+     *      to the same debtor - understating concentration on a mandate that had done nothing wrong.
      */
-    function releaseDebtorExposure(bytes32 matchId) external {
-        if (!_isSettler[msg.sender]) revert NotSettler(msg.sender);
-
+    function confirmMaturity(bytes32 matchId, address holder) external {
         Match storage mt = _matches[matchId];
         if (mt.status == MatchStatus.Uninitialised) revert MatchUnknown(matchId);
-        if (mt.status != MatchStatus.Settled) revert MatchNotOpen(matchId, mt.status);
+        if (mt.status != MatchStatus.Settled) revert MatchNotSettled(matchId, mt.status);
+
+        uint64 maturesAt = _maturityOf(mt);
+        if (block.timestamp < maturesAt) revert NotYetMatured(matchId, maturesAt);
+
+        address instrument = mt.instrument;
+
+        // The whole point of the function. `holder` is a candidate, not an instruction: the
+        // instrument is asked, and a caller who names themselves gets a refusal rather than a
+        // payment. Nothing here reads `mt.buyer`, which is exactly what makes the paper transferable.
+        (bool reachable, bool isHolder) = _probeSoleHolder(instrument, holder);
+        if (!reachable) revert HolderProbeFailed(matchId, instrument);
+        if (!isHolder) revert NotInstrumentHolder(matchId, instrument, holder);
 
         uint128 price = mt.price;
         bytes32 debtorId = mt.debtorId;
 
+        mt.status = MatchStatus.Matured;
         _debtorExposure[mt.mandateId][debtorId] -= price;
 
         emit DebtorExposureReleased(mt.mandateId, debtorId, price);
+        emit MaturityConfirmed(matchId, mt.mandateId, instrument, holder, mt.faceValue);
+    }
+
+    /**
+     * @dev Ask an instrument whether one address holds the whole of it.
+     *
+     *      SOLE HOLDER, not merely a holder. The venue issues one bond per invoice and exits are
+     *      all-or-nothing, so a position either moved in full or did not move at all, and "holds
+     *      some" is not a state this market can produce. Requiring the whole issue is what stops a
+     *      dusting attack - transfer one unit to an address you control and claim to be the payee -
+     *      from redirecting a redemption. When partial position sales land (see the header TODO),
+     *      this is the check that has to become pro-rata routing rather than a single payee.
+     *
+     *      Separates "could not ask" from "asked and the answer was no", because the two are
+     *      different incidents: the first is an unreachable or non-conforming instrument and is a
+     *      venue problem, the second is a caller naming the wrong address. Both refuse, and refusing
+     *      is the safe direction - an unroutable maturity is retried, a misrouted one is not
+     *      recoverable.
+     */
+    function _probeSoleHolder(address instrument, address holder) private view returns (bool reachable, bool isHolder) {
+        if (instrument == address(0) || holder == address(0)) return (false, false);
+
+        (bool probed, uint256 supply) = _probeWord(instrument, abi.encodeCall(IERC20.totalSupply, ()));
+        if (!probed) return (false, false);
+
+        // A zero supply is an instrument that was never issued, or one already burned on redemption.
+        // Either way nobody holds it, and `0 == 0` must not read as "everybody does".
+        if (supply == 0) return (true, false);
+
+        uint256 balance;
+        (probed, balance) = _probeWord(instrument, abi.encodeCall(IERC20.balanceOf, (holder)));
+        if (!probed) return (false, false);
+
+        return (true, balance == supply);
+    }
+
+    /**
+     * @dev Read one word from an instrument without letting it choose how this call fails.
+     *
+     *      Same idiom and the same reasoning as {AtsComplianceGate-_probeBool}: a raw `staticcall`
+     *      collapses a reverting instrument, an address with no code, a drifted selector and a short
+     *      return into one answer - "could not establish this" - rather than four different ways for
+     *      the venue's own error to be replaced by somebody else's.
+     *
+     *      The gas cap differs in purpose from the gate's. There it protects a matching transaction
+     *      that must still produce a verdict; here the call reverts either way, so the cap only stops
+     *      a hostile instrument from burning a keeper's gas. Its cost is a false
+     *      `HolderProbeFailed` on a pathologically expensive instrument, which is retryable and
+     *      visible - the safe direction, since the alternative failure is routing a redemption to the
+     *      wrong address.
+     */
+    function _probeWord(address target, bytes memory callData) private view returns (bool probed, uint256 value) {
+        (bool success, bytes memory returnData) = target.staticcall{gas: HOLDER_PROBE_GAS}(callData);
+
+        if (!success || returnData.length < 32) return (false, 0);
+
+        assembly ("memory-safe") {
+            value := mload(add(returnData, 0x20))
+        }
+
+        return (true, value);
+    }
+
+    /// @dev See {IMandateBook-maturityOf}. Reads the snapshot, never the registry.
+    function _maturityOf(Match storage mt) private view returns (uint64) {
+        return mt.matchedAt + uint64(mt.tenorDays) * 1 days;
     }
 
     // -------------------------------------------------------------------------------------------
@@ -865,12 +1045,24 @@ contract MandateBook is IMandateBook {
         return address(_complianceGate);
     }
 
+    /// @inheritdoc IMandateBook
+    function deliveryEscrow() external view returns (address) {
+        return address(_deliveryEscrow);
+    }
+
+    /// @inheritdoc IMandateBook
+    function maturityOf(bytes32 matchId) external view returns (uint64) {
+        Match storage mt = _matches[matchId];
+        if (mt.status == MatchStatus.Uninitialised) return 0;
+        return _maturityOf(mt);
+    }
+
     /// @notice Whether an address may strike matches.
     function isMatcher(address account) external view returns (bool) {
         return _isMatcher[account];
     }
 
-    /// @notice Whether an address may confirm settlement or cancel early.
+    /// @notice Whether an address may cancel an open match before its window elapses.
     function isSettler(address account) external view returns (bool) {
         return _isSettler[account];
     }
@@ -907,10 +1099,22 @@ contract MandateBook is IMandateBook {
     }
 
     /**
-     * @notice Grant or revoke the right to confirm settlement.
-     * @dev In the intended deployment the only settler is {DvpEscrow}. A settler can move allocated
-     *      capital to the recorded seller of a matched invoice; it cannot redirect it elsewhere,
-     *      because the payee is snapshotted at match time from the invoice registry.
+     * @notice Grant or revoke the right to cancel an open match before its window elapses.
+     *
+     * @dev Much narrower than the name suggests, and deliberately so since settlement stopped being
+     *      a role. A settler cannot settle: {confirmSettlement} takes a delivery proof and ignores
+     *      who is calling. All a settler can do is return an allocation to the mandate it came from,
+     *      early - which is what a keeper does when it observes the delivery lock refund and does
+     *      not want the buyer's capital idle for the rest of the window. It cannot move capital to
+     *      anyone.
+     *
+     *      The residual: a settler can cancel a match whose delivery leg has ALREADY been claimed,
+     *      which would hand the buyer the bond for nothing. What bounds it is that
+     *      {confirmSettlement} is permissionless the instant the buyer claims, so the seller does not
+     *      have to wait for a keeper to act on their behalf - a settler wanting to strand a delivered
+     *      trade has to win a race against the party being paid. Closing it outright needs a proof
+     *      that no delivery lock exists, and a negative like that cannot be proven against
+     *      caller-supplied lock ids.
      */
     function setSettler(address account, bool allowed) external onlyOwner {
         if (account == address(0)) revert ZeroAddress();

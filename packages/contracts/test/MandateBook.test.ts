@@ -20,12 +20,15 @@ const InvoiceStatus = {
   Cancelled: 7,
 } as const;
 const MandateStatus = { Uninitialised: 0, Active: 1, Paused: 2, Closed: 3 } as const;
-const MatchStatus = { Uninitialised: 0, Open: 1, Settled: 2, Cancelled: 3 } as const;
+const MatchStatus = { Uninitialised: 0, Open: 1, Settled: 2, Cancelled: 3, Matured: 4 } as const;
+const LegKind = { Unspecified: 0, Delivery: 1, Payment: 2 } as const;
 
 const reason = (code: string) => stringToHex(code, { size: 32 });
 
 const DAY = 86_400n;
-const SETTLEMENT_WINDOW = DAY;
+// Must exceed DvpEscrow.MAX_LOCK_DURATION (2 days) — the book's constructor now enforces it, since
+// a shorter window would let an allocation be cancelled while the delivery leg was still claimable.
+const SETTLEMENT_WINDOW = 3n * DAY;
 
 // The book records its cash leg declaratively — it cannot read Arc — so these are just the values
 // an operator would pass. Nothing on-chain verifies them, which is the point being tested elsewhere.
@@ -44,7 +47,18 @@ const MAX_TENOR = 90;
 
 const DEBTOR_A = keccak256(toHex('debtor:meridian-fabrication'));
 const DEBTOR_B = keccak256(toHex('debtor:northgate-logistics'));
-const INSTRUMENT = '0x1111111111111111111111111111111111111111' as const;
+
+// The instrument is a real ERC-20 in these tests rather than a placeholder address, because
+// settlement and maturity now both interrogate it: settlement checks the escrowed asset, maturity
+// asks it who holds the paper. `MockUSDC` stands in for the ATS diamond's ERC-20 facade, which is
+// how the venue reaches a security token on Hedera anyway.
+const BOND_UNITS = 40_000n;
+
+// One preimage, one hash. DvpEscrow hashes `abi.encodePacked(secret)`, which for a bytes32 is the
+// 32 bytes themselves.
+const SECRET = keccak256(toHex('facture:delivery-preimage'));
+const SECRET_HASH = keccak256(SECRET);
+const HOUR = 3_600n;
 
 describe('MandateBook', () => {
   async function deploy() {
@@ -55,12 +69,19 @@ describe('MandateBook', () => {
     const publicClient = await viem.getPublicClient();
     const invoices = await viem.deployContract('MockInvoiceRegistry', []);
     const gate = await viem.deployContract('MockComplianceGate', []);
+    const bond = await viem.deployContract('MockUSDC', []);
+
+    // The delivery-leg escrow deploys BEFORE the book, which records it as an immutable and reads
+    // every settlement proof out of it. Same direction of dependency as the Arc side, where the
+    // payment escrow deploys before the vault.
+    const escrow = await viem.deployContract('DvpEscrow', []);
 
     // No settlement token here. The book holds no capital — it holds an attested view of what the
     // Arc-side MandateVault holds. See MandateVault.test.ts for the custody side.
     const book = await viem.deployContract('MandateBook', [
       invoices.address,
       gate.address,
+      escrow.address,
       owner.account.address,
       attester.account.address,
       CASH_LEG_CHAIN_ID,
@@ -75,6 +96,8 @@ describe('MandateBook', () => {
       publicClient,
       invoices,
       gate,
+      bond,
+      escrow,
       book,
       owner,
       buyer,
@@ -137,6 +160,7 @@ describe('MandateBook', () => {
       tenorDays: number;
       faceValue: bigint;
       debtorId: `0x${string}`;
+      instrument: `0x${string}`;
     }> = {},
   ): Promise<void> {
     const { invoices, publicClient, seller } = ctx;
@@ -146,7 +170,7 @@ describe('MandateBook', () => {
     await invoices.write.setInvoice([
       invoiceId,
       {
-        instrument: INSTRUMENT,
+        instrument: overrides.instrument ?? ctx.bond.address,
         rating: overrides.rating ?? Rating.A,
         status: overrides.status ?? InvoiceStatus.Confirmed,
         dueDate: now + BigInt(tenorDays) * DAY,
@@ -156,6 +180,57 @@ describe('MandateBook', () => {
         uniquenessHash: keccak256(invoiceId),
       },
     ]);
+  }
+
+  /**
+   * Run the delivery leg for a match: the seller escrows the bond for the buyer in the venue's
+   * escrow, and the buyer claims it by revealing the preimage.
+   *
+   * That claim is the ONLY thing that produces a settlement proof, and it can only be produced by
+   * the buyer, because `DvpEscrow.claim` refuses anyone but the beneficiary. Every override below
+   * exists so a test can break one property of the lock and check that the book refuses it.
+   */
+  async function deliver(
+    ctx: Ctx,
+    matchId: `0x${string}`,
+    overrides: Partial<{
+      lockId: `0x${string}`;
+      tradeRef: `0x${string}`;
+      depositor: Ctx['seller'];
+      beneficiary: Ctx['buyer'];
+      token: Ctx['bond'];
+      kind: number;
+      claim: boolean;
+    }> = {},
+  ): Promise<`0x${string}`> {
+    const depositor = overrides.depositor ?? ctx.seller;
+    const beneficiary = overrides.beneficiary ?? ctx.buyer;
+    const token = overrides.token ?? ctx.bond;
+    const lockId = overrides.lockId ?? keccak256(toHex(`lock:${matchId}`));
+    const now = (await ctx.publicClient.getBlock()).timestamp;
+
+    await token.write.mint([depositor.account.address, BOND_UNITS]);
+    await token.write.approve([ctx.escrow.address, BOND_UNITS], { account: depositor.account });
+
+    await ctx.escrow.write.openLock(
+      [
+        lockId,
+        SECRET_HASH,
+        overrides.tradeRef ?? matchId,
+        beneficiary.account.address,
+        token.address,
+        BOND_UNITS,
+        now + 2n * HOUR,
+        overrides.kind ?? LegKind.Delivery,
+      ],
+      { account: depositor.account },
+    );
+
+    if (overrides.claim !== false) {
+      await ctx.escrow.write.claim([lockId, SECRET], { account: beneficiary.account });
+    }
+
+    return lockId;
   }
 
   const INV_1 = keccak256(toHex('invoice:1'));
@@ -659,14 +734,24 @@ describe('MandateBook', () => {
       const { ctx, id, matchId } = await matched();
       const record = await ctx.book.read.getMatch([matchId]);
       const expectedAuthId = await ctx.book.read.computeAuthorisationId([1n]);
+      const lockId = await deliver(ctx, matchId);
 
       // No tokens move here — they are on Arc. What settlement produces is an authorisation the
-      // attester relays to MandateVault.executePayout.
+      // attester relays to MandateVault.executePayout, carrying the delivery leg's own lock id and
+      // hashlock so the cash leg can be opened as its mirror.
       await viem.assertions.emitWithArgs(
-        ctx.book.write.confirmSettlement([matchId], { account: ctx.settler.account }),
+        ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.stranger.account }),
         ctx.book,
         'PayoutAuthorised',
-        [expectedAuthId, matchId, id, ctx.seller.account.address, record.price],
+        [
+          expectedAuthId,
+          matchId,
+          id,
+          ctx.seller.account.address,
+          record.price,
+          lockId,
+          SECRET_HASH,
+        ],
       );
 
       const mandate = await ctx.book.read.getMandate([id]);
@@ -675,6 +760,113 @@ describe('MandateBook', () => {
 
       // Exposure survives settlement: the buyer now genuinely holds the paper.
       assert.equal(await ctx.book.read.debtorExposure([id, DEBTOR_A]), record.price);
+    });
+
+    // -------------------------------------------------------------------------------------------
+    // The settlement authorisation itself. Every test below is the unauthorised case.
+    // -------------------------------------------------------------------------------------------
+
+    /**
+     * THE test for this path. Before the wiring, an authorised settler's word released the buyer's
+     * capital. Now the role buys nothing at all: the settler is still a settler, and still cannot
+     * settle, because there is no claimed delivery lock to point at.
+     */
+    it('refuses a settler who has no delivery proof', async () => {
+      const { ctx, id, matchId } = await matched();
+      const before = await ctx.book.read.getMandate([id]);
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmSettlement([matchId, keccak256(toHex('no-such-lock'))], {
+          account: ctx.settler.account,
+        }),
+        ctx.book,
+        'DeliveryNotProven',
+      );
+
+      // Nothing moved, and no authorisation was minted against the vault.
+      const after = await ctx.book.read.getMandate([id]);
+      assert.equal(after.allocated, before.allocated);
+      assert.equal(after.totalCommitted, before.totalCommitted);
+      assert.equal(await ctx.book.read.authorisationCount(), 0n);
+    });
+
+    /**
+     * A locked-but-unclaimed leg means the paper is escrowed and the buyer has not taken it. Paying
+     * the seller at that point would be paying against an option, not against a delivery.
+     */
+    it('refuses a delivery lock that has been opened but not claimed', async () => {
+      const { ctx, matchId } = await matched();
+      const lockId = await deliver(ctx, matchId, { claim: false });
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.settler.account }),
+        ctx.book,
+        'DeliveryNotProven',
+      );
+    });
+
+    /** A real, claimed lock — belonging to some other trade. Otherwise one delivery settles many. */
+    it('refuses a claimed lock carrying a different trade reference', async () => {
+      const { ctx, matchId } = await matched();
+      const lockId = await deliver(ctx, matchId, { tradeRef: keccak256(toHex('other-trade')) });
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.settler.account }),
+        ctx.book,
+        'DeliveryLockMismatch',
+      );
+    });
+
+    /** The paper has to have come from the party the payout pays. */
+    it('refuses a lock escrowed by someone other than the recorded seller', async () => {
+      const { ctx, matchId } = await matched();
+      const lockId = await deliver(ctx, matchId, { depositor: ctx.stranger });
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.settler.account }),
+        ctx.book,
+        'DeliveryDepositorMismatch',
+      );
+    });
+
+    /** ...and it has to have gone to the party whose capital is about to be spent. */
+    it('refuses a lock delivering to someone other than the buyer', async () => {
+      const { ctx, matchId } = await matched();
+      const lockId = await deliver(ctx, matchId, { beneficiary: ctx.stranger });
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.settler.account }),
+        ctx.book,
+        'DeliveryBeneficiaryMismatch',
+      );
+    });
+
+    /** Delivering a different token is not delivering the invoice's instrument. */
+    it('refuses a lock holding an asset that is not the instrument', async () => {
+      const { ctx, matchId } = await matched();
+      const other = await viem.deployContract('MockUSDC', []);
+      const lockId = await deliver(ctx, matchId, { token: other });
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.settler.account }),
+        ctx.book,
+        'DeliveryAssetMismatch',
+      );
+    });
+
+    /**
+     * The other half of removing the role: with a proof, settlement is COMPELLED. A buyer who has
+     * taken the paper cannot decline to pay for it, and a keeper that has gone dark cannot hold a
+     * completed trade hostage — the seller, or anyone, can force the authorisation themselves.
+     */
+    it('lets anyone at all settle once delivery is proven', async () => {
+      const { ctx, id, matchId } = await matched();
+      const lockId = await deliver(ctx, matchId);
+
+      await ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.seller.account });
+
+      assert.equal((await ctx.book.read.getMatch([matchId])).status, MatchStatus.Settled);
+      assert.equal((await ctx.book.read.getMandate([id])).allocated, 0n);
     });
 
     it('returns the allocation on cancel and authorises nothing', async () => {
@@ -718,11 +910,14 @@ describe('MandateBook', () => {
 
     it('refuses to settle a match twice', async () => {
       const { ctx, matchId } = await matched();
+      const lockId = await deliver(ctx, matchId);
 
-      await ctx.book.write.confirmSettlement([matchId], { account: ctx.settler.account });
+      await ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.settler.account });
 
+      // The same proof stays valid forever — the lock is permanently `Claimed` — so it is the match
+      // status, not the proof, that has to stop a replay.
       await viem.assertions.revertWithCustomError(
-        ctx.book.write.confirmSettlement([matchId], { account: ctx.settler.account }),
+        ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.settler.account }),
         ctx.book,
         'MatchNotOpen',
       );
@@ -741,6 +936,179 @@ describe('MandateBook', () => {
 
       assert.notEqual(second, matchId);
       assert.equal(await ctx.book.read.matchAttempts([INV_1]), 2n);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Maturity — the leg that makes the paper transferable at all
+  // ---------------------------------------------------------------------------------------------
+
+  describe('maturity', () => {
+    /** Match, deliver, settle. Leaves the buyer holding the whole instrument. */
+    async function settled() {
+      const ctx = await deploy();
+      const id = await postAndFund(ctx, 100_000_000_000n);
+      await listInvoice(ctx, INV_1);
+      await ctx.book.write.matchInvoice([INV_1, id], { account: ctx.matcher.account });
+      const matchId = await ctx.book.read.matchOfInvoice([INV_1]);
+      const lockId = await deliver(ctx, matchId);
+      await ctx.book.write.confirmSettlement([matchId, lockId], { account: ctx.settler.account });
+      return { ctx, id, matchId };
+    }
+
+    const pastMaturity = () => networkHelpers.time.increase((TENOR_DAYS + 1) * 86_400);
+
+    /**
+     * THE test for this path, and the one the product argument rests on. The paper changed hands
+     * after settlement, so redemption is owed to the second holder — and the book has to work that
+     * out from the instrument rather than from the buyer it recorded at match time. Without this a
+     * second buyer would have no way to be paid, and the secondary market the venue claims to run
+     * would not be one.
+     */
+    it('routes redemption to the current holder, not the original buyer', async () => {
+      const { ctx, id, matchId } = await settled();
+
+      // The buyer sells on. Nothing in the book is told about it.
+      await ctx.bond.write.transfer([ctx.stranger.account.address, BOND_UNITS], {
+        account: ctx.buyer.account,
+      });
+      await pastMaturity();
+
+      // The original buyer is refused by name, even though the book still records them as the buyer.
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmMaturity([matchId, ctx.buyer.account.address]),
+        ctx.book,
+        'NotInstrumentHolder',
+      );
+
+      const record = await ctx.book.read.getMatch([matchId]);
+      await viem.assertions.emitWithArgs(
+        ctx.book.write.confirmMaturity([matchId, ctx.stranger.account.address]),
+        ctx.book,
+        'MaturityConfirmed',
+        [matchId, id, ctx.bond.address, ctx.stranger.account.address, record.faceValue],
+      );
+
+      assert.equal((await ctx.book.read.getMatch([matchId])).status, MatchStatus.Matured);
+    });
+
+    /** A caller cannot nominate a payee: the instrument is asked, and it answers about itself. */
+    it('refuses an address that holds none of the instrument', async () => {
+      const { ctx, matchId } = await settled();
+      await pastMaturity();
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmMaturity([matchId, ctx.stranger.account.address], {
+          account: ctx.stranger.account,
+        }),
+        ctx.book,
+        'NotInstrumentHolder',
+      );
+    });
+
+    /**
+     * Sole holder, not merely a holder. One unit dusted onto an address you control must not make
+     * you the payee — and, symmetrically, must not make the real holder one either, because a split
+     * position is not something this venue can issue and refusing is the safe way to notice.
+     */
+    it('refuses a partial holding on both sides of a dusting attempt', async () => {
+      const { ctx, matchId } = await settled();
+      await ctx.bond.write.transfer([ctx.stranger.account.address, 1n], {
+        account: ctx.buyer.account,
+      });
+      await pastMaturity();
+
+      for (const who of [ctx.stranger, ctx.buyer]) {
+        await viem.assertions.revertWithCustomError(
+          ctx.book.write.confirmMaturity([matchId, who.account.address]),
+          ctx.book,
+          'NotInstrumentHolder',
+        );
+      }
+    });
+
+    it('refuses before the position reaches its due date', async () => {
+      const { ctx, matchId } = await settled();
+
+      const maturesAt = await ctx.book.read.maturityOf([matchId]);
+      const record = await ctx.book.read.getMatch([matchId]);
+      assert.equal(maturesAt, record.matchedAt + BigInt(record.tenorDays) * DAY);
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmMaturity([matchId, ctx.buyer.account.address]),
+        ctx.book,
+        'NotYetMatured',
+      );
+
+      // A day short is still short: the guard is the snapshotted due date, not "roughly then".
+      await networkHelpers.time.increase((TENOR_DAYS - 1) * 86_400);
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmMaturity([matchId, ctx.buyer.account.address]),
+        ctx.book,
+        'NotYetMatured',
+      );
+    });
+
+    /**
+     * The bug the role call it replaced actually had. `releaseDebtorExposure` could be called twice,
+     * and the second call decremented a DIFFERENT live position's exposure to the same debtor —
+     * understating concentration on a mandate that had done nothing wrong. A status transition makes
+     * that arithmetically impossible rather than a matter of asking politely once.
+     */
+    it('releases the debtor exposure exactly once', async () => {
+      const { ctx, id, matchId } = await settled();
+      const record = await ctx.book.read.getMatch([matchId]);
+
+      // A second live position against the same debtor, which a double release would eat into.
+      await listInvoice(ctx, INV_2, { debtorId: DEBTOR_A });
+      await ctx.book.write.matchInvoice([INV_2, id], { account: ctx.matcher.account });
+      const both = await ctx.book.read.debtorExposure([id, DEBTOR_A]);
+
+      await pastMaturity();
+      await ctx.book.write.confirmMaturity([matchId, ctx.buyer.account.address]);
+      assert.equal(await ctx.book.read.debtorExposure([id, DEBTOR_A]), both - record.price);
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmMaturity([matchId, ctx.buyer.account.address]),
+        ctx.book,
+        'MatchNotSettled',
+      );
+
+      // The second position's exposure is untouched by the first's maturity.
+      assert.equal(await ctx.book.read.debtorExposure([id, DEBTOR_A]), both - record.price);
+    });
+
+    it('refuses to mature a match that never settled', async () => {
+      const ctx = await deploy();
+      const id = await postAndFund(ctx, 100_000_000_000n);
+      await listInvoice(ctx, INV_1);
+      await ctx.book.write.matchInvoice([INV_1, id], { account: ctx.matcher.account });
+      const matchId = await ctx.book.read.matchOfInvoice([INV_1]);
+      await pastMaturity();
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmMaturity([matchId, ctx.buyer.account.address]),
+        ctx.book,
+        'MatchNotSettled',
+      );
+    });
+
+    /**
+     * Fails closed. An instrument that cannot answer produces a named refusal and no state change,
+     * because the alternative failure — routing a redemption on an assumption — is not recoverable.
+     */
+    it('refuses when the instrument cannot be asked who holds it', async () => {
+      const { ctx, matchId } = await settled();
+      await ctx.bond.write.setProbeBroken([true]);
+      await pastMaturity();
+
+      await viem.assertions.revertWithCustomError(
+        ctx.book.write.confirmMaturity([matchId, ctx.buyer.account.address]),
+        ctx.book,
+        'HolderProbeFailed',
+      );
+
+      assert.equal((await ctx.book.read.getMatch([matchId])).status, MatchStatus.Settled);
     });
   });
 
@@ -770,6 +1138,46 @@ describe('MandateBook', () => {
 
       const absent = await ctx.book.read.getMandate([0n]);
       assert.equal(absent.status, MandateStatus.Uninitialised);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Deployment wiring
+  // ---------------------------------------------------------------------------------------------
+
+  describe('deployment', () => {
+    it('records the escrow it reads settlement proofs from', async () => {
+      const ctx = await deploy();
+      assert.equal(
+        (await ctx.book.read.deliveryEscrow()).toLowerCase(),
+        ctx.escrow.address.toLowerCase(),
+      );
+    });
+
+    /**
+     * The one deployment parameter whose misconfiguration loses money silently. A cancellation
+     * window that does not outlast the escrow's longest lock would let a match be cancelled — the
+     * buyer's capital returned — while the delivery leg was still claimable, handing the buyer the
+     * bond for free. It used to be a check in a deploy script; now the constructor refuses.
+     */
+    it('refuses a settlement window that does not outlast the escrow', async () => {
+      const ctx = await deploy();
+      const maxLock = await ctx.escrow.read.MAX_LOCK_DURATION();
+
+      await viem.assertions.revertWithCustomError(
+        viem.deployContract('MandateBook', [
+          ctx.invoices.address,
+          ctx.gate.address,
+          ctx.escrow.address,
+          ctx.owner.account.address,
+          ctx.attester.account.address,
+          CASH_LEG_CHAIN_ID,
+          CASH_LEG_VAULT,
+          maxLock,
+        ]),
+        ctx.book,
+        'InvalidTerms',
+      );
     });
   });
 });

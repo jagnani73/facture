@@ -49,9 +49,23 @@ pragma solidity ^0.8.24;
  *        - Releases are hard-bound to the registered buyer. {executeRelease} ignores any recipient in
  *          the authorisation and always pays {buyerOf}. The attester cannot redirect a buyer's own
  *          capital to itself.
+ *        - Payouts are hard-bound to the registered seller, and leave only toward the payment
+ *          escrow. {executePayout} takes no beneficiary and no amount: it reads {payoutOf}, a
+ *          one-shot binding relayed at MATCH time, and opens a lock for that seller at that price out
+ *          of that mandate. Because the binding lands before delivery, the seller can check who the
+ *          venue will pay while they still hold the paper.
  *        - Every authorisation is single-use, keyed by an id the book derives from its own chain id,
  *          address and nonce, so a relayed authorisation cannot be replayed here or on another
- *          deployment.
+ *          deployment. A match, separately, admits at most one payout ever.
+ *
+ *      WHAT IS STILL TRUSTED, PRECISELY. Authorisation ids are public hashes of a nonce, so a
+ *      compromised attester can forge one; combined with a forged match registration it can drain a
+ *      mandate's balance toward an address of its choosing. No arrangement of this contract closes
+ *      that, because Arc cannot read Hedera and this contract therefore cannot authenticate the
+ *      book's word - only the messenger's. What the bindings above change is the SHAPE of the
+ *      residual: nothing can be redirected after the fact, every destination is committed before
+ *      delivery and publicly readable, and every outflow lands in a contract where it is visible and
+ *      refundable rather than in an EOA where it is gone.
  *
  *      TODO(v2): replace the single attester with either a threshold of independent attesters or a
  *      light-client proof of the Arc deposit log. The interface does not change; only who may call
@@ -65,6 +79,35 @@ pragma solidity ^0.8.24;
  */
 interface IMandateVault {
     // -------------------------------------------------------------------------------------------
+    // Types
+    // -------------------------------------------------------------------------------------------
+
+    /**
+     * @notice The payee, payer and price of one matched trade, bound here before it settles.
+     *
+     * @dev This is the payout counterpart of the buyer binding, and it exists for the same reason:
+     *      an outflow whose destination is an argument is an outflow the relay chooses. Registered
+     *      once, at match time, and never re-pointable - so by the time a payout is authorised there
+     *      is nothing left for the attester to decide except when to relay it.
+     *
+     *      Registering at MATCH time rather than at settlement time is the part that does the work.
+     *      The seller can read this binding on Arc before they part with the paper, which turns the
+     *      payee from something they have to trust into something they can check. A binding that
+     *      appeared only at payout would be checkable only after delivery, which is too late to be
+     *      worth anything.
+     */
+    struct Payout {
+        /// @dev The mandate whose escrowed capital pays. Fixes which balance an authorisation debits.
+        uint256 mandateId;
+        /// @dev The seller recorded on the book at match time. The only address a payout may name.
+        address seller;
+        /// @dev Whether the payout has been executed. One match, at most one payout, ever.
+        bool executed;
+        /// @dev The matched price. Fixes the amount an authorisation may move.
+        uint128 price;
+    }
+
+    // -------------------------------------------------------------------------------------------
     // Events
     // -------------------------------------------------------------------------------------------
 
@@ -73,6 +116,13 @@ interface IMandateVault {
      * @dev One-shot. The binding is what lets {executeRelease} refuse to pay anyone else.
      */
     event MandateRegistered(uint256 indexed mandateId, address indexed buyer);
+
+    /**
+     * @notice A matched trade's payee, payer and price were bound here.
+     * @dev One-shot, relayed from the book's `Matched`. Emitted so the seller can verify the payee
+     *      binding before delivering.
+     */
+    event MatchRegistered(bytes32 indexed matchId, uint256 indexed mandateId, address indexed seller, uint128 price);
 
     /**
      * @notice Capital was escrowed against a mandate. The attester relays this to the book.
@@ -93,12 +143,33 @@ interface IMandateVault {
     /// @notice Unallocated capital was returned to the buyer under an authorisation from the book.
     event ReleaseExecuted(bytes32 indexed authId, uint256 indexed mandateId, address indexed buyer, uint128 amount);
 
-    /// @notice A settled trade was paid out under an authorisation from the book.
+    /**
+     * @notice A settled trade's price left the vault into the payment escrow, locked for the seller.
+     * @dev The payout does not reach the seller here - it reaches the escrow, where it sits as a
+     *      claimable, refundable lock. `lockId` and `secretHash` pair this with the delivery leg on
+     *      the other chain.
+     */
     event PayoutExecuted(
         bytes32 indexed authId,
+        bytes32 indexed matchId,
         uint256 indexed mandateId,
-        address indexed beneficiary,
+        address seller,
+        bytes32 lockId,
+        bytes32 secretHash,
         uint128 amount
+    );
+
+    /**
+     * @notice An unclaimed payment lock timed out and its capital returned to the mandate.
+     * @dev Carries a fresh `depositRef` and is accompanied by a {Deposited} event, so the returning
+     *      capital re-enters the book through the same path any other deposit does.
+     */
+    event PayoutReclaimed(
+        bytes32 indexed matchId,
+        bytes32 indexed lockId,
+        uint256 indexed mandateId,
+        uint128 amount,
+        bytes32 depositRef
     );
 
     /// @notice The relaying attester was rotated. The recovery path for a stalled attester.
@@ -122,6 +193,18 @@ interface IMandateVault {
 
     /// @notice The mandate's cash leg was already opened; the buyer binding is immutable.
     error MandateAlreadyRegistered(uint256 mandateId, address buyer);
+
+    /// @notice The match has no payee binding here, so there is no address a payout could pay.
+    error MatchNotRegistered(bytes32 matchId);
+
+    /// @notice The match's payee binding was already set; like the buyer binding, it never moves.
+    error MatchAlreadyRegistered(bytes32 matchId, address seller);
+
+    /// @notice This match's payout has already left the vault. One match, at most one payout.
+    error PayoutAlreadyExecuted(bytes32 matchId);
+
+    /// @notice No payment lock was opened here under this id, so there is nothing to reclaim.
+    error PayoutLockUnknown(bytes32 lockId);
 
     /**
      * @notice This authorisation has already been executed.
@@ -157,6 +240,25 @@ interface IMandateVault {
      * @param buyer The mandate's owner on the book, and the only address a release may ever pay.
      */
     function registerMandate(uint256 mandateId, address buyer) external;
+
+    /**
+     * @notice Bind a matched trade's payee, payer and price, before it settles.
+     *
+     * @dev Attester only, relaying a `Matched` from the book. One-shot, exactly like
+     *      {registerMandate}: the payee binding is what {executePayout} consults instead of taking a
+     *      beneficiary argument, so it must not be re-pointable by the party that relays it.
+     *
+     *      The mandate must already be registered, which keeps a payout from being bound against a
+     *      cash leg that does not exist. `price` and `mandateId` are bound here too, not just the
+     *      seller: with all three fixed, a payout authorisation carries no discretion at all - it can
+     *      only move this amount, out of this mandate, toward this seller.
+     *
+     * @param matchId The book's match id.
+     * @param mandateId The mandate whose capital pays.
+     * @param seller The payee recorded on the book at match time.
+     * @param price The matched price, in settlement-currency units.
+     */
+    function registerMatch(bytes32 matchId, uint256 mandateId, address seller, uint128 price) external;
 
     /**
      * @notice Escrow settlement currency against a mandate.
@@ -198,27 +300,69 @@ interface IMandateVault {
     function executeRelease(bytes32 authId, uint256 mandateId, uint128 amount) external;
 
     /**
-     * @notice Pay out a settled trade, under an authorisation from the book.
+     * @notice Pay out a settled trade into the payment escrow, locked for the registered seller.
      *
      * @dev Attester only, relaying a `PayoutAuthorised` from the book.
      *
-     *      Unlike {executeRelease}, the beneficiary is a parameter, because the payee is a different
-     *      seller on every trade and this contract has no way to know who that is. That asymmetry is
-     *      the residual trust in the attester and it is stated rather than glossed: a compromised
-     *      attester could direct a settled payout to an address of its choosing, bounded by the
-     *      mandate's own balance.
+     *      THE BENEFICIARY IS NOT A PARAMETER, and that is the change this function exists to carry.
+     *      Capital leaves toward exactly one address - the immutable {DvpEscrow} on this chain - and
+     *      the lock it opens there names {payoutOf}'s registered seller, at that registration's
+     *      price, out of that registration's mandate. The attester supplies an authorisation id, a
+     *      lock id and a hashlock; it supplies no payee, no amount and no mandate. Every value that
+     *      decides where money goes is read from a binding made at match time, which the seller could
+     *      check before delivering.
      *
-     *      TODO(dvp-wiring): bind `beneficiary` to the Arc-side {DvpEscrow} rather than paying the
-     *      seller directly. The seller's claim then depends on a revealed preimage instead of on
-     *      attester honesty, which removes the asymmetry above entirely. The escrow already exists;
-     *      what is missing is the book emitting the lock parameters alongside the authorisation.
+     *      WHY THROUGH AN ESCROW AND NOT STRAIGHT TO THE SELLER. Three things follow from the hop
+     *      that a direct transfer cannot give:
+     *
+     *        - A payout is no longer an irreversible transfer. It is a lock with a timeout, so a
+     *          payout the seller cannot take - wrong hashlock relayed, seller's key lost - returns to
+     *          the mandate through {reclaimPayout} instead of being burned.
+     *        - Both legs of one trade become the same kind of object under the same `tradeRef` and
+     *          the same hash, on the two chains, which is what a proof view needs to show a trade
+     *          rather than two unrelated transfers.
+     *        - The venue's cash leg stops being a special case. The delivery leg was already a lock;
+     *          now the payment leg is one, and the ordering rule in {IDvpEscrow} applies to both.
+     *
+     *      WHAT THE HASHLOCK DOES AND DOES NOT DO HERE, stated rather than implied. By the time the
+     *      book authorises a payout it has already proven that the delivery lock was CLAIMED, which
+     *      means the preimage is public. The hash carried here therefore does not keep anyone out -
+     *      the escrow's beneficiary check does that - and it is copied across for pairing and for
+     *      the ordering it will need if the legs are ever reversed. The lock's protection against a
+     *      misdirected payout is the beneficiary binding above, not the secret.
      *
      * @param authId The book's authorisation id. Single-use.
-     * @param mandateId The mandate whose capital is paid out.
-     * @param beneficiary The payee.
-     * @param amount Units to pay.
+     * @param matchId The settled match. Selects the payee, the mandate and the amount.
+     * @param lockId Identifier for the payment lock. Free-form: lock ids are caller-supplied in
+     *        {IDvpEscrow}, so if one is squatted the relay simply picks another.
+     * @param secretHash The delivery leg's hashlock, carried across so the two legs pair.
      */
-    function executePayout(bytes32 authId, uint256 mandateId, address beneficiary, uint128 amount) external;
+    function executePayout(bytes32 authId, bytes32 matchId, bytes32 lockId, bytes32 secretHash) external;
+
+    /**
+     * @notice Return an expired, unclaimed payment lock's capital to the mandate that funded it.
+     *
+     * @dev Permissionless, because it can only move capital in one direction: out of the escrow and
+     *      back into the mandate it left. There is no recipient to choose and nothing to gain by
+     *      calling it, which is why it needs no role - and it must need none, since the party who
+     *      most wants it called is the buyer whose capital is stuck.
+     *
+     *      The escrow enforces the conditions: it refunds only to the depositor, which is this
+     *      contract, and only at or after the lock's timeout, and never after a claim. So this cannot
+     *      race a seller who is claiming, and cannot be used to recall a payout that succeeded.
+     *
+     *      Emits {Deposited} as well as {PayoutReclaimed}, with a fresh reference. Returning capital
+     *      re-enters the book through the ordinary funding path rather than through a special one:
+     *      the attester credits it exactly as it credits any deposit, and until it does the book
+     *      under-counts, which is the safe direction.
+     *
+     *      What this does NOT do is re-open the trade. The book has already consumed the allocation
+     *      and recorded the match as settled; a reclaim means the seller was not paid, and putting
+     *      that right is an operator matter, not something this contract can decide.
+     *
+     * @param lockId The payment lock to refund. Must have been opened by this contract.
+     */
+    function reclaimPayout(bytes32 lockId) external;
 
     // -------------------------------------------------------------------------------------------
     // Views
@@ -229,6 +373,22 @@ interface IMandateVault {
 
     /// @notice The address a release for this mandate will always pay, or zero if unregistered.
     function buyerOf(uint256 mandateId) external view returns (address);
+
+    /**
+     * @notice The payee, payer and price bound to a match, or a zero-filled record if unregistered.
+     * @dev What a seller reads before delivering, to see that the venue will pay them and not
+     *      somebody else.
+     */
+    function payoutOf(bytes32 matchId) external view returns (Payout memory);
+
+    /// @notice The match a payment lock opened here belongs to, or zero once reclaimed or unknown.
+    function payoutLockOf(bytes32 lockId) external view returns (bytes32 matchId);
+
+    /// @notice The escrow every payout leaves toward. Immutable, and the only outward address.
+    function paymentEscrow() external view returns (address);
+
+    /// @notice How long a payment lock stays claimable before it may be reclaimed to the mandate.
+    function PAYMENT_LOCK_DURATION() external view returns (uint64);
 
     /// @notice Whether an authorisation has already been executed.
     function isConsumed(bytes32 authId) external view returns (bool);

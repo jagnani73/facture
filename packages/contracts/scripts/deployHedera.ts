@@ -106,6 +106,7 @@ async function main(): Promise<void> {
   console.log(`AtsComplianceGate   ${complianceGate.address}`);
 
   // --- 3. DvpEscrow (delivery leg) ---------------------------------------------------------------
+  // Before the book, which records it as an immutable and reads every settlement proof out of it.
   // The payment-leg twin is deployed on Arc by deployArc.ts. They never communicate.
   const dvpEscrow = await viem.deployContract('DvpEscrow', [], { gas: GAS.deploySmall });
   console.log(`DvpEscrow           ${dvpEscrow.address}`);
@@ -113,7 +114,8 @@ async function main(): Promise<void> {
   // --- 4. MandateBook ----------------------------------------------------------------------------
   // `settlementWindow` MUST exceed DvpEscrow's MAX_LOCK_DURATION. If it did not, the book could
   // release an allocation while the delivery leg was still claimable — paying nobody and handing
-  // the buyer the bond for free.
+  // the buyer the bond for free. The constructor enforces this too; the check is repeated here only
+  // to fail with a message that names the environment variable rather than with `InvalidTerms`.
   const maxLockDuration = await dvpEscrow.read.MAX_LOCK_DURATION();
   if (settlementWindow <= BigInt(maxLockDuration)) {
     throw new Error(
@@ -127,6 +129,7 @@ async function main(): Promise<void> {
     [
       invoiceRegistry,
       complianceGate.address,
+      dvpEscrow.address,
       owner,
       attester,
       cashLegChainId,
@@ -144,12 +147,19 @@ async function main(): Promise<void> {
     console.log('\nDeployer is not the owner; skipping wiring. Run these from the owner key:');
     console.log(`  uniquenessRegistry.setIssuer(<issuer>, true)`);
     console.log(`  mandateBook.setMatcher(<matcher>, true)`);
-    console.log(`  mandateBook.setSettler(${dvpEscrow.address}, true)`);
+    console.log(`  mandateBook.setSettler(<keeper>, true)   # early cancel only`);
     return;
   }
 
-  // The escrow is the settlement authority: it is the contract that learns a preimage was revealed.
-  await mandateBook.write.setSettler([dvpEscrow.address, true], { gas: GAS.adminCall });
+  // NOTE: the escrow is NOT granted the settler role, and does not need one. Settlement is proven
+  // rather than asserted — `confirmSettlement` reads a claimed lock out of the escrow and takes no
+  // role at all — so the escrow is a contract the book reads, never a caller. The settler role that
+  // remains is narrower than its name: it can only cancel an open match before its window elapses.
+  const settler = optionalAddress('FACTURE_SETTLER');
+  if (settler !== undefined) {
+    await mandateBook.write.setSettler([settler, true], { gas: GAS.adminCall });
+    console.log(`settler granted     ${settler}`);
+  }
 
   const issuer = optionalAddress('FACTURE_ISSUER');
   if (issuer !== undefined) {

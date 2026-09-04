@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Rating, MandateStatus, MatchStatus} from "../libraries/FactureTypes.sol";
+import {IDvpEscrow} from "./IDvpEscrow.sol";
 
 /**
  * @title IMandateBook
@@ -78,6 +79,14 @@ import {Rating, MandateStatus, MatchStatus} from "../libraries/FactureTypes.sol"
  *
  *      THIS IS NOT ATOMIC and is not described as such. It is a two-phase commit with a trusted
  *      relay, whose failure mode is a liveness stall recovered by attester rotation, not a loss.
+ *
+ *      SETTLEMENT IS PROVEN, NOT ASSERTED. The two paths that end a position - {confirmSettlement}
+ *      and {confirmMaturity} - take no role at all. Each reads its own proof: a claimed delivery
+ *      lock out of {IDvpEscrow} on this chain, and the instrument's own answer to who holds it now.
+ *      Both are therefore permissionless, which is not a convenience but the substance of the claim:
+ *      a buyer who has taken the paper cannot decline to pay for it, and a holder cannot be denied
+ *      redemption by a keeper that has gone dark. The one role left on this side of the lifecycle is
+ *      the early cancel in {cancelMatch}, and it expires into a permissionless one.
  */
 interface IMandateBook {
     // -------------------------------------------------------------------------------------------
@@ -163,6 +172,18 @@ interface IMandateBook {
          *      dependency rather than assuming the registry is well-behaved.
          */
         bytes32 debtorId;
+        /**
+         * @dev Snapshot of the ATS instrument this trade delivers.
+         *
+         *      Same argument as `debtorId`, applied to settlement rather than to concentration.
+         *      {confirmSettlement} proves delivery by reading a lock out of {IDvpEscrow} and
+         *      checking that the escrowed asset is this instrument; {confirmMaturity} asks this
+         *      instrument who holds it now. Both of those are authorisation decisions, so neither
+         *      may depend on a registry record that can be rewritten between match and settlement.
+         *      Costs one slot, and buys the property that the delivery proof is measured against
+         *      the instrument the trade was struck on rather than the one the registry names later.
+         */
+        address instrument;
     }
 
     // -------------------------------------------------------------------------------------------
@@ -222,20 +243,56 @@ interface IMandateBook {
 
     /**
      * @notice The book authorised a settled trade to be paid out of the vault.
+     *
      * @dev Relayed by the attester to {IMandateVault-executePayout}. The allocation is consumed here
      *      at the moment of authorisation, not when the tokens move on Arc.
+     *
+     *      `deliveryLockId` and `secretHash` are the delivery leg's own parameters, copied out of
+     *      the {IDvpEscrow} lock this authorisation was proven against. They travel with the
+     *      authorisation because the cash leg is opened as the mirror of the delivery leg: the vault
+     *      escrows the price under the SAME hash and, by convention, the same lock id, so an
+     *      operator or a proof view can pair the two legs of one trade across the two chains without
+     *      a lookup table. The vault does not have to trust either value - see
+     *      {IMandateVault-executePayout} for what it derives locally instead.
+     *
      * @param authId Single-use authorisation id.
      * @param matchId The settled match.
      * @param mandateId The mandate whose capital pays.
      * @param seller The payee recorded at match time.
      * @param amount Units authorised to leave.
+     * @param deliveryLockId The delivery leg's lock, on this chain's escrow.
+     * @param secretHash The hashlock both legs of this trade share.
      */
     event PayoutAuthorised(
         bytes32 indexed authId,
         bytes32 indexed matchId,
         uint256 indexed mandateId,
         address seller,
-        uint128 amount
+        uint128 amount,
+        bytes32 deliveryLockId,
+        bytes32 secretHash
+    );
+
+    /**
+     * @notice A settled position reached maturity, and redemption routes to the holder of record.
+     *
+     * @dev `holder` is read from the instrument at the moment of the call, never from the match. A
+     *      position that changed hands on the secondary market pays whoever holds the paper NOW,
+     *      which is what makes the paper genuinely transferable: a second buyer with no way to be
+     *      paid is not a buyer.
+     *
+     * @param matchId The settled match that matured.
+     * @param mandateId The mandate that originally bought it, whose debtor exposure now ends.
+     * @param instrument The ATS bond, and the source of truth for `holder`.
+     * @param holder Who held the whole instrument when maturity was confirmed.
+     * @param faceValue What the instrument redeems for.
+     */
+    event MaturityConfirmed(
+        bytes32 indexed matchId,
+        uint256 indexed mandateId,
+        address indexed instrument,
+        address holder,
+        uint128 faceValue
     );
 
     /// @notice A buyer paused, resumed or closed their mandate. Existing allocations are unaffected.
@@ -353,7 +410,7 @@ interface IMandateBook {
      */
     error DepositAlreadyCredited(bytes32 depositRef);
 
-    /// @notice The caller is not permitted to confirm or cancel settlement. See {setSettler}.
+    /// @notice The caller is not permitted to cancel settlement early. See {setSettler}.
     error NotSettler(address caller);
 
     /// @notice No match exists under this id.
@@ -361,6 +418,50 @@ interface IMandateBook {
 
     /// @notice The match is not `Open`, so it can be neither settled nor cancelled again.
     error MatchNotOpen(bytes32 matchId, MatchStatus status);
+
+    /// @notice The match has not settled, so there is no position to mature.
+    error MatchNotSettled(bytes32 matchId, MatchStatus status);
+
+    // --- delivery proof -----------------------------------------------------------------------
+    //
+    // The five refusals below are what replaced "an authorised keeper says delivery happened". Each
+    // names the specific way the presented lock fails to be a proof of THIS trade's delivery.
+
+    /**
+     * @notice The presented delivery lock has not been claimed, so no preimage was ever revealed.
+     * @dev The load-bearing one. A `Locked` lock means the paper is escrowed but the buyer has not
+     *      taken it; a `Refunded` one means the trade failed and the seller has it back. Neither
+     *      releases the buyer's capital.
+     */
+    error DeliveryNotProven(bytes32 matchId, bytes32 lockId, IDvpEscrow.LockStatus status);
+
+    /// @notice The lock is a real lock, but it belongs to a different trade or to the wrong leg.
+    error DeliveryLockMismatch(bytes32 matchId, bytes32 lockId, bytes32 tradeRef, IDvpEscrow.LegKind kind);
+
+    /// @notice The paper in the lock was escrowed by someone other than this trade's seller.
+    error DeliveryDepositorMismatch(bytes32 matchId, address expectedSeller, address actualDepositor);
+
+    /// @notice The lock delivers to someone other than this trade's buyer.
+    error DeliveryBeneficiaryMismatch(bytes32 matchId, address expectedBuyer, address actualBeneficiary);
+
+    /// @notice The lock escrows an asset that is not this trade's instrument.
+    error DeliveryAssetMismatch(bytes32 matchId, address expectedInstrument, address actualAsset);
+
+    // --- maturity -----------------------------------------------------------------------------
+
+    /// @notice The position has not reached its due date yet. See {maturityOf}.
+    error NotYetMatured(bytes32 matchId, uint64 maturesAt);
+
+    /**
+     * @notice The address offered as the holder does not hold this instrument.
+     * @dev The instrument itself is asked, so a caller cannot nominate a payee. Fails closed: a
+     *      partial holding is not a holder either, because an all-or-nothing position is the only
+     *      shape this venue issues.
+     */
+    error NotInstrumentHolder(bytes32 matchId, address instrument, address claimedHolder);
+
+    /// @notice The instrument could not be asked who holds it, so maturity cannot be routed.
+    error HolderProbeFailed(bytes32 matchId, address instrument);
 
     /// @notice The invoice already has an open or settled allocation. One receivable sells once.
     error InvoiceAlreadyAllocated(bytes32 invoiceId, bytes32 existingMatchId);
@@ -499,19 +600,73 @@ interface IMandateBook {
     // -------------------------------------------------------------------------------------------
 
     /**
-     * @notice Release an allocation to the seller once the delivery leg is proven.
-     * @dev Called by the settlement authority - in practice {DvpEscrow}, or the venue keeper acting
-     *      on a revealed preimage. Consumes the allocation: `allocated` falls and `totalCommitted`
-     *      falls by the same amount, because the capital is now spoken for on Arc.
+     * @notice Release an allocation to the seller against an on-chain proof that delivery happened.
      *
-     *      Emits {PayoutAuthorised}. No tokens move here; the attester relays `authId` to
-     *      {IMandateVault-executePayout}, which pays the seller recorded at match time. As with a
-     *      release, the book gives up its claim first and the vault opens second.
+     * @dev PERMISSIONLESS, AND THAT IS THE POINT. There is no settler role on this path and no
+     *      keeper whose word is taken for it. The caller presents a lock id in the venue's
+     *      {IDvpEscrow} on this chain, and the book reads that lock and checks it is a proof of THIS
+     *      trade's delivery: claimed (so a preimage was revealed), carrying this `matchId` as its
+     *      trade reference, on the delivery leg, escrowed by this match's seller, delivering to this
+     *      match's buyer, and holding this match's instrument. Anything less is one of the
+     *      `Delivery*` refusals.
+     *
+     *      Proving delivery rather than asserting it is what makes settlement SAFE TO COMPEL. Once
+     *      the buyer has claimed the paper, the seller - or anyone at all - can force the payout
+     *      authorisation, so a buyer cannot take delivery and then decline to pay, and a stalled
+     *      venue keeper cannot hold a completed trade hostage.
+     *
+     *      WHY THE LOCK ID IS AN ARGUMENT rather than derived from `matchId`. Lock ids in
+     *      {IDvpEscrow} are caller-supplied and opening a lock is permissionless, so any id this
+     *      contract could derive could also be squatted: a griefer opens a junk lock at the derived
+     *      id and the real seller can never open the delivery leg for that match. Verifying the
+     *      CONTENTS of a presented lock removes the squat entirely - a junk lock simply fails the
+     *      checks, and a lock that passes them is delivery whatever id it was opened under.
+     *
+     *      What this cannot check is quantity. The instrument's unit scale is the issuer's, not the
+     *      venue's, so the book does not know how many units a face value should be. The buyer's own
+     *      claim transaction is the consent that settles that question: nobody else can put a lock
+     *      into `Claimed`.
+     *
+     *      Consumes the allocation - `allocated` and `totalCommitted` both fall - and emits
+     *      {PayoutAuthorised} carrying the delivery leg's lock id and hashlock. No tokens move here;
+     *      the attester relays `authId` to {IMandateVault-executePayout}. As with a release, the
+     *      book gives up its claim first and the vault opens second.
      *
      * @param matchId The allocation to settle.
+     * @param deliveryLockId The delivery leg's lock in this chain's escrow. Verified, not trusted.
      * @return authId Single-use payout authorisation for the vault.
      */
-    function confirmSettlement(bytes32 matchId) external returns (bytes32 authId);
+    function confirmSettlement(bytes32 matchId, bytes32 deliveryLockId) external returns (bytes32 authId);
+
+    /**
+     * @notice Route a matured position's redemption to whoever holds the instrument now.
+     *
+     * @dev PAYS THE CURRENT HOLDER, NEVER THE ORIGINAL BUYER, and that distinction is the whole
+     *      reason this function exists. Paper that pays its first buyer forever cannot legitimately
+     *      change hands, because a second buyer would have no way to be paid - so the secondary
+     *      market the venue claims to run would not be one. `holder` is therefore not accepted as an
+     *      assertion: the instrument is asked, and the answer has to be that `holder` holds the
+     *      whole issue.
+     *
+     *      Permissionless for the same reason {confirmSettlement} is. Every input is proven - the
+     *      due date against the match's own snapshot, the holder against the instrument - so there
+     *      is nothing left for a role to add, and a keeper who has gone dark cannot strand a
+     *      position at maturity.
+     *
+     *      Also ends the buying mandate's exposure to the debtor, exactly once, because the position
+     *      moves to `Matured` and only a `Settled` position may enter it. Both outcomes end the
+     *      exposure: a default ends it too, and marks the debtor's rating, which happens off this
+     *      contract in the rating engine.
+     *
+     *      Maturity is measured from the match's own `matchedAt + tenorDays`, never from a fresh
+     *      registry read. Tenor was rounded UP at match time, so this is at or after the true due
+     *      date - late by less than a day at worst, and never early. A registry read would be
+     *      neither: an edited due date could bring maturity forward on a live position.
+     *
+     * @param matchId The settled position that matured.
+     * @param holder The address claimed to hold the instrument. Checked against the instrument.
+     */
+    function confirmMaturity(bytes32 matchId, address holder) external;
 
     /**
      * @notice Return an allocation to the mandate after failed or timed-out settlement.
@@ -631,4 +786,19 @@ interface IMandateBook {
 
     /// @notice The pre-trade eligibility gate consulted before every match.
     function complianceGate() external view returns (address);
+
+    /**
+     * @notice The escrow on THIS chain that settlement proofs are read out of.
+     * @dev Immutable, and the delivery leg's twin of the Arc-side escrow the vault pays into. It is
+     *      never called: the book only ever reads locks from it, so the escrow stays a
+     *      venue-agnostic contract that knows nothing about mandates.
+     */
+    function deliveryEscrow() external view returns (address);
+
+    /**
+     * @notice When a match's position matures, unix seconds.
+     * @dev `matchedAt + tenorDays`, using the tenor snapshotted at match time. Zero for an unknown
+     *      match. Because tenor was rounded up, this is at or just after the real due date.
+     */
+    function maturityOf(bytes32 matchId) external view returns (uint64);
 }

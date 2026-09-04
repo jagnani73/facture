@@ -89,6 +89,48 @@ Two consequences of the discount basis, stated rather than discovered later: the
 annualised return is a basis point or so _above_ the quoted rate, and rounding favours the seller by
 at most one unit.
 
+#### Settling and maturing are proven, not asserted
+
+Neither function that ends a position takes a role, and both are permissionless as a result.
+
+`confirmSettlement(matchId, deliveryLockId)` reads a lock out of the venue's `DvpEscrow` **on
+Hedera** and refuses unless that lock is a proof of this trade's delivery: `Claimed`, so a preimage
+was revealed; carrying this `matchId` as its trade reference; on the delivery leg; escrowed by this
+match's seller; delivering to this match's buyer; and holding the instrument snapshotted at match
+time. Each failure has its own error — `DeliveryNotProven`, `DeliveryLockMismatch`,
+`DeliveryDepositorMismatch`, `DeliveryBeneficiaryMismatch`, `DeliveryAssetMismatch`.
+
+The point of proving rather than asserting is that it makes settlement **safe to compel**. Once the
+buyer has claimed the paper, anyone — the seller especially — can force the payout authorisation, so
+a buyer cannot take delivery and then decline to pay, and a keeper that has gone dark cannot hold a
+completed trade hostage.
+
+The lock id is presented rather than derived, and that is deliberate. Lock ids in `DvpEscrow` are
+caller-supplied and opening a lock is permissionless, so **any** id the book could derive could also
+be squatted — a junk lock at the derived id, and the real seller can never open the delivery leg for
+that match. Verifying the _contents_ of a presented lock removes the squat: a junk lock fails the
+checks, and a lock that passes them is delivery whatever id it was opened under.
+
+What the proof does not cover is quantity. The instrument's unit scale belongs to the issuer, so the
+book does not know how many units a face value should be. The buyer's own claim transaction is the
+consent that settles that: nobody but the beneficiary can put a lock into `Claimed`.
+
+`confirmMaturity(matchId, holder)` routes redemption to **whoever holds the paper now**, and asks the
+instrument rather than believing the caller — `balanceOf(holder) == totalSupply()`, both read through
+raw `staticcall`s in the same fail-closed style as the compliance gate. Sole holder, not merely a
+holder, so a dusted unit cannot make an address the payee. Maturity is measured from the match's own
+`matchedAt + tenorDays`, never from a fresh registry read, so an edited due date cannot bring a live
+position forward.
+
+This is the leg that makes the paper transferable at all: paper that pays its first buyer forever
+cannot legitimately change hands, because a second buyer would have no way to be paid. It also ends
+the buying mandate's exposure to the debtor, exactly once, because `Settled → Matured` is a state
+transition rather than a repeatable call.
+
+The one role left in the lifecycle is `setSettler`, and it is much narrower than its name: a settler
+can only cancel an open match _early_, returning an allocation to the mandate it came from. It cannot
+settle, and it cannot move capital to anyone.
+
 ### `AtsComplianceGate`
 
 `canReceive(instrument, buyer) → (ok, reasonCode)`. Never reverts, always fails closed.
@@ -110,12 +152,14 @@ survivable: the tests fail loudly and matching refuses, rather than every match 
 ### `MandateVault`
 
 Deploys on Arc. Holds every mandate's USDC, tracked per mandate, and has exactly **two** ways out:
-`executeRelease` (back to the buyer) and `executePayout` (a settled trade). Both require an
-authorisation minted by the book on Hedera and relayed by the attester. There is no withdraw
-function, no timeout escape and no owner sweep, and adding one would destroy the property the split
-depends on.
+`executeRelease` (back to the buyer) and `executePayout` (a settled trade, into the payment escrow).
+Both require an authorisation minted by the book on Hedera and relayed by the attester. There is no
+withdraw function, no timeout escape and no owner sweep, and adding one would destroy the property
+the split depends on. `reclaimPayout` is not a third way out: it moves capital _inward_, out of an
+unclaimed payment lock and back into the mandate that funded it, which is why it is permissionless
+while the two exits are not.
 
-Three bounds are enforced here rather than assumed, in decreasing order of strength:
+Four bounds are enforced here rather than assumed, in decreasing order of strength:
 
 1. **Per-mandate accounting.** Every outflow is checked against that mandate's own balance, so no
    authorisation can reach another mandate's capital. Arithmetic, not policy.
@@ -124,12 +168,30 @@ Three bounds are enforced here rather than assumed, in decreasing order of stren
    attester relaying a forged release can only return a buyer's money to that buyer.
 3. **Every authorisation is single-use**, keyed by an id the book derives from its own chain id,
    address and nonce — so it cannot be replayed here, against a second vault, or against a
-   redeployment.
+   redeployment. A match, separately, admits at most one payout ever.
+4. **Payouts are bound to the registered seller, and leave only toward the escrow.**
+   `executePayout(authId, matchId, lockId, secretHash)` takes no beneficiary and no amount: it reads
+   `payoutOf(matchId)` — a one-shot binding of payee, mandate and price relayed at **match** time —
+   and opens a `DvpEscrow` lock for that seller, at that price, out of that mandate.
 
-What remains trusted: `executePayout` takes a beneficiary, because the seller differs per trade.
-That is the residual attester trust, bounded by (1). The fix is noted as a TODO — bind the
-beneficiary to the Arc-side `DvpEscrow` so the seller's claim depends on a revealed preimage rather
-than on attester honesty.
+Binding at match time rather than at settlement time is the part that does the work: the seller can
+read `payoutOf` on Arc **before** they part with the paper. A binding they could only check after
+delivering would not be worth checking.
+
+The escrow hop buys three things a direct transfer cannot. A payout stops being irreversible — one
+the seller cannot take comes back to the mandate at timeout instead of being burned. Both legs of a
+trade become the same kind of object, under the same `tradeRef` and hash, which is what a proof view
+needs to show a trade rather than two unrelated transfers. And the cash leg stops being a special
+case: the delivery leg was already a lock, now the payment leg is one too.
+
+Stated plainly, because the interface used to promise more: **this does not remove attester trust.**
+Authorisation ids are public hashes of a nonce, so a compromised relay can forge one, and with a
+forged match registration it can still drain a mandate's balance. Nothing arranged inside this
+contract closes that, because Arc cannot read Hedera and the vault can therefore only authenticate
+the messenger, never the book. What the bindings change is the shape of the residual: nothing can be
+redirected after the fact, every destination is committed before delivery and publicly readable, and
+every outflow lands in a contract where it is visible and refundable rather than in an EOA where it
+is gone.
 
 ### `DvpEscrow`
 
@@ -205,6 +267,26 @@ MandateVault.executeRelease() ◄─────────── ReleaseAuthor
   └─ pays buyerOf(mandateId)                                            SECOND
 ```
 
+The settlement path is the same shape, with the payee bound one step earlier so the seller can check
+it before delivering:
+
+```
+Arc                                    Hedera
+───                                    ──────
+                                       MandateBook.matchInvoice()               [matcher]
+MandateVault.registerMatch() ◄──────────── Matched(matchId, seller, price)      [attester]
+  └─ binds payee, mandate, price
+     (the seller reads this BEFORE delivering)
+
+                                       DvpEscrow.openLock() / .claim()          [seller / buyer]
+                                       MandateBook.confirmSettlement(lockId)    [anyone]
+                                          └─ verifies the claimed delivery lock
+                                          └─ allocated -= , committed -=  FIRST
+MandateVault.executePayout() ◄──────────── PayoutAuthorised(authId, secretHash) [attester]
+  └─ opens a lock for payoutOf(matchId).seller                           SECOND
+     └─ seller claims, or it refunds to the mandate
+```
+
 ### Staleness, and why both windows fail safe
 
 There are exactly two lags, and neither can make the book believe it has more money than it has:
@@ -223,7 +305,7 @@ and both windows fail toward refusing a match rather than toward promising money
 
 Attested-above-real is not reachable by lag. It is reachable only by an attester crediting a deposit
 that never happened, after which the book can match a trade the cash leg cannot pay, and the failure
-surfaces at settlement. **v1 runs a single trusted attester.** The three bounds under `MandateVault`
+surfaces at settlement. **v1 runs a single trusted attester.** The four bounds under `MandateVault`
 limit the damage; the v2 path is an attester threshold or a light-client proof of the Arc deposit
 log, and neither changes any interface here.
 
@@ -236,7 +318,7 @@ the exact property the design provides.
 ## Building and testing
 
 ```bash
-pnpm --filter @facture/contracts build     # hardhat build (default profile, unoptimised)
+pnpm --filter @facture/contracts build     # hardhat build (default profile)
 pnpm --filter @facture/contracts test      # hardhat test (node:test + viem)
 pnpm --filter @facture/contracts typecheck
 ```
@@ -244,6 +326,15 @@ pnpm --filter @facture/contracts typecheck
 Hardhat 3, ESM, TypeScript config. Solidity 0.8.28 against `evmVersion: cancun`, which Hedera runs.
 Every pragma is `^0.8.24` so the compiler can be pinned back to 0.8.24 without a source change if a
 relay release ever rejects a Cancun-only opcode.
+
+**The default profile is optimised**, with settings identical to `production`. It used to be
+unoptimised on the usual "fast test loop" reasoning, and that stopped being tenable: `MandateBook`
+compiles to about 27KB unoptimised against 15KB optimised, and 24,576 is a hard ceiling on both the
+simulated test chain and Hedera. An unoptimised profile therefore either cannot deploy the venue's
+own book, or has to be told to ignore the ceiling — and ignoring it is worse, because the suite would
+then prove a contract works while saying nothing about whether it can be deployed. The cost that was
+weighed against turned out to be nothing: a clean build of all 18 files takes about two seconds
+either way.
 
 Tests use the Node built-in runner (`node:test`) — that is what `hardhat-toolbox-viem` ships, not
 Mocha.
@@ -266,17 +357,26 @@ Two chains, and **the order matters** — the book records the vault's chain id 
 immutables, so the vault has to exist first.
 
 ```bash
-pnpm --filter @facture/contracts deploy:arc      # MandateVault + DvpEscrow (payment leg)
+pnpm --filter @facture/contracts deploy:arc      # DvpEscrow (payment leg), then MandateVault
 # copy the printed vault address into FACTURE_MANDATE_VAULT
-pnpm --filter @facture/contracts deploy:hedera   # registry, gate, book, DvpEscrow (delivery leg)
+pnpm --filter @facture/contracts deploy:hedera   # registry, gate, DvpEscrow (delivery leg), book
 ```
 
-`--build-profile production` is not optional and is baked into both scripts; the default profile is
-unoptimised.
+The order **inside** each script matters for the same reason. On Arc the escrow deploys before the
+vault, which takes it as an immutable and pays every settled trade into it; on Hedera the escrow
+deploys before the book, which takes it as an immutable and reads every settlement proof out of it.
+The whole chain runs one way and never doubles back: escrow → vault → book, with a second escrow
+beside the book.
 
-Afterwards the attester relay has to be pointed at both: it watches `MandateVault.Deposited` on Arc
-and calls `MandateBook.creditFunding`, then watches `ReleaseAuthorised` / `PayoutAuthorised` on
-Hedera and calls the vault's `execute*`.
+`--build-profile production` is not optional and is baked into both scripts.
+
+Afterwards the attester relay has to be pointed at both. It watches `MandateVault.Deposited` on Arc
+and calls `MandateBook.creditFunding`, and it watches `MandatePosted` / `Matched` /
+`ReleaseAuthorised` / `PayoutAuthorised` on Hedera and calls the vault's `registerMandate`,
+`registerMatch` and `execute*`. The two `register*` calls are not optional and are not bookkeeping:
+they are the bindings that decide who the vault will pay, and `registerMatch` in particular has to
+land **before** the seller delivers, because being able to check it beforehand is the whole point of
+it.
 
 Copy `.env.example` to `.env` first. **Hedera keys must be ECDSA** — ED25519 accounts hold HBAR and
 HTS tokens fine but cannot sign EVM transactions at all, and the failure surfaces late as
@@ -310,17 +410,20 @@ there, so `deployArc.ts` lets estimation do its job.
 Signatures, events, errors and storage layout are all deliberate and complete. The bodies left as
 `TODO` are the ones that depend on packages outside this one:
 
-- `MandateBook.confirmSettlement` trusts an authorised settler to have verified the delivery leg.
-  It should be bound to `DvpEscrow`, so the proof of delivery is a revealed preimage rather than a
-  keeper's assertion. The _accounting_ is not deferred — that is the part that protects capital.
-- `MandateVault.executePayout` takes an arbitrary beneficiary. Binding it to the Arc-side
-  `DvpEscrow` would remove the last piece of attester trust; what is missing is the book emitting
-  the lock parameters alongside the payout authorisation.
 - The attester itself is a single trusted relay, and lives outside this package. The v2 replacement
   (threshold attestation, or a light-client proof of the Arc deposit log) needs no interface change
-  here.
-- `MandateBook.releaseDebtorExposure` is a role call. It should be driven by the instrument's own
-  redemption at maturity, which on Hedera arrives via a one-shot Scheduled Transaction.
+  here. Note that binding the payout to a registered seller did **not** remove this: see the
+  `MandateVault` section for exactly what it did and did not close.
+- Early cancellation is still a role call. `setSettler` grants the right to cancel an open match
+  before its window elapses, including one whose delivery leg has already been claimed — which would
+  hand the buyer the bond for nothing. What bounds it is that settlement is permissionless the
+  instant the buyer claims, so a settler wanting to strand a delivered trade has to win a race
+  against the party being paid. Closing it outright needs a proof that no delivery lock exists, and a
+  negative like that cannot be proven against caller-supplied lock ids.
+- A reclaimed payout does not re-open its trade. `MandateVault.reclaimPayout` returns the capital to
+  the mandate and the book credits it back through the ordinary funding path, but the match stays
+  `Settled` and the book cannot mint a second payout authorisation for it. Putting a stranded
+  settlement right is an operator matter in v1.
 - Partial position sales. Storage is shaped so this does not need a migration — a `Match` already
   snapshots `faceValue` and `price` separately — but the instrument-side split is an ATS partition
   concern and out of scope here.
