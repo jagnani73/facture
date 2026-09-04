@@ -24,3 +24,6 @@ forge-cache/
 .DS_Store
 .turbo/
 .vercel/
+
+# mcp config carries a connection string
+.mcp.json
