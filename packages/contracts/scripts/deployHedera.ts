@@ -50,8 +50,18 @@ const GAS = {
    * Hedera bills whether it is used or not.
    */
   deploySmall: 1_500_000n,
-  /** MandateBook: six immutables, several mappings, the largest of the venue's own contracts. */
-  deployBook: 3_000_000n,
+  /**
+   * MandateBook: six immutables, several mappings, the largest of the venue's own contracts.
+   *
+   * Sized off the **code deposit**, which dominates and is easy to forget: EVM charges 200
+   * gas per byte of deployed bytecode, and MandateBook is 15,052 bytes — 3,010,400 gas
+   * before the constructor executes a single opcode. A 3,000,000 limit therefore could not
+   * deploy it under any circumstances, and failed on Hedera with INSUFFICIENT_GAS having
+   * burned exactly its limit. 5,000,000 covers the deposit plus constructor with ~40%
+   * headroom, and an unused limit is refunded on Hedera anyway — though note the *balance*
+   * must still cover `gasLimit x gasPrice` up front.
+   */
+  deployBook: 5_000_000n,
   /** Role grants and setter calls. Measured at ~180k on ATS; 300k leaves comfortable headroom. */
   adminCall: 300_000n,
 } as const;
