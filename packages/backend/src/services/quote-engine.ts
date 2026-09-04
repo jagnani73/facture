@@ -57,7 +57,7 @@ export interface LiveQuote {
 
 /**
  * Data access seam. Kept as an interface so the orchestration below is real, reachable
- * code that can be exercised against fakes before Postgres and the mirror node exist.
+ * code that can be exercised against fakes before a database and the mirror node exist.
  */
 export interface QuoteEngineDeps {
   loadInvoice(invoiceId: string): Promise<Invoice | null>;

@@ -73,9 +73,19 @@ export const envSchema = z
     X402_PAY_TO: ACCOUNT_ID,
     X402_SUPPORTED_TTL_SECONDS: z.coerce.number().int().positive().default(300),
 
-    // Database
-    DATABASE_URL: z.string().min(1).startsWith('postgres', 'must be a postgres:// connection URL'),
-    DATABASE_POOL_MAX: z.coerce.number().int().positive().default(10),
+    /*
+     * Database — SQLite, so this is a path on disk and not a connection URL. Kept under the
+     * same name because it is still "where the data is", and a rename would silently fall
+     * back to a default on every deploy that had the old one set.
+     */
+    DATABASE_URL: z
+      .string()
+      .min(1)
+      .refine((value) => value === ':memory:' || !/^[a-z][a-z0-9+.-]*:\/\//i.test(value), {
+        message:
+          'must be a file path such as ./data/facture.db (or :memory:). Persistence is SQLite; ' +
+          'a postgres:// URL has nothing to connect to.',
+      }),
   })
   .superRefine((env, ctx) => {
     if (env.X402_ASSET_MODE === 'hts' && env.X402_HTS_ASSET_ID === undefined) {

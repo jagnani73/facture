@@ -1,5 +1,5 @@
 /**
- * Postgres schema (Drizzle).
+ * SQLite schema (Drizzle).
  *
  * Money is stored as `bigint` minor units, never float and never `numeric`. Discounts are
  * computed off day counts and basis points, and a rounding disagreement between the
@@ -10,24 +10,72 @@
  * `0.0.x` native ids for anything the Hedera SDK or an x402 `PaymentRequirements` touches,
  * `0x…` EVM addresses for anything viem touches. Both are kept where both are needed
  * rather than converting at read time.
+ *
+ * ## Three decisions this dialect forces, and how they were taken
+ *
+ * 1. **Money is `TEXT`, decoded to `bigint` — see `bigintText` below.** SQLite's INTEGER is
+ *    64-bit, but `better-sqlite3` hands 64-bit integers back as JS `number` unless the
+ *    connection is put in a mode that returns them all as BigInt, and a `number` silently
+ *    loses precision past 2^53. On a money column that failure is invisible and permanent,
+ *    so the amount never becomes a `number` at any point: it is written as a decimal string
+ *    and read straight into `BigInt`.
+ * 2. **Instants are `INTEGER` epoch milliseconds** (`integer({ mode: 'timestamp_ms' })`).
+ *    An epoch is absolute, which is what `timestamp with time zone` meant here; Drizzle maps
+ *    it to and from `Date` so `projections.ts` is untouched; it sorts numerically, so
+ *    `ORDER BY created_at` and the keyset cursor in `sqlite-store.ts` keep working; and
+ *    ~1.7e12 is nowhere near 2^53, so unlike money it is safe as a `number` on the wire.
+ *    ISO text would sort too, but would put a string parse on every read path for nothing.
+ * 3. **Enums are `TEXT` with a Drizzle-level member list.** SQLite has no enum type. The
+ *    tuples below are unchanged and the `Expect<Drift<…>>` guards still bind to them, so the
+ *    domain unions and the columns still cannot drift apart at compile time.
+ *
+ * There is likewise no native `uuid`: ids are `TEXT` holding the same UUID strings, and the
+ * `gen_random_uuid()` default becomes a Drizzle `$defaultFn` calling `randomUUID()`.
  */
 
 import type { InvoiceStatus, MandateStatus, Rating } from '@facture/shared';
 import type { SettlementOutcome } from '../services/rating.js';
+import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import {
-  bigint,
-  char,
+  customType,
   index,
   integer,
-  jsonb,
-  pgEnum,
-  pgTable,
+  sqliteTable,
   text,
-  timestamp,
   uniqueIndex,
-  uuid,
-} from 'drizzle-orm/pg-core';
+} from 'drizzle-orm/sqlite-core';
+
+// --- column helpers -------------------------------------------------------------
+
+/**
+ * A 64-bit-and-wider integer held as TEXT and read back as `bigint`.
+ *
+ * This is the money column type, and TEXT is deliberate rather than a shortcoming.
+ * `better-sqlite3` returns SQLite INTEGERs as JS `number`s, so an amount above 2^53 minor
+ * units would come back rounded with nothing to indicate it — the one failure mode a
+ * receivables ledger cannot tolerate, since it corrupts the number rather than refusing it.
+ * A decimal string round-trips exactly at any magnitude and `BigInt(…)` throws on anything
+ * that is not one, so a corrupt row is loud.
+ *
+ * The cost is that SQL cannot do arithmetic on these columns: `sum()` over TEXT would coerce
+ * to a float and reintroduce the very loss this avoids. `sqlite-store.ts` therefore sums and
+ * increments money in JS, inside a transaction — see `debtorExposure` and `recordOutcome`.
+ */
+const bigintText = customType<{ data: bigint; driverData: string }>({
+  dataType: () => 'text',
+  toDriver: (value: bigint): string => value.toString(),
+  fromDriver: (value: string): bigint => BigInt(value),
+});
+
+/** Epoch-ms `INTEGER`, mapped to and from `Date` by Drizzle. See the header note. */
+const instant = (name: string) => integer(name, { mode: 'timestamp_ms' });
+
+/** SQLite has no `now()`; `unixepoch('subsec')` is seconds with a fraction. */
+const NOW_MS = sql`(cast(unixepoch('subsec') * 1000 as integer))`;
+
+/** Written as a string so the DDL default matches what `bigintText` stores. */
+const ZERO_MINOR = sql`'0'`;
 
 // --- enums ----------------------------------------------------------------------
 
@@ -46,12 +94,18 @@ export const INVOICE_STATUS = [
 /**
  * Ordered WORST CREDIT FIRST, which is the reverse of shared's `RATINGS` array.
  *
- * Postgres orders an enum by declaration, and the predicate this column exists to serve is
- * `debtor.rating >= mandate.rating_floor`. Declaring the grades ascending makes that SQL
- * comparison mean the same thing as `meetsRatingFloor` in `@facture/shared` — including
- * the part that matters most, `D` sorting BELOW `UNRATED`, so a mandate with the widest
- * floor a buyer can write still excludes a customer who has defaulted. Reversing this
- * tuple would silently invert every rating-floor query.
+ * Under Postgres this tuple was load-bearing: an enum sorts by declaration, so declaring the
+ * grades ascending made `debtor.rating >= mandate.rating_floor` mean in SQL what
+ * `meetsRatingFloor` means in `@facture/shared` — including the part that matters most, `D`
+ * sorting BELOW `UNRATED`, so a mandate with the widest floor a buyer can write still
+ * excludes a customer who has defaulted.
+ *
+ * SQLite has no enum and compares TEXT lexicographically, where `'D' > 'C' > 'B' > 'A'` and
+ * `'UNRATED'` sorts last — the reverse of the ladder in two places at once. **So nothing may
+ * compare this column in SQL.** Nothing does: `listQuotableMandates` over-fetches on purpose
+ * and every rating-floor decision is taken by `meetsRatingFloor` in shared, over projected
+ * rows. The order is kept here because it is the ladder, and reading it as anything else is
+ * how the rule gets quietly reintroduced.
  */
 export const RATING_GRADE = ['D', 'UNRATED', 'C', 'B', 'A'] as const;
 
@@ -77,75 +131,60 @@ type _AssertSettlementOutcome = Expect<
   Drift<SettlementOutcome, (typeof SETTLEMENT_OUTCOMES)[number]>
 >;
 
-export const invoiceStatusEnum = pgEnum('invoice_status', INVOICE_STATUS);
-export const ratingEnum = pgEnum('rating_grade', RATING_GRADE);
+export const ISSUANCE_STATE = ['queued', 'issuing', 'issued', 'failed'] as const;
 
-export const issuanceStateEnum = pgEnum('issuance_state', [
-  'queued',
-  'issuing',
-  'issued',
-  'failed',
-]);
+export const REGULATION_TYPE = ['reg-d-506b', 'reg-d-506c', 'reg-s'] as const;
 
-export const regulationTypeEnum = pgEnum('regulation_type', ['reg-d-506b', 'reg-d-506c', 'reg-s']);
+export const CONFIRMATION_DECISION = ['confirmed', 'disputed'] as const;
 
-export const confirmationDecisionEnum = pgEnum('confirmation_decision', ['confirmed', 'disputed']);
+export const QUOTE_STATUS = ['live', 'accepted', 'expired', 'superseded'] as const;
 
-/**
- * `funding` and `active` are two states, not one `funded`: escrow being initiated is not
- * the same as escrow confirmed, and only the second one quotes. Shared's mandate machine
- * is the authority on the edges between them.
- */
-export const mandateStatusEnum = pgEnum('mandate_status', MANDATE_STATUS);
-
-export const quoteStatusEnum = pgEnum('quote_status', [
-  'live',
-  'accepted',
-  'expired',
-  'superseded',
-]);
-
-export const tradeStatusEnum = pgEnum('trade_status', [
+export const TRADE_STATUS = [
   'preparing',
   'awaiting_payment',
   'settled',
   'unwound',
   'failed',
-]);
+] as const;
 
 /** How a settled receivable resolved. Mirrors `SettlementOutcome` in `services/rating.ts`. */
 export const SETTLEMENT_OUTCOMES = ['on_time', 'late', 'default'] as const;
 
-export const settlementOutcomeEnum = pgEnum('settlement_outcome', SETTLEMENT_OUTCOMES);
-
 // --- parties --------------------------------------------------------------------
 
-export const sellers = pgTable(
+export const sellers = sqliteTable(
   'sellers',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
     name: text('name').notNull(),
     email: text('email').notNull(),
     /** May be a wallet made from an email address; the seller never needs to know. */
     hederaAccountId: text('hedera_account_id'),
     arcAddress: text('arc_address'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().default(NOW_MS),
   },
   (t) => [uniqueIndex('sellers_email_key').on(t.email)],
 );
 
-export const buyers = pgTable(
+export const buyers = sqliteTable(
   'buyers',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
     name: text('name').notNull(),
     email: text('email').notNull(),
     hederaAccountId: text('hedera_account_id'),
     arcAddress: text('arc_address'),
     /** Set for agent-operated desks. Surfaced as exactly that; fake liquidity is the one
      * thing that would undo the whole argument, so an agent is never disguised as a human. */
-    agentPolicy: jsonb('agent_policy').$type<{ capsMinor?: string; label?: string } | null>(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    agentPolicy: text('agent_policy', { mode: 'json' }).$type<{
+      capsMinor?: string;
+      label?: string;
+    } | null>(),
+    createdAt: instant('created_at').notNull().default(NOW_MS),
   },
   (t) => [uniqueIndex('buyers_email_key').on(t.email)],
 );
@@ -159,58 +198,60 @@ export const buyers = pgTable(
  * tighten a rating twice. `rating` is likewise recomputed from the counters rather than
  * being incremented alongside them, so the stored grade cannot drift from the ladder.
  */
-export const debtors = pgTable(
+export const debtors = sqliteTable(
   'debtors',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
     name: text('name').notNull(),
     /** Where the confirmation link is sent. No wallet, no signup. */
     email: text('email').notNull(),
     taxId: text('tax_id'),
 
-    rating: ratingEnum('rating').notNull().default('UNRATED'),
+    rating: text('rating', { enum: RATING_GRADE }).notNull().default('UNRATED'),
     settledOnTime: integer('settled_on_time').notNull().default(0),
     settledLate: integer('settled_late').notNull().default(0),
     defaulted: integer('defaulted').notNull().default(0),
-    settledFaceValue: bigint('settled_face_value', { mode: 'bigint' })
-      .notNull()
-      .default(sql`0`),
-    firstSettlementAt: timestamp('first_settlement_at', { withTimezone: true }),
-    lastSettlementAt: timestamp('last_settlement_at', { withTimezone: true }),
+    settledFaceValue: bigintText('settled_face_value').notNull().default(ZERO_MINOR),
+    firstSettlementAt: instant('first_settlement_at'),
+    lastSettlementAt: instant('last_settlement_at'),
 
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().default(NOW_MS),
   },
   (t) => [uniqueIndex('debtors_email_key').on(t.email), index('debtors_rating_idx').on(t.rating)],
 );
 
 // --- the book -------------------------------------------------------------------
 
-export const invoices = pgTable(
+export const invoices = sqliteTable(
   'invoices',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    sellerId: uuid('seller_id')
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
+    sellerId: text('seller_id')
       .notNull()
       .references(() => sellers.id),
-    debtorId: uuid('debtor_id')
+    debtorId: text('debtor_id')
       .notNull()
       .references(() => debtors.id),
 
     invoiceNumber: text('invoice_number').notNull(),
-    faceValue: bigint('face_value', { mode: 'bigint' }).notNull(),
-    currency: char('currency', { length: 3 }).notNull(),
-    issuedAt: timestamp('issued_at', { withTimezone: true }).notNull(),
+    faceValue: bigintText('face_value').notNull(),
+    currency: text('currency', { length: 3 }).notNull(),
+    issuedAt: instant('issued_at').notNull(),
     /**
      * Becomes the bond's maturity. `initializeMaturity` is one-shot: never edit after
      * issuance.
      */
-    dueAt: timestamp('due_at', { withTimezone: true }).notNull(),
+    dueAt: instant('due_at').notNull(),
     /**
      * `draft` until the customer has been asked to confirm. Tokenisation progress is NOT
      * this column — it is `issuanceState`, which moves independently because issuance is
      * paced and an invoice can be confirmed before its instrument exists.
      */
-    status: invoiceStatusEnum('status').notNull().default('draft'),
+    status: text('status', { enum: INVOICE_STATUS }).notNull().default('draft'),
 
     /**
      * The uniqueness registry, keyed on hash(debtor, invoice number, amount). One
@@ -222,25 +263,27 @@ export const invoices = pgTable(
 
     /** Checksum-valid; ATS `onlyValidISIN` rejects arbitrary strings. */
     isin: text('isin'),
-    regulationType: regulationTypeEnum('regulation_type').notNull().default('reg-d-506c'),
+    regulationType: text('regulation_type', { enum: REGULATION_TYPE })
+      .notNull()
+      .default('reg-d-506c'),
     securityId: text('security_id'),
     securityEvmAddress: text('security_evm_address'),
 
-    issuanceState: issuanceStateEnum('issuance_state').notNull().default('queued'),
+    issuanceState: text('issuance_state', { enum: ISSUANCE_STATE }).notNull().default('queued'),
     issuanceAttempts: integer('issuance_attempts').notNull().default(0),
     issuanceTxId: text('issuance_tx_id'),
     issuanceError: text('issuance_error'),
 
     /** SHA-256 of the emailed token. The token itself is never stored. */
     confirmationTokenHash: text('confirmation_token_hash'),
-    confirmationRequestedAt: timestamp('confirmation_requested_at', { withTimezone: true }),
-    confirmationExpiresAt: timestamp('confirmation_expires_at', { withTimezone: true }),
-    confirmationDecision: confirmationDecisionEnum('confirmation_decision'),
-    confirmationDecidedAt: timestamp('confirmation_decided_at', { withTimezone: true }),
+    confirmationRequestedAt: instant('confirmation_requested_at'),
+    confirmationExpiresAt: instant('confirmation_expires_at'),
+    confirmationDecision: text('confirmation_decision', { enum: CONFIRMATION_DECISION }),
+    confirmationDecidedAt: instant('confirmation_decided_at'),
     confirmationNote: text('confirmation_note'),
 
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().default(NOW_MS),
+    updatedAt: instant('updated_at').notNull().default(NOW_MS),
   },
   (t) => [
     uniqueIndex('invoices_uniqueness_hash_key').on(t.uniquenessHash),
@@ -258,35 +301,33 @@ export const invoices = pgTable(
  * ceiling on what this mandate can take, which is also what resolves two invoices
  * arriving against one mandate.
  */
-export const mandates = pgTable(
+export const mandates = sqliteTable(
   'mandates',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    buyerId: uuid('buyer_id')
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
+    buyerId: text('buyer_id')
       .notNull()
       .references(() => buyers.id),
 
-    ratingFloor: ratingEnum('rating_floor').notNull(),
+    ratingFloor: text('rating_floor', { enum: RATING_GRADE }).notNull(),
     maxTenorDays: integer('max_tenor_days').notNull(),
     annualisedYieldBps: integer('annualised_yield_bps').notNull(),
-    currency: char('currency', { length: 3 }).notNull(),
+    currency: text('currency', { length: 3 }).notNull(),
 
     /** Total exposure ceiling, and the per-debtor concentration cap under it. */
-    exposureLimitMinor: bigint('exposure_limit_minor', { mode: 'bigint' }).notNull(),
-    perDebtorLimitMinor: bigint('per_debtor_limit_minor', { mode: 'bigint' }),
+    exposureLimitMinor: bigintText('exposure_limit_minor').notNull(),
+    perDebtorLimitMinor: bigintText('per_debtor_limit_minor'),
 
     /** Escrowed at funding. Unallocated balance = funded - allocated. */
-    fundedMinor: bigint('funded_minor', { mode: 'bigint' })
-      .notNull()
-      .default(sql`0`),
-    allocatedMinor: bigint('allocated_minor', { mode: 'bigint' })
-      .notNull()
-      .default(sql`0`),
+    fundedMinor: bigintText('funded_minor').notNull().default(ZERO_MINOR),
+    allocatedMinor: bigintText('allocated_minor').notNull().default(ZERO_MINOR),
     escrowRef: text('escrow_ref'),
 
-    status: mandateStatusEnum('status').notNull().default('draft'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    status: text('status', { enum: MANDATE_STATUS }).notNull().default('draft'),
+    createdAt: instant('created_at').notNull().default(NOW_MS),
+    updatedAt: instant('updated_at').notNull().default(NOW_MS),
   },
   (t) => [
     index('mandates_buyer_status_idx').on(t.buyerId, t.status),
@@ -299,59 +340,63 @@ export const mandates = pgTable(
  * Quotes are live and derived, but the accepted one is persisted so a trade can prove
  * what price was shown and reject a stale acceptance.
  */
-export const quotes = pgTable(
+export const quotes = sqliteTable(
   'quotes',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    invoiceId: uuid('invoice_id')
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
+    invoiceId: text('invoice_id')
       .notNull()
       .references(() => invoices.id),
-    mandateId: uuid('mandate_id').references(() => mandates.id),
+    mandateId: text('mandate_id').references(() => mandates.id),
 
-    ratingAtQuote: ratingEnum('rating_at_quote').notNull(),
+    ratingAtQuote: text('rating_at_quote', { enum: RATING_GRADE }).notNull(),
     tenorDays: integer('tenor_days').notNull(),
     annualisedYieldBps: integer('annualised_yield_bps').notNull(),
-    faceValue: bigint('face_value', { mode: 'bigint' }).notNull(),
-    discountMinor: bigint('discount_minor', { mode: 'bigint' }).notNull(),
-    proceedsMinor: bigint('proceeds_minor', { mode: 'bigint' }).notNull(),
+    faceValue: bigintText('face_value').notNull(),
+    discountMinor: bigintText('discount_minor').notNull(),
+    proceedsMinor: bigintText('proceeds_minor').notNull(),
 
-    status: quoteStatusEnum('status').notNull().default('live'),
-    pricedAt: timestamp('priced_at', { withTimezone: true }).notNull().defaultNow(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    status: text('status', { enum: QUOTE_STATUS }).notNull().default('live'),
+    pricedAt: instant('priced_at').notNull().default(NOW_MS),
+    expiresAt: instant('expires_at').notNull(),
   },
   (t) => [index('quotes_invoice_priced_idx').on(t.invoiceId, t.pricedAt)],
 );
 
-export const trades = pgTable(
+export const trades = sqliteTable(
   'trades',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    invoiceId: uuid('invoice_id')
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
+    invoiceId: text('invoice_id')
       .notNull()
       .references(() => invoices.id),
-    mandateId: uuid('mandate_id')
+    mandateId: text('mandate_id')
       .notNull()
       .references(() => mandates.id),
-    quoteId: uuid('quote_id')
+    quoteId: text('quote_id')
       .notNull()
       .references(() => quotes.id),
-    sellerId: uuid('seller_id')
+    sellerId: text('seller_id')
       .notNull()
       .references(() => sellers.id),
-    buyerId: uuid('buyer_id')
+    buyerId: text('buyer_id')
       .notNull()
       .references(() => buyers.id),
 
-    faceValue: bigint('face_value', { mode: 'bigint' }).notNull(),
-    proceedsMinor: bigint('proceeds_minor', { mode: 'bigint' }).notNull(),
+    faceValue: bigintText('face_value').notNull(),
+    proceedsMinor: bigintText('proceeds_minor').notNull(),
     annualisedYieldBps: integer('annualised_yield_bps').notNull(),
     tenorDays: integer('tenor_days').notNull(),
-    status: tradeStatusEnum('status').notNull().default('preparing'),
+    status: text('status', { enum: TRADE_STATUS }).notNull().default('preparing'),
 
     // Asset leg — Hedera. The hold is placed before the cash leg and executed after it.
     holdId: text('hold_id'),
     assetTxId: text('asset_tx_id'),
-    assetConsensusAt: timestamp('asset_consensus_at', { withTimezone: true }),
+    assetConsensusAt: instant('asset_consensus_at'),
 
     // Cash leg — x402. `cashTransaction` is the facilitator's settlement reference.
     cashScheme: text('cash_scheme'),
@@ -361,15 +406,18 @@ export const trades = pgTable(
     cashPayer: text('cash_payer'),
 
     /** The pre-match ControlList / Kyc decision, kept verbatim for the proof view. */
-    complianceDecision: jsonb('compliance_decision').$type<Record<string, unknown> | null>(),
-    complianceCheckedAt: timestamp('compliance_checked_at', { withTimezone: true }),
+    complianceDecision: text('compliance_decision', { mode: 'json' }).$type<Record<
+      string,
+      unknown
+    > | null>(),
+    complianceCheckedAt: instant('compliance_checked_at'),
 
     /** HCS receipt for the match itself. Checkable without trusting the venue. */
     hcsTopicId: text('hcs_topic_id'),
-    hcsSequenceNumber: bigint('hcs_sequence_number', { mode: 'bigint' }),
+    hcsSequenceNumber: bigintText('hcs_sequence_number'),
 
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    settledAt: timestamp('settled_at', { withTimezone: true }),
+    createdAt: instant('created_at').notNull().default(NOW_MS),
+    settledAt: instant('settled_at'),
   },
   (t) => [
     index('trades_invoice_idx').on(t.invoiceId),
@@ -383,17 +431,19 @@ export const trades = pgTable(
  * why in words rather than by a reverted transaction. Each refusal writes a receipt to
  * HCS that the rejected party can verify independently.
  */
-export const refusalReceipts = pgTable(
+export const refusalReceipts = sqliteTable(
   'refusal_receipts',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    invoiceId: uuid('invoice_id')
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
+    invoiceId: text('invoice_id')
       .notNull()
       .references(() => invoices.id),
-    mandateId: uuid('mandate_id')
+    mandateId: text('mandate_id')
       .notNull()
       .references(() => mandates.id),
-    buyerId: uuid('buyer_id')
+    buyerId: text('buyer_id')
       .notNull()
       .references(() => buyers.id),
 
@@ -402,14 +452,14 @@ export const refusalReceipts = pgTable(
     /** The sentence the funder actually reads. */
     reasonText: text('reason_text').notNull(),
 
-    ratingAtRefusal: ratingEnum('rating_at_refusal').notNull(),
+    ratingAtRefusal: text('rating_at_refusal', { enum: RATING_GRADE }).notNull(),
     tenorDaysAtRefusal: integer('tenor_days_at_refusal').notNull(),
 
     hcsTopicId: text('hcs_topic_id'),
-    hcsSequenceNumber: bigint('hcs_sequence_number', { mode: 'bigint' }),
-    hcsConsensusAt: timestamp('hcs_consensus_at', { withTimezone: true }),
+    hcsSequenceNumber: bigintText('hcs_sequence_number'),
+    hcsConsensusAt: instant('hcs_consensus_at'),
 
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: instant('created_at').notNull().default(NOW_MS),
   },
   (t) => [
     index('refusals_invoice_idx').on(t.invoiceId),
@@ -426,26 +476,28 @@ export const refusalReceipts = pgTable(
  * token, and "invalidates" has to leave a trace or a debtor who clicks a stale link gets
  * an unexplained refusal. Both are written in one transaction.
  */
-export const confirmationRequests = pgTable(
+export const confirmationRequests = sqliteTable(
   'confirmation_requests',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    invoiceId: uuid('invoice_id')
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
+    invoiceId: text('invoice_id')
       .notNull()
       .references(() => invoices.id),
 
     /** SHA-256 of the emailed token. The token itself is never stored, here or anywhere. */
     tokenHash: text('token_hash').notNull(),
-    requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    requestedAt: instant('requested_at').notNull().default(NOW_MS),
+    expiresAt: instant('expires_at').notNull(),
 
     /** Single-use: set in the same transaction that writes the decision. */
-    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    consumedAt: instant('consumed_at'),
     /** Set when a later request superseded this one before the debtor answered. */
-    supersededAt: timestamp('superseded_at', { withTimezone: true }),
+    supersededAt: instant('superseded_at'),
 
-    decision: confirmationDecisionEnum('decision'),
-    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    decision: text('decision', { enum: CONFIRMATION_DECISION }),
+    decidedAt: instant('decided_at'),
     note: text('note'),
   },
   (t) => [
@@ -463,21 +515,23 @@ export const confirmationRequests = pgTable(
  * scheduled transaction), and without it a second observation would tighten a rating for a
  * payment that happened once.
  */
-export const settlementOutcomes = pgTable(
+export const settlementOutcomes = sqliteTable(
   'settlement_outcomes',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    debtorId: uuid('debtor_id')
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => randomUUID()),
+    debtorId: text('debtor_id')
       .notNull()
       .references(() => debtors.id),
-    invoiceId: uuid('invoice_id')
+    invoiceId: text('invoice_id')
       .notNull()
       .references(() => invoices.id),
 
-    outcome: settlementOutcomeEnum('outcome').notNull(),
-    faceValue: bigint('face_value', { mode: 'bigint' }).notNull(),
-    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    outcome: text('outcome', { enum: SETTLEMENT_OUTCOMES }).notNull(),
+    faceValue: bigintText('face_value').notNull(),
+    occurredAt: instant('occurred_at').notNull(),
+    createdAt: instant('created_at').notNull().default(NOW_MS),
   },
   (t) => [
     uniqueIndex('settlement_outcomes_receivable_key').on(t.debtorId, t.invoiceId),
@@ -493,19 +547,19 @@ export const settlementOutcomes = pgTable(
  * the worker needs live here, so a restart can rebuild the queue instead of losing every
  * job that was mid-backoff.
  */
-export const issuanceJobs = pgTable(
+export const issuanceJobs = sqliteTable(
   'issuance_jobs',
   {
-    invoiceId: uuid('invoice_id')
+    invoiceId: text('invoice_id')
       .primaryKey()
       .references(() => invoices.id),
-    state: issuanceStateEnum('state').notNull().default('queued'),
+    state: text('state', { enum: ISSUANCE_STATE }).notNull().default('queued'),
     attempts: integer('attempts').notNull().default(0),
-    queuedAt: timestamp('queued_at', { withTimezone: true }).notNull().defaultNow(),
-    startedAt: timestamp('started_at', { withTimezone: true }),
-    completedAt: timestamp('completed_at', { withTimezone: true }),
+    queuedAt: instant('queued_at').notNull().default(NOW_MS),
+    startedAt: instant('started_at'),
+    completedAt: instant('completed_at'),
     /** Set while backing off. Null means "runnable now". */
-    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+    nextAttemptAt: instant('next_attempt_at'),
     lastError: text('last_error'),
   },
   (t) => [index('issuance_jobs_state_idx').on(t.state, t.nextAttemptAt)],
@@ -518,11 +572,11 @@ export const issuanceJobs = pgTable(
  * never polled" rather than "we are 4,000 blocks behind" — the two look identical and only
  * one of them is fine.
  */
-export const indexerCursors = pgTable('indexer_cursors', {
+export const indexerCursors = sqliteTable('indexer_cursors', {
   chain: text('chain').primaryKey(),
   /** Block number or consensus position, as a string: Arc's exceeds 2^53 eventually. */
   cursor: text('cursor').notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: instant('updated_at').notNull().default(NOW_MS),
 });
 
 export type SellerRow = typeof sellers.$inferSelect;

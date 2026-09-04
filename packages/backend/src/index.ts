@@ -11,7 +11,7 @@ import { hedera } from './chain.js';
 import type { Config } from './config.js';
 import { EnvValidationError, loadConfig } from './config.js';
 import { closeDb, getDb } from './db/index.js';
-import { createPgStore } from './db/pg-store.js';
+import { createSqliteStore } from './db/sqlite-store.js';
 import { setStoreFactory } from './db/store.js';
 import { createLogger, rootLogger, setRootLogger } from './logger.js';
 import { initAtsAdapter, regulationKeyFor } from './services/ats.js';
@@ -44,11 +44,11 @@ function boot(): void {
   const log = rootLogger;
 
   /*
-   * Lazily: registering the factory does not open a socket. The first request that needs
-   * the database builds the pool, so a health check against a service whose Postgres is
-   * down still answers with a body saying so rather than failing to start at all.
+   * Lazily: registering the factory does not open the database file. The first request that
+   * needs it opens it, so a health check against a service whose database file is missing
+   * or unreadable still answers with a body saying so rather than failing to start at all.
    */
-  setStoreFactory(() => createPgStore(getDb()));
+  setStoreFactory(() => createSqliteStore(getDb()));
   setNotifier(createLoggingNotifier(log));
   setComplianceGate(createAtsComplianceGate({ logger: log }));
 

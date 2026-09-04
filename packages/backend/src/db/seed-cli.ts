@@ -1,24 +1,24 @@
 /**
- * `pnpm db:seed` — fill a Postgres database with the demo book.
+ * `pnpm db:seed` — fill the SQLite database at `DATABASE_URL` with the demo book.
  *
- * Separate from `seed.ts` so that importing the dataset does not open a connection: the
+ * Separate from `seed.ts` so that importing the dataset does not open the database: the
  * tests seed a `MemoryStore` from the same module, and a seed script that connected on
- * import would drag Postgres into every unit test.
+ * import would drag a file handle into every unit test.
  *
  * Assumes the migrations in `src/db/migrations` have been applied (`pnpm db:migrate`).
  * Re-running it against an already-seeded database will fail on the uniqueness index,
  * which is the correct outcome: the ids are deterministic, so a second run is a duplicate
- * rather than a refresh.
+ * rather than a refresh. Deleting the file is the refresh.
  */
 
 import { closeDb, getDb } from './index.js';
-import { createPgStore } from './pg-store.js';
+import { createSqliteStore } from './sqlite-store.js';
 import { RATING_NOTE, seedStore } from './seed.js';
 import { loadConfig } from '../config.js';
 
 async function main(): Promise<void> {
   loadConfig();
-  const result = await seedStore(createPgStore(getDb()));
+  const result = await seedStore(createSqliteStore(getDb()));
 
   process.stdout.write(
     `${JSON.stringify({ seeded: result.counts, note: RATING_NOTE }, null, 2)}\n`,

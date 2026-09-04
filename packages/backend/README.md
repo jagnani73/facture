@@ -1,20 +1,21 @@
 # `@facture/backend`
 
-The API behind the book. Hono on Node, Postgres via Drizzle, Hedera for the paper and Arc
+The API behind the book. Hono on Node, SQLite via Drizzle, Hedera for the paper and Arc
 for the cash.
 
 > **Status: implemented, undeployed.** Every route and service body is written and
-> exercised by tests — nothing returns `501` any more. What is _not_ done is the part that
-> needs somewhere to run: no migration has been applied to any database, no ATS factory is
-> configured, and no contract has been deployed. The two seams that reach a chain
-> (`services/ats.ts`, `services/compliance.ts`) fail loudly rather than simulating, which
-> is why `ATS_FACTORY_ID` being unset disables issuance instead of faking it.
+> exercised by tests — nothing returns `501` any more. The database is the one dependency
+> that is fully real: `pnpm db:migrate && pnpm db:seed` builds the whole demo book in a
+> file. What is _not_ done is the part that needs a chain: no ATS factory is configured and
+> no contract has been deployed. The two seams that reach one (`services/ats.ts`,
+> `services/compliance.ts`) fail loudly rather than simulating, which is why
+> `ATS_FACTORY_ID` being unset disables issuance instead of faking it.
 
 ## Running it
 
 ```sh
-cp .env.example .env      # then fill in the six required values
-pnpm --filter @facture/backend db:migrate
+cp .env.example .env      # then fill in the required values; DATABASE_URL is a file path
+pnpm --filter @facture/backend db:migrate  # creates the file and its 12 tables
 pnpm --filter @facture/backend db:seed     # the demo book
 pnpm --filter @facture/backend dev
 curl localhost:8787/health
@@ -24,16 +25,16 @@ Config is parsed at boot. A missing or malformed variable stops the process with
 problem listed at once, naming each variable — one restart per fix is a bad way to
 configure a service.
 
-| Script        | What it does                                           |
-| ------------- | ------------------------------------------------------ |
-| `dev`         | `tsx watch src/index.ts`                               |
-| `build`       | `tsc` to `dist/`                                       |
-| `start`       | `node dist/index.js`                                   |
-| `typecheck`   | `tsc --noEmit`                                         |
-| `test`        | `vitest run`                                           |
-| `db:generate` | writes SQL into `src/db/migrations`                    |
-| `db:migrate`  | applies it — **not yet run against any database**      |
-| `db:seed`     | fills a database with the demo book (`src/db/seed.ts`) |
+| Script        | What it does                                            |
+| ------------- | ------------------------------------------------------- |
+| `dev`         | `tsx watch src/index.ts`                                |
+| `build`       | `tsc` to `dist/`                                        |
+| `start`       | `node dist/index.js`                                    |
+| `typecheck`   | `tsc --noEmit`                                          |
+| `test`        | `vitest run`                                            |
+| `db:generate` | writes SQL into `src/db/migrations`                     |
+| `db:migrate`  | applies it, creating the SQLite file if it is not there |
+| `db:seed`     | fills that file with the demo book (`src/db/seed.ts`)   |
 
 ## Routes
 
@@ -96,12 +97,30 @@ identical unexpired quote is reused rather than rewritten, so the route stays sa
 ### The persistence seam
 
 `src/db/store.ts` is the interface every route and service reads and writes through, and
-there are two implementations: `pg-store.ts` (Drizzle over Postgres) and `memory-store.ts`.
-The second is not a convenience — it is why the orchestration in the routes is real,
-exercised code rather than something that first executes on a stage with a database behind
-it. It implements the same clamping, the same idempotency and the same "a withdrawal loses
-to an allocation" ordering, because a fake that is easier to satisfy than the real thing
-tests nothing.
+there are two implementations: `sqlite-store.ts` (Drizzle over `better-sqlite3`) and
+`memory-store.ts`. The second is not a convenience — it is why the orchestration in the
+routes is real, exercised code rather than something that first executes on a stage with a
+database behind it. It implements the same clamping, the same idempotency and the same "a
+withdrawal loses to an allocation" ordering, because a fake that is easier to satisfy than
+the real thing tests nothing.
+
+The engine is SQLite because this is a demo and a file on disk cannot be down, cannot
+refuse a connection and cannot be a container that did not start. `DATABASE_URL` is
+therefore a path, not a URL. Three consequences are load-bearing and are written up where
+they live:
+
+- **Money is a `TEXT` column read into `bigint`** (`bigintText` in `schema.ts`).
+  `better-sqlite3` returns INTEGERs as JS `number`s, which lose precision above 2^53 with
+  nothing to indicate it. Nothing sums or compares an amount in SQL — `debtorExposure` and
+  `recordOutcome` do that arithmetic in JS, inside a transaction.
+- **Instants are `INTEGER` epoch milliseconds**, mapped to and from `Date` by Drizzle, so
+  they stay absolute, sort numerically, and leave `projections.ts` untouched.
+- **There is no `SELECT … FOR UPDATE`, and it is not needed.** SQLite admits one writer at
+  a time, so every contended write is one `BEGIN IMMEDIATE` transaction instead. See the
+  header of `sqlite-store.ts` before "restoring" anything.
+
+A Postgres implementation existed and was deleted rather than carried; the seam is what
+makes that reversible.
 
 `src/db/seed.ts` fills either one with the demo book, which is the same market the web
 package renders from its fixtures — including the two invoices that carry the argument:
@@ -154,9 +173,11 @@ so borrowing `AAA` would claim an authority the score does not have.
 `D` ranks **below** `UNRATED` in `RATING_RANK` — a default is information, an absence of
 history is not. A mandate with a floor of `C` therefore excludes unrated _and_ defaulted
 customers, and a floor of `UNRATED` — the widest a buyer can write — accepts everything
-except a customer already known to default. The `rating_grade` Postgres enum is declared
-worst-first for the same reason: `debtor.rating >= mandate.rating_floor` in SQL has to mean
-what `meetsRatingFloor` means in TypeScript.
+except a customer already known to default. `RATING_GRADE` in `schema.ts` is still declared
+worst-first because that tuple _is_ the ladder — but on SQLite it is documentation, not
+behaviour: the column is `TEXT`, so a SQL comparison would order it alphabetically and get
+the answer backwards. Every rating-floor decision is taken by `meetsRatingFloor` in
+TypeScript, over rows the store deliberately over-fetches.
 
 Not in v1, in rough order of how much they matter: magnitude weighting (ten $500 invoices
 do not prove a debtor good for $50k), recency decay, and concentration (a history from one

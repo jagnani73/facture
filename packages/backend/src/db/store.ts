@@ -2,10 +2,12 @@
  * The persistence seam.
  *
  * Everything in `routes/` and `services/` reads and writes through this interface, and
- * there are two implementations: `pg-store.ts` (Drizzle over Postgres, what runs) and
- * `memory-store.ts` (what the tests run against). The seam is not indirection for its own
- * sake — it is the reason the orchestration in the routes is real, exercised code rather
- * than something that first executes on a stage with a database behind it.
+ * there are two implementations: `sqlite-store.ts` (Drizzle over `better-sqlite3`, what
+ * runs) and `memory-store.ts` (what the tests run against). The seam is not indirection for
+ * its own sake — it is the reason the orchestration in the routes is real, exercised code
+ * rather than something that first executes on a stage with a database behind it. It is
+ * also why the engine underneath is a decision and not a commitment: a Postgres
+ * implementation was deleted here rather than carried, and can come back as one file.
  *
  * Two rules the interface enforces on both implementations:
  *
@@ -13,8 +15,10 @@
  *   `number` for an amount. `src/wire.ts` owns the string boundary; nothing below it does.
  * - **Contended writes are atomic.** `fundMandate`, `withdrawFromMandate`, `allocate`,
  *   `decideConfirmation` and `recordOutcome` are single operations here precisely because
- *   read-modify-write across two calls is where a withdrawal races a match. The Postgres
- *   implementation takes a row lock; the in-memory one is single-threaded by construction.
+ *   read-modify-write across two calls is where a withdrawal races a match. The SQLite
+ *   implementation puts each in one `BEGIN IMMEDIATE` transaction, which is a whole-database
+ *   write lock and so needs no row lock; the in-memory one is single-threaded by
+ *   construction.
  */
 
 import type { MinorUnits } from '@facture/shared';
@@ -245,8 +249,8 @@ let factory: (() => Store) | undefined;
 
 /**
  * Registers how to build the production store. Called from the entrypoint so that
- * importing a route does not open a socket — the health check and every unit test need the
- * module graph without a live Postgres.
+ * importing a route does not open the database file — the health check and every unit test
+ * need the module graph without one.
  */
 export function setStoreFactory(build: () => Store): void {
   factory = build;

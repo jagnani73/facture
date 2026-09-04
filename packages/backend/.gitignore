@@ -1,0 +1,6 @@
+# Local SQLite database — DATABASE_URL points here by default. Runtime state, not source:
+# `pnpm db:migrate && pnpm db:seed` rebuilds it, and the -wal/-shm siblings are transient.
+data/
+*.db
+*.db-wal
+*.db-shm

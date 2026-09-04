@@ -7,7 +7,7 @@ const valid: Record<string, string> = {
   HEDERA_OPERATOR_KEY: '3030020100300706052b8104000a04220420' + 'a'.repeat(64),
   ARC_SETTLEMENT_PRIVATE_KEY: `0x${'b'.repeat(64)}`,
   X402_PAY_TO: '0.0.54321',
-  DATABASE_URL: 'postgres://facture:facture@localhost:5432/facture',
+  DATABASE_URL: './data/facture.db',
 };
 
 describe('parseEnv', () => {

@@ -1,12 +1,12 @@
 /**
  * Test harness.
  *
- * There is no Postgres here, and there is no testnet. Both are handled the same way: the
+ * There is no database file here, and there is no testnet. Both are handled the same way: the
  * seam that would reach them is replaced with an implementation that behaves the way the
  * real one is documented to, and the code under test is the real code.
  *
  * - the database is `MemoryStore`, which implements the whole `Store` contract including
- *   the clamping, the idempotency and the ordering the Postgres one promises;
+ *   the clamping, the idempotency and the ordering the SQLite one promises;
  * - Hedera is a fake `AtsAdapter` that records what it was asked to do;
  * - the x402 facilitator is a stubbed `fetch` answering `/supported`, `/verify`, `/settle`.
  *
@@ -39,7 +39,7 @@ export const TEST_ENV: Record<string, string> = {
   HEDERA_OPERATOR_KEY: `3030020100300706052b8104000a04220420${'a'.repeat(64)}`,
   ARC_SETTLEMENT_PRIVATE_KEY: `0x${'b'.repeat(64)}`,
   X402_PAY_TO: '0.0.5512',
-  DATABASE_URL: 'postgres://unused/in/tests',
+  DATABASE_URL: ':memory:',
   ISSUANCE_MIN_INTERVAL_MS: '0',
   ISSUANCE_BACKOFF_BASE_MS: '1',
 };

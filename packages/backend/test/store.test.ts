@@ -1,10 +1,14 @@
 /**
  * The persistence contract.
  *
- * These are the invariants the Postgres implementation takes a row lock to guarantee, and
- * they are asserted against the in-memory one because the interface is what both promise.
- * A fake that is easier to satisfy than the real thing tests nothing, so `MemoryStore`
- * implements the same clamping, the same idempotency and the same ordering.
+ * These are the invariants the SQLite implementation puts in a `BEGIN IMMEDIATE`
+ * transaction to guarantee, and they are asserted against the in-memory one because the
+ * interface is what both promise. A fake that is easier to satisfy than the real thing tests
+ * nothing, so `MemoryStore` implements the same clamping, the same idempotency and the same
+ * ordering.
+ *
+ * `test/sqlite-store.test.ts` covers what is true only of the real engine — money above 2^53,
+ * the pragmas, and the same bounds holding under concurrent allocations.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';

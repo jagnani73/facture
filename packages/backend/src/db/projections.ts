@@ -9,7 +9,7 @@
  * Three conversions carry a decision rather than a mapping:
  *
  * 1. **Instants become ISO strings.** Shared's convention is `IsoDateTime`, because an
- *    instant in this system crosses HTTP and Postgres and a string survives both round
+ *    instant in this system crosses HTTP and a database and a string survives both round
  *    trips unchanged. A `Date` does not.
  * 2. **`mandates.exposure_limit_minor` is NOT `Mandate.totalCommitted`.** The limit is the
  *    ceiling the buyer wrote; `funded_minor` is what they actually escrowed. Only escrowed
@@ -25,14 +25,14 @@ import type { Address, Hex } from 'viem';
 import type { DebtorPaymentRecord } from '../services/rating.js';
 import type { DebtorRow, InvoiceRow, MandateRow } from './schema.js';
 
-/** Postgres hands back `Date`; shared speaks ISO-8601. */
+/** Drizzle hands back `Date` (epoch-ms columns); shared speaks ISO-8601. */
 export const iso = (value: Date): string => value.toISOString();
 
 export const isoOrNull = (value: Date | null): string | null =>
   value === null ? null : value.toISOString();
 
 /**
- * `char(3)` comes back as a plain string, and shared's `Currency` is a two-member union.
+ * The currency column comes back as a plain string, and shared's `Currency` is a two-member union.
  * Anything else is a row that should never have been inserted, so it fails loudly here
  * rather than mispricing quietly downstream.
  */

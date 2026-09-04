@@ -403,7 +403,7 @@ confirmationRoutes.post('/:token', async (c) => {
  * Everything a confirmation link has to be before it means anything.
  *
  * The HMAC tag is checked first and without touching the database, so a scan for valid
- * links costs the scanner rather than Postgres. Every failure below deliberately reports
+ * links costs the scanner rather than the store. Every failure below deliberately reports
  * the same shape a wrong token does — an attacker must not learn from the response whether
  * a token existed, only expired, or was already used.
  */
