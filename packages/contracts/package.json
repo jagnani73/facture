@@ -1,0 +1,26 @@
+{
+  "name": "@facture/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Venue contracts for Facture: uniqueness registry, mandate book, compliance gate, cross-chain DvP escrow.",
+  "scripts": {
+    "build": "hardhat build",
+    "build:production": "hardhat build --build-profile production",
+    "test": "hardhat test",
+    "typecheck": "tsc --noEmit",
+    "clean": "hardhat clean",
+    "deploy:hedera": "hardhat run scripts/deployHedera.ts --network hederaTestnet --build-profile production",
+    "deploy:arc": "hardhat run scripts/deployArc.ts --network arcTestnet --build-profile production"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.6.1"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "5.0.7",
+    "@types/node": "^24.10.1",
+    "hardhat": "3.15.0",
+    "typescript": "^5.9.3",
+    "viem": "2.55.1"
+  }
+}

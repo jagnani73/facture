@@ -1,0 +1,30 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The base config targets bundled application code. Hardhat 3 runs config, scripts and tests
+    // directly under Node as ESM, so module resolution has to follow Node's rules rather than a
+    // bundler's. Everything else - strict, noUncheckedIndexedAccess, verbatimModuleSyntax - is
+    // inherited unchanged.
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    // Nothing here is compiled to disk; Hardhat executes the TypeScript itself and Solidity
+    // artifacts are emitted by solc.
+    "noEmit": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  // The generated artifact declarations are NOT optional and must not be excluded.
+  //
+  // `hardhat build` writes one `artifacts.d.ts` per Solidity source file, and each carries a
+  // `declare module "hardhat/types/artifacts"` augmentation adding its contract to `ArtifactMap`.
+  // That map is what gives `viem.deployContract('MandateBook', [...])` a concretely typed contract.
+  // With the augmentations outside the program the map is empty, `ContractReturnType` degrades to
+  // the untyped fallback, and every `contract.read.x()` / `contract.write.x()` in the suite fails
+  // `noUncheckedIndexedAccess` as "possibly undefined" - 311 errors from one missing include.
+  //
+  // These declarations are build output, so `pnpm build` must run before `pnpm typecheck` in a
+  // clean checkout. The `.json` artifacts beside them are not matched by the glob.
+  "include": ["hardhat.config.ts", "scripts/**/*.ts", "test/**/*.ts", "artifacts/**/*.d.ts"],
+  "exclude": ["node_modules", "cache", "types"]
+}
