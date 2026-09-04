@@ -1,0 +1,52 @@
+diff --git a/packages/ats/contracts/scripts/tools/registry-generator/pipeline.ts b/packages/ats/contracts/scripts/tools/registry-generator/pipeline.ts
+index 95c7c56..11eb585 100644
+--- a/packages/ats/contracts/scripts/tools/registry-generator/pipeline.ts
++++ b/packages/ats/contracts/scripts/tools/registry-generator/pipeline.ts
+@@ -50,6 +50,21 @@ export const DEFAULT_CONFIG: Required<Omit<RegistryConfig, "mockContractPaths">>
+   cacheDir: process.cwd(),
+ };
+ 
++/**
++ * Match a filesystem path against glob-style config patterns.
++ *
++ * Config patterns are written with POSIX separators, so the path is normalised to
++ * forward slashes before matching. Without this, discovery silently matches nothing
++ * on Windows, where path.join produces backslash-separated paths.
++ */
++function matchesAnyPattern(filePath: string, patterns: string[]): boolean {
++  const posixPath = filePath.split(path.sep).join("/");
++  return patterns.some((pattern) => {
++    const regexPattern = pattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
++    return new RegExp(regexPattern).test(posixPath);
++  });
++}
++
+ /**
+  * Generate a complete contract registry from Solidity source files.
+  *
+@@ -140,10 +155,7 @@ export async function generateRegistryPipeline(
+   const allSolidityFiles = findSolidityFiles(contractsDir);
+ 
+   const resolverKeyFiles = allSolidityFiles.filter((filePath) =>
+-    fullConfig.resolverKeyPaths.some((pattern) => {
+-      const regexPattern = pattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
+-      return new RegExp(regexPattern).test(filePath);
+-    }),
++    matchesAnyPattern(filePath, fullConfig.resolverKeyPaths),
+   );
+ 
+   for (const keyFile of resolverKeyFiles) {
+@@ -267,12 +279,7 @@ export async function generateRegistryPipeline(
+     }
+   }
+ 
+-  const rolesFiles = allSolidityFiles.filter((filePath) =>
+-    fullConfig.rolesPaths.some((pattern) => {
+-      const regexPattern = pattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
+-      return new RegExp(regexPattern).test(filePath);
+-    }),
+-  );
++  const rolesFiles = allSolidityFiles.filter((filePath) => matchesAnyPattern(filePath, fullConfig.rolesPaths));
+ 
+   for (const rolesFile of rolesFiles) {
+     const source = readFile(rolesFile);
