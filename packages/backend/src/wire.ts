@@ -26,8 +26,9 @@
  * between layers is a translation layer, and someone eventually forgets to apply it.
  */
 
-import type { Quote, RefusalReceipt } from '@facture/shared';
+import type { Quote, RefusalReceipt, SettlementLegState } from '@facture/shared';
 import { z } from 'zod';
+import type { InvoiceRow, MandateRow, TradeRow } from './db/schema.js';
 
 /**
  * Inbound money: a positive integer in minor units, as a decimal string.
@@ -83,3 +84,137 @@ export const wireRefusalReceipt = (r: RefusalReceipt): WireRefusalReceipt => ({
     Object.entries(r.detail).map(([k, v]) => [k, typeof v === 'bigint' ? money(v) : v]),
   ),
 });
+
+/* ---------------------------------------------------------------------------------- *
+ * Row renderers.
+ *
+ * Everything a route returns that carries an amount goes through one of these, for the
+ * same reason `money` exists at all: a `bigint` reaching `c.json` throws, and the throw is
+ * a 500 on a screen that was only trying to show a price. Field names are the domain
+ * names — `faceValue`, matching `Invoice.faceValue` and the `face_value` column — so
+ * nothing has to be translated between layers.
+ * ---------------------------------------------------------------------------------- */
+
+const isoOrNull = (value: Date | null): string | null => value?.toISOString() ?? null;
+
+/**
+ * An invoice as the book renders it.
+ *
+ * `issuance` is a sibling of `status`, not part of it. Tokenisation is paced and moves
+ * independently: an invoice can be confirmed before its instrument exists, and the book
+ * shows it as *being added* off this object while `status` already says `confirmed`.
+ */
+export const wireInvoice = (row: InvoiceRow) => ({
+  id: row.id,
+  sellerId: row.sellerId,
+  debtorId: row.debtorId,
+  invoiceNumber: row.invoiceNumber,
+  faceValue: money(row.faceValue),
+  currency: row.currency,
+  issuedAt: row.issuedAt.toISOString(),
+  dueAt: row.dueAt.toISOString(),
+  status: row.status,
+  uniquenessHash: row.uniquenessHash,
+  isin: row.isin,
+  regulationType: row.regulationType,
+  securityId: row.securityId,
+  instrumentAddress: row.securityEvmAddress,
+  issuance: {
+    state: row.issuanceState,
+    attempts: row.issuanceAttempts,
+    transactionId: row.issuanceTxId,
+    error: row.issuanceError,
+  },
+  confirmation: {
+    requestedAt: isoOrNull(row.confirmationRequestedAt),
+    expiresAt: isoOrNull(row.confirmationExpiresAt),
+    decision: row.confirmationDecision,
+    decidedAt: isoOrNull(row.confirmationDecidedAt),
+    note: row.confirmationNote,
+  },
+  createdAt: row.createdAt.toISOString(),
+  updatedAt: row.updatedAt.toISOString(),
+});
+
+/**
+ * A standing bid as its owner reads it.
+ *
+ * `committed` is the escrowed balance and `exposureLimit` is the ceiling the buyer wrote.
+ * They are separate fields because only the first one is money anyone has posted, and it
+ * is the first one that bounds a match — a mandate quotes what it funded, not what it
+ * intends to fund.
+ */
+export const wireMandate = (row: MandateRow) => ({
+  id: row.id,
+  buyerId: row.buyerId,
+  ratingFloor: row.ratingFloor,
+  maxTenorDays: row.maxTenorDays,
+  annualisedYieldBps: row.annualisedYieldBps,
+  currency: row.currency,
+  exposureLimit: money(row.exposureLimitMinor),
+  perDebtorLimit: row.perDebtorLimitMinor === null ? null : money(row.perDebtorLimitMinor),
+  committed: money(row.fundedMinor),
+  allocated: money(row.allocatedMinor),
+  unallocated: money(
+    row.fundedMinor > row.allocatedMinor ? row.fundedMinor - row.allocatedMinor : 0n,
+  ),
+  escrowRef: row.escrowRef,
+  status: row.status,
+  createdAt: row.createdAt.toISOString(),
+  updatedAt: row.updatedAt.toISOString(),
+});
+
+/** A trade with both legs' current state. The audit detail is one click away at `/proof`. */
+export const wireTrade = (row: TradeRow) => ({
+  id: row.id,
+  invoiceId: row.invoiceId,
+  mandateId: row.mandateId,
+  quoteId: row.quoteId,
+  sellerId: row.sellerId,
+  buyerId: row.buyerId,
+  faceValue: money(row.faceValue),
+  proceeds: money(row.proceedsMinor),
+  discount: money(row.faceValue - row.proceedsMinor),
+  annualisedYieldBps: row.annualisedYieldBps,
+  tenorDays: row.tenorDays,
+  status: row.status,
+  assetLeg: {
+    chain: 'hedera' as const,
+    state: assetLegState(row),
+    holdId: row.holdId,
+    transactionId: row.assetTxId,
+    consensusAt: isoOrNull(row.assetConsensusAt),
+  },
+  cashLeg: {
+    chain: row.cashNetwork?.startsWith('hedera') === true ? ('hedera' as const) : ('arc' as const),
+    state: cashLegState(row),
+    scheme: row.cashScheme,
+    network: row.cashNetwork,
+    asset: row.cashAsset,
+    transaction: row.cashTransaction,
+    payer: row.cashPayer,
+  },
+  createdAt: row.createdAt.toISOString(),
+  settledAt: isoOrNull(row.settledAt),
+});
+
+/**
+ * Leg states derived from the trade's own status rather than stored twice.
+ *
+ * `SettlementLegState` is shared's vocabulary — `pending | held | settled | released |
+ * failed` — and duplicating it in two nullable columns per leg would let a row describe a
+ * trade that is settled with a pending leg.
+ */
+function assetLegState(row: TradeRow): SettlementLegState {
+  if (row.status === 'settled') return 'settled';
+  if (row.status === 'unwound') return 'released';
+  if (row.status === 'failed') return 'failed';
+  return row.holdId === null ? 'pending' : 'held';
+}
+
+function cashLegState(row: TradeRow): SettlementLegState {
+  if (row.status === 'settled') return 'settled';
+  if (row.status === 'failed') return row.cashTransaction === null ? 'failed' : 'settled';
+  if (row.status === 'unwound') return 'released';
+  return 'pending';
+}

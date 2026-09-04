@@ -13,9 +13,12 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { notImplemented } from '../errors.js';
+import { explorer } from '../chain.js';
+import { getStore } from '../db/store.js';
+import { notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
 import { readParams } from '../validate.js';
+import { money } from '../wire.js';
 
 /** The exact shape the proof screen renders. Every field is independently verifiable. */
 export interface TradeProof {
@@ -94,10 +97,102 @@ export interface TradeProof {
 
 export const proofRoutes = new Hono<AppEnv>();
 
-proofRoutes.get('/trades/:id/proof', (c) => {
+proofRoutes.get('/trades/:id/proof', async (c) => {
   const { id } = readParams(c, z.object({ id: z.uuid() }));
-  // TODO: one read across trades / invoices / quotes / refusal_receipts, then decorate
-  // with `explorer.*` from `src/chain.ts`. Do not synthesise any link whose underlying
-  // identifier is null — an explorer URL that 404s is worse than an absent one.
-  throw notImplemented(`proof view for trade ${id}`);
+  const store = getStore();
+
+  const trade = await store.getTrade(id);
+  if (!trade) throw notFound(`Trade ${id}`);
+
+  const [invoice, quote, refusals] = await Promise.all([
+    store.getInvoice(trade.invoiceId),
+    store.getQuote(trade.quoteId),
+    store.listRefusalsForInvoice(trade.invoiceId),
+  ]);
+  if (!invoice) throw notFound(`Invoice ${trade.invoiceId}`);
+
+  /*
+   * Every link below is built from an identifier this service actually holds, and any
+   * identifier that is null produces a null link rather than a URL. An explorer link that
+   * 404s is worse than an absent one: this is the one screen whose whole purpose is that a
+   * reader can check each claim against HashScan or Arcscan without trusting us, and a
+   * dead link quietly converts "verifiable" into "looks verifiable".
+   */
+  const proof: TradeProof = {
+    tradeId: trade.id,
+    invoice: {
+      id: invoice.id,
+      invoiceNumber: invoice.invoiceNumber,
+      uniquenessHash: invoice.uniquenessHash,
+      isin: invoice.isin,
+      securityId: invoice.securityId,
+      securityExplorerUrl: link(invoice.securityId, explorer.hederaToken),
+    },
+    confirmation: {
+      decision: invoice.confirmationDecision,
+      decidedAt: iso(invoice.confirmationDecidedAt),
+    },
+    compliance: {
+      decision: trade.complianceDecision,
+      checkedAt: iso(trade.complianceCheckedAt),
+      hcsTopicId: trade.hcsTopicId,
+      hcsSequenceNumber: trade.hcsSequenceNumber?.toString(10) ?? null,
+      hcsExplorerUrl:
+        trade.hcsTopicId === null || trade.hcsSequenceNumber === null
+          ? null
+          : explorer.hederaTopicMessage(trade.hcsTopicId, Number(trade.hcsSequenceNumber)),
+    },
+    /*
+     * The quote is frozen at the price that filled, read off the persisted row rather than
+     * re-derived. A mandate's bid can move afterwards and a settled trade may not.
+     */
+    pricing: {
+      ratingAtQuote: quote?.ratingAtQuote ?? 'UNRATED',
+      tenorDays: trade.tenorDays,
+      annualisedYieldBps: trade.annualisedYieldBps,
+      faceValue: money(trade.faceValue),
+      discountMinor: money(trade.faceValue - trade.proceedsMinor),
+      proceedsMinor: money(trade.proceedsMinor),
+    },
+    assetLeg: {
+      chain: 'hedera',
+      holdId: trade.holdId,
+      transactionId: trade.assetTxId,
+      consensusAt: iso(trade.assetConsensusAt),
+      explorerUrl: link(trade.assetTxId, explorer.hederaTx),
+    },
+    cashLeg: {
+      chain: trade.cashNetwork?.startsWith('hedera') === true ? 'hedera' : 'arc',
+      scheme: trade.cashScheme,
+      network: trade.cashNetwork,
+      asset: trade.cashAsset,
+      transaction: trade.cashTransaction,
+      payer: trade.cashPayer,
+      explorerUrl:
+        trade.cashTransaction === null
+          ? null
+          : trade.cashNetwork?.startsWith('hedera') === true
+            ? explorer.hederaTx(trade.cashTransaction)
+            : explorer.arcTx(trade.cashTransaction),
+    },
+    /** Kept for the funders who were told no, not only for the one who was matched. */
+    refusals: refusals.map((row) => ({
+      mandateId: row.mandateId,
+      reasonCode: row.reasonCode,
+      reasonText: row.reasonText,
+      hcsExplorerUrl:
+        row.hcsTopicId === null || row.hcsSequenceNumber === null
+          ? null
+          : explorer.hederaTopicMessage(row.hcsTopicId, Number(row.hcsSequenceNumber)),
+    })),
+    settledAt: iso(trade.settledAt),
+  };
+
+  return c.json(proof);
 });
+
+const iso = (value: Date | null): string | null => value?.toISOString() ?? null;
+
+/** A link only exists when its identifier does. */
+const link = (id: string | null, build: (value: string) => string): string | null =>
+  id === null ? null : build(id);

@@ -6,11 +6,14 @@
  * confused two minutes on stage — a stale price is indistinguishable from a wrong price
  * unless something reports the lag.
  *
- * Heads are read for real. Cursors are still in-memory; see the TODO.
+ * Heads are read for real, and cursors are read from and written to storage — an
+ * in-memory cursor resets to null on every restart, which reads on the health page as
+ * "never polled" rather than "four thousand blocks behind", and only one of those is fine.
  */
 
 import { createPublicClient, http } from 'viem';
-import { arcChain, hedera } from '../chain.js';
+import { arcChain, assetChainKey, cashChainKey, hedera } from '../chain.js';
+import { getStore } from '../db/store.js';
 import type { Logger } from '../logger.js';
 import { rootLogger } from '../logger.js';
 
@@ -75,9 +78,10 @@ export class Indexer {
     const now = new Date().toISOString();
     try {
       const head = await this.#arcClient.getBlockNumber();
-      // TODO: read the persisted cursor (last Arc block whose settlement events were
-      // ingested) instead of assuming we are caught up.
-      const cursor = this.#arc.cursor;
+      // Read from storage, not from memory. An in-memory cursor resets to null on every
+      // restart, which reports as "never polled" rather than "four thousand blocks
+      // behind" - the two look identical on the health page and only one of them is fine.
+      const cursor = await this.#readCursor(cashChainKey, this.#arc.cursor);
       return {
         cursor,
         head: head.toString(),
@@ -106,9 +110,7 @@ export class Indexer {
       const head = body.blocks?.[0]?.number;
       if (typeof head !== 'number') throw new Error('mirror node returned no block number');
 
-      // TODO: cursor should be the last mirror-node block whose ATS / HCS events were
-      // ingested, read from the DB rather than held in memory across restarts.
-      const cursor = this.#hedera.cursor;
+      const cursor = await this.#readCursor(assetChainKey, this.#hedera.cursor);
       return {
         cursor,
         head: String(head),
@@ -123,10 +125,39 @@ export class Indexer {
     }
   }
 
-  /** Advanced by the ingest loop once events up to `position` are durably applied. */
+  /**
+   * Read a persisted cursor, falling back to whatever is in memory.
+   *
+   * Never throws. A cursor that cannot be read is a degraded health page; letting it
+   * escape would make an unreachable database look like an unreachable chain.
+   */
+  async #readCursor(chain: string, fallback: string | null): Promise<string | null> {
+    try {
+      return (await getStore().getCursor(chain)) ?? fallback;
+    } catch (err) {
+      this.#log.debug('cursor unreadable, using in-memory position', { chain, err });
+      return fallback;
+    }
+  }
+
+  /**
+   * Advanced by the ingest loop once events up to `position` are durably applied.
+   *
+   * Memory moves first and the write follows, because the caller has already applied the
+   * events: a failed write means the cursor is re-read from an older position on the next
+   * restart and some events are re-applied, which every consumer here is idempotent
+   * against. Advancing storage first and failing would skip them instead.
+   */
   advance(chain: 'arc' | 'hedera', position: string): void {
+    const key = chain === 'arc' ? cashChainKey : assetChainKey;
     if (chain === 'arc') this.#arc = { ...this.#arc, cursor: position };
     else this.#hedera = { ...this.#hedera, cursor: position };
+
+    void getStore()
+      .setCursor(key, position)
+      .catch((err: unknown) => {
+        this.#log.warn('could not persist indexer cursor', { chain, position, err });
+      });
   }
 }
 

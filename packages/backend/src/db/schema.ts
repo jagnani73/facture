@@ -13,6 +13,8 @@
  */
 
 import type { InvoiceStatus, MandateStatus, Rating } from '@facture/shared';
+import type { SettlementOutcome } from '../services/rating.js';
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   char,
@@ -71,6 +73,9 @@ type Drift<Domain extends string, Db extends string> =
 type _AssertInvoiceStatus = Expect<Drift<InvoiceStatus, (typeof INVOICE_STATUS)[number]>>;
 type _AssertRating = Expect<Drift<Rating, (typeof RATING_GRADE)[number]>>;
 type _AssertMandateStatus = Expect<Drift<MandateStatus, (typeof MANDATE_STATUS)[number]>>;
+type _AssertSettlementOutcome = Expect<
+  Drift<SettlementOutcome, (typeof SETTLEMENT_OUTCOMES)[number]>
+>;
 
 export const invoiceStatusEnum = pgEnum('invoice_status', INVOICE_STATUS);
 export const ratingEnum = pgEnum('rating_grade', RATING_GRADE);
@@ -108,6 +113,11 @@ export const tradeStatusEnum = pgEnum('trade_status', [
   'failed',
 ]);
 
+/** How a settled receivable resolved. Mirrors `SettlementOutcome` in `services/rating.ts`. */
+export const SETTLEMENT_OUTCOMES = ['on_time', 'late', 'default'] as const;
+
+export const settlementOutcomeEnum = pgEnum('settlement_outcome', SETTLEMENT_OUTCOMES);
+
 // --- parties --------------------------------------------------------------------
 
 export const sellers = pgTable(
@@ -144,8 +154,10 @@ export const buyers = pgTable(
  * Debtors carry the rating accumulator inline. It is one row per debtor, updated inside
  * the settlement transaction, and every column here is an input to `services/rating.ts`.
  *
- * TODO: add a `settlement_outcomes` ledger keyed on (debtor_id, invoice_id) so a replayed
- * maturity event cannot tighten a rating twice. The counters below are the projection.
+ * The counters are a **projection**. `settlement_outcomes` below is the append-only fact
+ * they are derived from, keyed on `(debtor_id, invoice_id)` so a replayed maturity cannot
+ * tighten a rating twice. `rating` is likewise recomputed from the counters rather than
+ * being incremented alongside them, so the stored grade cannot drift from the ladder.
  */
 export const debtors = pgTable(
   'debtors',
@@ -160,7 +172,9 @@ export const debtors = pgTable(
     settledOnTime: integer('settled_on_time').notNull().default(0),
     settledLate: integer('settled_late').notNull().default(0),
     defaulted: integer('defaulted').notNull().default(0),
-    settledFaceValue: bigint('settled_face_value', { mode: 'bigint' }).notNull().default(0n),
+    settledFaceValue: bigint('settled_face_value', { mode: 'bigint' })
+      .notNull()
+      .default(sql`0`),
     firstSettlementAt: timestamp('first_settlement_at', { withTimezone: true }),
     lastSettlementAt: timestamp('last_settlement_at', { withTimezone: true }),
 
@@ -262,8 +276,12 @@ export const mandates = pgTable(
     perDebtorLimitMinor: bigint('per_debtor_limit_minor', { mode: 'bigint' }),
 
     /** Escrowed at funding. Unallocated balance = funded - allocated. */
-    fundedMinor: bigint('funded_minor', { mode: 'bigint' }).notNull().default(0n),
-    allocatedMinor: bigint('allocated_minor', { mode: 'bigint' }).notNull().default(0n),
+    fundedMinor: bigint('funded_minor', { mode: 'bigint' })
+      .notNull()
+      .default(sql`0`),
+    allocatedMinor: bigint('allocated_minor', { mode: 'bigint' })
+      .notNull()
+      .default(sql`0`),
     escrowRef: text('escrow_ref'),
 
     status: mandateStatusEnum('status').notNull().default('draft'),
@@ -399,6 +417,114 @@ export const refusalReceipts = pgTable(
   ],
 );
 
+/**
+ * Every confirmation the seller has ever asked for, in order.
+ *
+ * The current token also lives inline on `invoices` because that is what the hot path
+ * reads — one indexed lookup on `confirmation_token_hash`, no join. This table is the
+ * ledger behind that projection: re-requesting confirmation invalidates the previous
+ * token, and "invalidates" has to leave a trace or a debtor who clicks a stale link gets
+ * an unexplained refusal. Both are written in one transaction.
+ */
+export const confirmationRequests = pgTable(
+  'confirmation_requests',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    invoiceId: uuid('invoice_id')
+      .notNull()
+      .references(() => invoices.id),
+
+    /** SHA-256 of the emailed token. The token itself is never stored, here or anywhere. */
+    tokenHash: text('token_hash').notNull(),
+    requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+
+    /** Single-use: set in the same transaction that writes the decision. */
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    /** Set when a later request superseded this one before the debtor answered. */
+    supersededAt: timestamp('superseded_at', { withTimezone: true }),
+
+    decision: confirmationDecisionEnum('decision'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    note: text('note'),
+  },
+  (t) => [
+    uniqueIndex('confirmation_requests_token_key').on(t.tokenHash),
+    index('confirmation_requests_invoice_idx').on(t.invoiceId, t.requestedAt),
+  ],
+);
+
+/**
+ * The rating ledger.
+ *
+ * `debtors` carries the accumulator as a projection — that is what the curve reads — and
+ * this is the append-only fact behind it, one row per settled receivable. The unique index
+ * is the whole point: maturity can be observed twice (a mirror-node replay, a retried
+ * scheduled transaction), and without it a second observation would tighten a rating for a
+ * payment that happened once.
+ */
+export const settlementOutcomes = pgTable(
+  'settlement_outcomes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    debtorId: uuid('debtor_id')
+      .notNull()
+      .references(() => debtors.id),
+    invoiceId: uuid('invoice_id')
+      .notNull()
+      .references(() => invoices.id),
+
+    outcome: settlementOutcomeEnum('outcome').notNull(),
+    faceValue: bigint('face_value', { mode: 'bigint' }).notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('settlement_outcomes_receivable_key').on(t.debtorId, t.invoiceId),
+    index('settlement_outcomes_debtor_idx').on(t.debtorId),
+  ],
+);
+
+/**
+ * Durable issuance queue state, one row per invoice.
+ *
+ * `invoices.issuance_state` stays the projection the book renders — "being added" is an
+ * invoice-level fact and the book must not join to learn it. The timing fields that only
+ * the worker needs live here, so a restart can rebuild the queue instead of losing every
+ * job that was mid-backoff.
+ */
+export const issuanceJobs = pgTable(
+  'issuance_jobs',
+  {
+    invoiceId: uuid('invoice_id')
+      .primaryKey()
+      .references(() => invoices.id),
+    state: issuanceStateEnum('state').notNull().default('queued'),
+    attempts: integer('attempts').notNull().default(0),
+    queuedAt: timestamp('queued_at', { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    /** Set while backing off. Null means "runnable now". */
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+    lastError: text('last_error'),
+  },
+  (t) => [index('issuance_jobs_state_idx').on(t.state, t.nextAttemptAt)],
+);
+
+/**
+ * Indexer cursors, one row per chain.
+ *
+ * In memory a cursor resets to null on every restart, which reads on `/health` as "we have
+ * never polled" rather than "we are 4,000 blocks behind" — the two look identical and only
+ * one of them is fine.
+ */
+export const indexerCursors = pgTable('indexer_cursors', {
+  chain: text('chain').primaryKey(),
+  /** Block number or consensus position, as a string: Arc's exceeds 2^53 eventually. */
+  cursor: text('cursor').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type SellerRow = typeof sellers.$inferSelect;
 export type BuyerRow = typeof buyers.$inferSelect;
 export type DebtorRow = typeof debtors.$inferSelect;
@@ -407,3 +533,18 @@ export type MandateRow = typeof mandates.$inferSelect;
 export type QuoteRow = typeof quotes.$inferSelect;
 export type TradeRow = typeof trades.$inferSelect;
 export type RefusalReceiptRow = typeof refusalReceipts.$inferSelect;
+export type ConfirmationRequestRow = typeof confirmationRequests.$inferSelect;
+export type SettlementOutcomeRow = typeof settlementOutcomes.$inferSelect;
+export type IssuanceJobRow = typeof issuanceJobs.$inferSelect;
+export type IndexerCursorRow = typeof indexerCursors.$inferSelect;
+
+export type NewSellerRow = typeof sellers.$inferInsert;
+export type NewBuyerRow = typeof buyers.$inferInsert;
+export type NewDebtorRow = typeof debtors.$inferInsert;
+export type NewInvoiceRow = typeof invoices.$inferInsert;
+export type NewMandateRow = typeof mandates.$inferInsert;
+export type NewQuoteRow = typeof quotes.$inferInsert;
+export type NewTradeRow = typeof trades.$inferInsert;
+export type NewRefusalReceiptRow = typeof refusalReceipts.$inferInsert;
+export type NewConfirmationRequestRow = typeof confirmationRequests.$inferInsert;
+export type NewSettlementOutcomeRow = typeof settlementOutcomes.$inferInsert;

@@ -11,11 +11,20 @@
  * the dispute risk a holdback exists to cover.
  */
 
+import { explainRefusal } from '@facture/shared';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { z } from 'zod';
-import { notImplemented } from '../errors.js';
+import { getStore } from '../db/store.js';
+import { badRequest, conflict, forbidden, isAppError, notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
+import { accountIdToEvmAddress } from '../services/ats.js';
+import { getComplianceGate } from '../services/compliance.js';
+import { quoteEngine } from '../services/quote-engine.js';
+import { buildTradeChallenge, settlementService } from '../services/settlement.js';
+import { X402_HEADERS, X402_VERSION } from '../services/x402.js';
 import { readJson, readParams, readQuery } from '../validate.js';
+import { money, wireQuote, wireTrade } from '../wire.js';
 
 const executeTradeBody = z.object({
   invoiceId: z.uuid(),
@@ -51,26 +60,361 @@ export const tradeRoutes = new Hono<AppEnv>();
  */
 tradeRoutes.post('/', async (c) => {
   const body = await readJson(c, executeTradeBody);
-  // TODO:
-  //  1. re-price and compare against the accepted quote inside `maxSlippageBps`;
-  //  2. `SELECT ... FOR UPDATE` the mandate and reserve against unallocated balance;
-  //  3. `settlementService.prepare` — ATS hold placed, x402 requirements built;
-  //  4. return 402 carrying `PAYMENT-REQUIRED` so the buyer signs the cash leg;
-  //  5. on `PAYMENT-SIGNATURE`, `settlementService.execute` and return the settled trade.
-  // Steps 3–5 are one DvP: if the cash leg never arrives, the hold expires and the
-  // seller's position was never encumbered beyond the challenge window.
-  throw notImplemented(`trade execution for invoice ${body.invoiceId}`);
+
+  /*
+   * One route, two halves of one x402 exchange. The first request arms the trade and comes
+   * back 402 carrying the challenge; the buyer signs it and repeats the same request with
+   * `PAYMENT-SIGNATURE`, which is the leg that moves money. Splitting them across two
+   * routes would let a client execute a payment against a challenge it never received.
+   */
+  const signature = c.req.header(X402_HEADERS.signature);
+  return signature === undefined
+    ? prepareTrade(c, body)
+    : executeTrade(c, body, decodePaymentPayload(signature));
 });
 
-tradeRoutes.get('/', (c) => {
+/**
+ * Arm the trade. Compliance first, then capital, then the hold — and nothing has moved
+ * when this returns.
+ */
+async function prepareTrade(
+  c: Context<AppEnv>,
+  body: z.infer<typeof executeTradeBody>,
+): Promise<Response> {
+  const store = getStore();
+
+  const invoice = await store.getInvoice(body.invoiceId);
+  if (!invoice) throw notFound(`Invoice ${body.invoiceId}`);
+
+  /*
+   * The instrument has to exist before it can be delivered. Issuance is paced and off the
+   * critical path, so an invoice can be confirmed and priced while its bond is still being
+   * deployed — this is the one moment where that catches up, and it is reported as
+   * `issuance_pending` rather than as a failure.
+   *
+   * Checked before the quote, deliberately: this is a fact about the invoice, and the
+   * seller is better told "it is still being added" than "that quote does not exist".
+   */
+  if (invoice.securityId === null || invoice.securityEvmAddress === null) {
+    throw conflict(
+      'issuance_pending',
+      'This invoice is still being added to the market — its instrument has not been ' +
+        'deployed yet. It will be sellable as soon as it lands.',
+    );
+  }
+
+  const accepted = await store.getQuote(body.quoteId);
+  if (!accepted || accepted.invoiceId !== invoice.id) {
+    throw notFound(`Quote ${body.quoteId} for invoice ${body.invoiceId}`);
+  }
+  if (accepted.status !== 'live') {
+    throw conflict('quote_expired', `That quote is ${accepted.status} and cannot be filled.`);
+  }
+  if (accepted.expiresAt.getTime() <= Date.now()) {
+    throw conflict(
+      'quote_expired',
+      'That quote has expired. Tenor shortens every day, so yesterday’s proceeds are the ' +
+        'wrong number rather than a stale one — take a fresh quote.',
+    );
+  }
+
+  // Re-priced against the live curve, not read back off the accepted quote. The curve
+  // moves, and the seller must never be filled at a price nobody is currently bidding.
+  const live = await quoteEngine.priceOne(invoice.id);
+  await recordRefusals(invoice.id, live);
+
+  if (live.quote === null) {
+    throw conflict(
+      'conflict',
+      `No mandate on the book will take this invoice today. ${live.refusals.length} ` +
+        'refusals were recorded, each naming its reason.',
+    );
+  }
+
+  /*
+   * Slippage is measured on proceeds, which is the number the seller actually read. The
+   * default tolerance is zero: `maxSlippageBps` is opt-in, and a seller who did not ask
+   * for a tolerance is filled at what they were shown or not at all.
+   */
+  const tolerance = (accepted.proceedsMinor * BigInt(body.maxSlippageBps)) / 10_000n;
+  if (live.quote.proceeds + tolerance < accepted.proceedsMinor) {
+    throw conflict(
+      'quote_expired',
+      `The book now pays ${money(live.quote.proceeds)} against the ` +
+        `${money(accepted.proceedsMinor)} you accepted, which is outside the ` +
+        `${body.maxSlippageBps} bps you allowed.`,
+    );
+  }
+
+  const mandate = await store.getMandate(live.quote.mandateId);
+  if (!mandate) throw notFound(`Mandate ${live.quote.mandateId}`);
+  const [seller, buyer] = await Promise.all([
+    store.getSeller(invoice.sellerId),
+    store.getBuyer(mandate.buyerId),
+  ]);
+  if (!seller || !buyer) throw notFound(`Counterparties for invoice ${invoice.id}`);
+
+  /*
+   * Compliance BEFORE the match, against the security's own ControlList and Kyc facets.
+   * This ordering is the whole argument against doing this on an AMM: an AMM matches first
+   * and discovers the transfer was illegal afterwards, so non-compliance arrives as a
+   * revert. Here the buyer is refused in words, with a receipt, and nothing was reserved.
+   */
+  const compliance = await getComplianceGate().check({
+    instrumentAddress: invoice.securityEvmAddress as `0x${string}`,
+    buyerEvmAddress: accountIdToEvmAddress(buyer.hederaAccountId),
+    buyerName: buyer.name,
+  });
+  if (compliance.decision === 'refused') {
+    throw forbidden(compliance.reason ?? 'This buyer is not eligible to hold this instrument.');
+  }
+
+  /*
+   * Reserve the capital before placing the hold. Both are taken under the mandate's row
+   * lock, so two invoices arriving against one mandate serialise rather than both being
+   * told there is room.
+   */
+  await store.allocate(mandate.id, live.quote.proceeds);
+
+  const trade = await store.insertTrade({
+    invoiceId: invoice.id,
+    mandateId: mandate.id,
+    quoteId: accepted.id,
+    sellerId: seller.id,
+    buyerId: buyer.id,
+    faceValue: invoice.faceValue,
+    proceedsMinor: live.quote.proceeds,
+    annualisedYieldBps: live.quote.annualisedYieldBps,
+    tenorDays: live.quote.tenorDays,
+    status: 'preparing',
+    complianceDecision: { ...compliance },
+    complianceCheckedAt: new Date(compliance.checkedAt),
+  });
+
+  let prepared;
+  try {
+    prepared = await settlementService.prepare({
+      tradeId: trade.id,
+      invoiceId: invoice.id,
+      mandateId: mandate.id,
+      securityId: invoice.securityId,
+      sellerHederaAccountId: seller.hederaAccountId ?? '',
+      buyerHederaAccountId: buyer.hederaAccountId ?? '',
+      buyerArcAddress: (buyer.arcAddress ?? '0x') as `0x${string}`,
+      // Whole position: partial sales are a later cut, and an all-or-nothing exit is the
+      // instrument this build ships.
+      unitsMinor: 1n,
+      proceedsMinor: live.quote.proceeds,
+      faceValue: invoice.faceValue,
+      currency: invoice.currency,
+    });
+  } catch (err) {
+    // Arming failed, so nothing is owed. Give the mandate its capacity back rather than
+    // leaving a bid quoting money it cannot spend.
+    await store.release(mandate.id, live.quote.proceeds);
+    await store.updateTrade(trade.id, { status: 'failed' });
+    throw err;
+  }
+
+  /*
+   * The header carries a whole `PaymentRequired`, not a bare requirements object.
+   * Verified against the live facilitator on 2026-09-01: `accepts` holds the
+   * requirements, and the resource description is a *sibling* of it rather than three
+   * fields inside it. Encoding only the requirements here would hand a v2 client a shape
+   * it cannot read, and the failure would surface as an opaque rejection rather than an
+   * error naming the field.
+   */
+  c.header(
+    X402_HEADERS.required,
+    encodeChallenge({
+      x402Version: X402_VERSION,
+      accepts: [prepared.requirements],
+      resource: prepared.resourceInfo,
+    }),
+  );
+  return c.json(
+    {
+      trade: wireTrade(await refresh(trade.id)),
+      quote: wireQuote(live.quote),
+      /** The asset leg is held, not moved. Nobody goes first. */
+      assetLeg: prepared.assetLeg,
+      compliance,
+      x402Version: X402_VERSION,
+      accepts: [prepared.requirements],
+      resource: prepared.resourceInfo,
+      expiresAt: prepared.expiresAt,
+      /** Repeat this request with the signed payload in this header. */
+      signatureHeader: X402_HEADERS.signature,
+    },
+    402,
+  );
+}
+
+/** Settle both legs. Cash clears at the facilitator, then the hold executes. */
+async function executeTrade(
+  c: Context<AppEnv>,
+  body: z.infer<typeof executeTradeBody>,
+  paymentPayload: unknown,
+): Promise<Response> {
+  const store = getStore();
+
+  const trade = await store.getTradeForInvoice(body.invoiceId);
+  if (!trade || trade.quoteId !== body.quoteId) {
+    throw notFound(`An armed trade for invoice ${body.invoiceId}`);
+  }
+  if (trade.status !== 'awaiting_payment') {
+    throw conflict(
+      'conflict',
+      `This trade is ${trade.status}; only a trade awaiting payment can be settled.`,
+    );
+  }
+
+  /*
+   * The challenge is rebuilt rather than stored. `extra.feePayer` is read from the
+   * facilitator's `GET /supported` and cached, and hardcoding or persisting it works right
+   * up until the facilitator rotates the payer, at which point it fails as an opaque
+   * signature mismatch.
+   */
+  const invoice = await store.getInvoice(trade.invoiceId);
+  if (!invoice) throw notFound(`Invoice ${trade.invoiceId}`);
+
+  const challenge = await buildTradeChallenge({
+    tradeId: trade.id,
+    invoiceId: trade.invoiceId,
+    proceedsMinor: trade.proceedsMinor,
+    faceValue: trade.faceValue,
+    currency: invoice.currency,
+  });
+
+  let result;
+  try {
+    result = await settlementService.execute({
+      tradeId: trade.id,
+      requirements: challenge.accepted,
+      paymentPayload,
+    });
+  } catch (err) {
+    /*
+     * A half-settled trade — cash gone, security not delivered — is reported as an
+     * internal error and left alone. Unwinding it would release a hold against a payment
+     * that actually happened, which turns a reconcilable state into a lost one.
+     */
+    if (isAppError(err) && err.code === 'internal_error') throw err;
+    await settlementService.unwind(trade.id, 'cash leg did not settle');
+    throw err;
+  }
+
+  c.header(X402_HEADERS.response, encodeChallenge(result.cashLeg));
+  return c.json({
+    trade: wireTrade(await refresh(trade.id)),
+    assetLeg: result.assetLeg,
+    cashLeg: result.cashLeg,
+    settledAt: result.settledAt,
+  });
+}
+
+tradeRoutes.get('/', async (c) => {
   const query = readQuery(c, listTradesQuery);
-  // TODO: keyset page, filtered to whichever side asked.
-  throw notImplemented(`trade listing for ${query.sellerId ?? query.buyerId}`);
+  const rows = await getStore().listTrades({
+    ...(query.sellerId === undefined ? {} : { sellerId: query.sellerId }),
+    ...(query.buyerId === undefined ? {} : { buyerId: query.buyerId }),
+    ...(query.status === undefined ? {} : { status: query.status }),
+    limit: query.limit,
+  });
+  return c.json({ trades: rows.map(wireTrade) });
 });
 
-tradeRoutes.get('/:id', (c) => {
+tradeRoutes.get('/:id', async (c) => {
   const { id } = readParams(c, z.object({ id: z.uuid() }));
-  // TODO: the trade plus both legs' current state. The audit detail is one click away at
-  // `/v1/trades/:id/proof` — see `routes/proof.ts`.
-  throw notImplemented(`trade detail for ${id}`);
+  const store = getStore();
+
+  const trade = await store.getTrade(id);
+  if (!trade) throw notFound(`Trade ${id}`);
+
+  const invoice = await store.getInvoice(trade.invoiceId);
+
+  return c.json({
+    trade: wireTrade(trade),
+    invoice:
+      invoice === null
+        ? null
+        : {
+            id: invoice.id,
+            invoiceNumber: invoice.invoiceNumber,
+            status: invoice.status,
+            isin: invoice.isin,
+            securityId: invoice.securityId,
+            dueAt: invoice.dueAt.toISOString(),
+          },
+    compliance: trade.complianceDecision,
+    /** The audit detail is one click away. */
+    proofUrl: `/v1/trades/${trade.id}/proof`,
+  });
 });
+
+// --- helpers ----------------------------------------------------------------------
+
+/**
+ * Persist the refusals from a pricing pass.
+ *
+ * A refusal is a product output, not a log line: the funder is told why in words rather
+ * than by a reverted transaction, and the receipt outlives the request so they can still
+ * read it afterwards. Invoice-level refusals (`mandateId === null`) are not stored —
+ * "this invoice is not confirmed" is a property of the invoice's own status, which is
+ * already on the row.
+ */
+async function recordRefusals(
+  invoiceId: string,
+  live: Awaited<ReturnType<typeof quoteEngine.priceOne>>,
+): Promise<void> {
+  const store = getStore();
+  const mandateIds = live.refusals
+    .map((refusal) => refusal.mandateId)
+    .filter((id): id is string => id !== null);
+  if (mandateIds.length === 0) return;
+
+  const buyerOf = new Map<string, string>();
+  for (const id of new Set(mandateIds)) {
+    const mandate = await store.getMandate(id);
+    if (mandate) buyerOf.set(id, mandate.buyerId);
+  }
+
+  await store.insertRefusals(
+    live.refusals.flatMap((refusal) => {
+      const buyerId = refusal.mandateId === null ? undefined : buyerOf.get(refusal.mandateId);
+      if (refusal.mandateId === null || buyerId === undefined) return [];
+      return [
+        {
+          invoiceId,
+          mandateId: refusal.mandateId,
+          buyerId,
+          reasonCode: refusal.code,
+          reasonText: explainRefusal(refusal.detail),
+          ratingAtRefusal: live.rating,
+          tenorDaysAtRefusal: live.tenorDays,
+        },
+      ];
+    }),
+  );
+}
+
+async function refresh(tradeId: string) {
+  const row = await getStore().getTrade(tradeId);
+  if (!row) throw notFound(`Trade ${tradeId}`);
+  return row;
+}
+
+/** x402 v2 carries its payloads base64-encoded in the header. */
+const encodeChallenge = (value: unknown): string =>
+  Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
+
+function decodePaymentPayload(header: string): unknown {
+  try {
+    return JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+  } catch {
+    throw badRequest(
+      `${X402_HEADERS.signature} must be base64-encoded JSON. Note that the shipped ` +
+        '@x402/* v2 packages use this header, not the legacy X-PAYMENT.',
+    );
+  }
+}

@@ -7,12 +7,22 @@
 
 import { serve } from '@hono/node-server';
 import { createApp } from './app.js';
+import { hedera } from './chain.js';
 import type { Config } from './config.js';
 import { EnvValidationError, loadConfig } from './config.js';
-import { closeDb } from './db/index.js';
+import { closeDb, getDb } from './db/index.js';
+import { createPgStore } from './db/pg-store.js';
+import { setStoreFactory } from './db/store.js';
 import { createLogger, rootLogger, setRootLogger } from './logger.js';
+import { initAtsAdapter, regulationKeyFor } from './services/ats.js';
+import { createAtsComplianceGate, setComplianceGate } from './services/compliance.js';
 import { initIndexer } from './services/indexer.js';
-import { getIssuanceQueue, initIssuanceQueue } from './services/issuance.js';
+import {
+  createStoreIssuanceSink,
+  getIssuanceQueue,
+  initIssuanceQueue,
+} from './services/issuance.js';
+import { createLoggingNotifier, setNotifier } from './services/notifier.js';
 import { DEFAULT_NETWORK, DEFAULT_SCHEME, initX402Client } from './services/x402.js';
 
 function loadConfigOrExit(): Config {
@@ -33,6 +43,26 @@ function boot(): void {
   setRootLogger(createLogger(env.LOG_LEVEL, { svc: 'facture-backend', env: env.NODE_ENV }));
   const log = rootLogger;
 
+  /*
+   * Lazily: registering the factory does not open a socket. The first request that needs
+   * the database builds the pool, so a health check against a service whose Postgres is
+   * down still answers with a body saying so rather than failing to start at all.
+   */
+  setStoreFactory(() => createPgStore(getDb()));
+  setNotifier(createLoggingNotifier(log));
+  setComplianceGate(createAtsComplianceGate({ logger: log }));
+
+  initAtsAdapter({
+    operatorId: env.HEDERA_OPERATOR_ID,
+    operatorKey: env.HEDERA_OPERATOR_KEY,
+    // Unset disables issuance rather than simulating it — see `services/ats.ts`.
+    factoryId: env.ATS_FACTORY_ID,
+    regulation: regulationKeyFor(env.ATS_REGULATION_TYPE),
+    gasLimit: env.ISSUANCE_GAS_LIMIT,
+    network: hedera.network,
+    logger: log,
+  });
+
   initIndexer(log);
 
   initIssuanceQueue({
@@ -40,6 +70,7 @@ function boot(): void {
     maxAttempts: env.ISSUANCE_MAX_ATTEMPTS,
     backoffBaseMs: env.ISSUANCE_BACKOFF_BASE_MS,
     logger: log,
+    sink: createStoreIssuanceSink(),
   });
 
   initX402Client({

@@ -31,7 +31,9 @@ import type {
   RefusalReceipt,
 } from '@facture/shared';
 import { bestQuote, matchCount, tenorDays } from '@facture/shared';
-import { notFound, notImplemented } from '../errors.js';
+import { toDebtor, toInvoice, toMandate } from '../db/projections.js';
+import { getStore } from '../db/store.js';
+import { notFound } from '../errors.js';
 import type { RatingAssessment } from './rating.js';
 import { ratingService } from './rating.js';
 
@@ -69,6 +71,15 @@ export interface QuoteEngineDeps {
    */
   loadCandidateMandates(criteria: MandateCriteria): Promise<Mandate[]>;
   ratingFor(debtorId: string): Promise<RatingAssessment>;
+
+  /*
+   * Batched forms, used by `priceBook`. Optional so a fake only has to implement the
+   * single-record seams above; when one is absent the batch falls back to fanning out over
+   * its singular counterpart, which is correct but is the N+1 this exists to avoid.
+   */
+  loadInvoices?(invoiceIds: readonly string[]): Promise<Invoice[]>;
+  loadDebtors?(debtorIds: readonly string[]): Promise<Debtor[]>;
+  ratingsFor?(debtorIds: readonly string[]): Promise<Map<string, RatingAssessment>>;
 }
 
 export interface MandateCriteria {
@@ -81,25 +92,44 @@ export interface MandateCriteria {
 
 export const defaultQuoteEngineDeps: QuoteEngineDeps = {
   async loadInvoice(invoiceId) {
-    // TODO: SELECT the invoice row, projected onto the shared `Invoice` shape.
-    throw notImplemented(`invoice lookup for ${invoiceId}`);
+    const row = await getStore().getInvoice(invoiceId);
+    return row === null ? null : toInvoice(row);
   },
 
   async loadDebtor(debtorId) {
-    // TODO: SELECT the debtor row, projected onto the shared `Debtor` shape. The counters
-    // come off the same accumulator `services/rating.ts` reads.
-    throw notImplemented(`debtor lookup for ${debtorId}`);
+    const row = await getStore().getDebtor(debtorId);
+    return row === null ? null : toDebtor(row);
   },
 
+  /**
+   * Every active mandate bidding in this invoice's currency, with per-debtor exposure
+   * attached.
+   *
+   * Deliberately unfiltered beyond currency and status. The rating floor, the tenor
+   * ceiling and both capacity checks are `bestQuote`'s to apply, because each one it
+   * applies produces a refusal the funder can read — filtering a near-miss out in SQL
+   * would turn "this mandate takes A or better and your customer is C" into silence.
+   */
   async loadCandidateMandates(criteria) {
-    // TODO: SELECT open, funded mandates for this bucket. Order by annualised yield
-    // ascending — the tightest bid that can actually take the whole face value wins.
-    // Do NOT filter out the near-misses; a refusal the funder can read is a product
-    // output, and it needs the mandate row to explain itself.
-    throw notImplemented(`candidate mandate lookup for debtor ${criteria.debtorId}`);
+    const store = getStore();
+    const rows = await store.listQuotableMandates(criteria.currency);
+    const exposure = await store.debtorExposure(rows.map((row) => row.id));
+    return rows.map((row) => toMandate(row, exposure.get(row.id) ?? {}));
   },
 
   ratingFor: (debtorId) => ratingService.ratingFor(debtorId),
+
+  async loadInvoices(invoiceIds) {
+    const rows = await getStore().getInvoices(invoiceIds);
+    return rows.map(toInvoice);
+  },
+
+  async loadDebtors(debtorIds) {
+    const rows = await getStore().getDebtors(debtorIds);
+    return rows.map((row) => toDebtor(row));
+  },
+
+  ratingsFor: (debtorIds) => ratingService.ratingsFor(debtorIds),
 };
 
 export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps) {
@@ -150,10 +180,88 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
      * Prices a seller's whole book in one pass. The book screen shows a price beside
      * every invoice, so this must not be N round-trips of `priceOne`.
      */
-    async priceBook(_invoiceIds: readonly string[], _asOf?: Date): Promise<LiveQuote[]> {
-      // TODO: one batched rating read + one batched mandate read, then fan out over
-      // `bestQuote` in memory. Same result as mapping `priceOne`, without the N+1.
-      throw notImplemented('batched book pricing');
+    async priceBook(invoiceIds: readonly string[], asOf: Date = new Date()): Promise<LiveQuote[]> {
+      if (invoiceIds.length === 0) return [];
+
+      const invoices = deps.loadInvoices
+        ? await deps.loadInvoices(invoiceIds)
+        : (await Promise.all(invoiceIds.map((id) => deps.loadInvoice(id)))).filter(
+            (invoice): invoice is Invoice => invoice !== null,
+          );
+
+      // An id with no row is skipped rather than throwing. The book screen asks for the
+      // page it just listed; one invoice deleted between the two reads should cost that
+      // row, not the whole screen.
+      const byId = new Map(invoices.map((invoice) => [invoice.id, invoice]));
+      const ordered = invoiceIds
+        .map((id) => byId.get(id))
+        .filter((invoice): invoice is Invoice => invoice !== undefined);
+      if (ordered.length === 0) return [];
+
+      const debtorIds = [...new Set(ordered.map((invoice) => invoice.debtorId))];
+
+      const [debtorRows, assessments] = await Promise.all([
+        deps.loadDebtors
+          ? deps.loadDebtors(debtorIds)
+          : Promise.all(debtorIds.map((id) => deps.loadDebtor(id))).then((rows) =>
+              rows.filter((row): row is Debtor => row !== null),
+            ),
+        deps.ratingsFor
+          ? deps.ratingsFor(debtorIds)
+          : Promise.all(debtorIds.map((id) => deps.ratingFor(id))).then(
+              (list) => new Map(list.map((a) => [a.debtorId, a])),
+            ),
+      ]);
+      const debtorsById = new Map(debtorRows.map((row) => [row.id, row]));
+
+      /*
+       * One mandate read per distinct currency, not per invoice. `MandateCriteria` beyond
+       * `currency` is advisory — the data seam deliberately over-fetches so that the
+       * near-misses survive to be explained — so a representative invoice's criteria is
+       * enough to describe the read.
+       */
+      const currencies = [...new Set(ordered.map((invoice) => invoice.currency))];
+      const curves = new Map<Currency, Mandate[]>();
+      await Promise.all(
+        currencies.map(async (currency) => {
+          const sample = ordered.find((invoice) => invoice.currency === currency);
+          if (!sample) return;
+          const assessment = assessments.get(sample.debtorId);
+          curves.set(
+            currency,
+            await deps.loadCandidateMandates({
+              debtorId: sample.debtorId,
+              rating: assessment?.rating ?? 'UNRATED',
+              tenorDays: tenorDays(sample.dueAt, asOf),
+              faceValue: sample.faceValue,
+              currency,
+            }),
+          );
+        }),
+      );
+
+      const priced: LiveQuote[] = [];
+      for (const invoice of ordered) {
+        const debtorRow = debtorsById.get(invoice.debtorId);
+        const assessment = assessments.get(invoice.debtorId);
+        if (!debtorRow || !assessment) continue;
+
+        const debtor: Debtor = { ...debtorRow, rating: assessment.rating };
+        const mandates = curves.get(invoice.currency) ?? [];
+        const result = bestQuote(invoice, mandates, debtor, { asOf });
+
+        priced.push({
+          invoiceId: invoice.id,
+          quote: result.quote,
+          refusals: result.refusals,
+          rating: debtor.rating,
+          tenorDays: result.tenorDays,
+          candidatesConsidered: mandates.length,
+          matchesAvailable: matchCount(result),
+          pricedAt: result.asOf,
+        });
+      }
+      return priced;
     },
   };
 }
@@ -161,3 +269,50 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
 export type QuoteEngine = ReturnType<typeof createQuoteEngine>;
 
 export const quoteEngine: QuoteEngine = createQuoteEngine();
+
+/**
+ * Give a live quote an id the seller can come back with.
+ *
+ * A quote is derived — a pure function of the invoice, the curve and the clock — so it is
+ * not stored as a source of truth. But a trade has to be able to prove *which* price the
+ * seller was shown and reject a stale acceptance, and that needs a handle.
+ *
+ * An identical unexpired quote is reused rather than re-written. The quote route is safe
+ * to poll, so writing a row per poll would be a write per refresh of the product's main
+ * screen; a price that has actually moved supersedes the old row and gets a new one, which
+ * is also what makes `quote_expired` mean something at execution time.
+ */
+export async function materialiseQuote(
+  invoiceId: string,
+  rating: Rating,
+  quote: Quote,
+  asOf: Date = new Date(),
+): Promise<string> {
+  const store = getStore();
+  const existing = await store.findLiveQuote(invoiceId, asOf);
+
+  const unchanged =
+    existing !== null &&
+    existing.mandateId === quote.mandateId &&
+    existing.annualisedYieldBps === quote.annualisedYieldBps &&
+    existing.tenorDays === quote.tenorDays &&
+    existing.proceedsMinor === quote.proceeds;
+  if (unchanged && existing) return existing.id;
+
+  if (existing) await store.setQuoteStatus(existing.id, 'superseded');
+
+  const row = await store.insertQuote({
+    invoiceId,
+    mandateId: quote.mandateId,
+    ratingAtQuote: rating,
+    tenorDays: quote.tenorDays,
+    annualisedYieldBps: quote.annualisedYieldBps,
+    faceValue: quote.faceValue,
+    discountMinor: quote.discount,
+    proceedsMinor: quote.proceeds,
+    status: 'live',
+    pricedAt: new Date(quote.asOf),
+    expiresAt: new Date(quote.expiresAt),
+  });
+  return row.id;
+}

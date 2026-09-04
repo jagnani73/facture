@@ -15,9 +15,10 @@
  */
 
 import { setTimeout as sleep } from 'node:timers/promises';
-import { notImplemented } from '../errors.js';
+import { getStore } from '../db/store.js';
 import type { Logger } from '../logger.js';
 import { rootLogger } from '../logger.js';
+import { getAtsAdapter } from './ats.js';
 
 export type IssuanceState = 'queued' | 'issuing' | 'issued' | 'failed';
 
@@ -66,6 +67,17 @@ export interface IssuanceSnapshot {
 
 export type DeployBond = (job: IssuanceJob) => Promise<DeployedSecurity>;
 
+/**
+ * Where queue state goes so it survives a restart.
+ *
+ * A seam rather than a direct store call because the queue's own mechanics — pacing,
+ * backoff, the give-up rule — are what the tests are about, and none of them should need a
+ * database. `createStoreIssuanceSink` is the real one.
+ */
+export interface IssuanceSink {
+  persist(status: IssuanceStatus, job: IssuanceJob): Promise<void>;
+}
+
 export interface IssuanceQueueOptions {
   deploy: DeployBond;
   /** Pacing floor between submissions. Network gas throughput, not per-tx gas. */
@@ -73,6 +85,7 @@ export interface IssuanceQueueOptions {
   maxAttempts: number;
   backoffBaseMs: number;
   logger?: Logger;
+  sink?: IssuanceSink;
 }
 
 /**
@@ -139,6 +152,7 @@ export class IssuanceQueue {
     this.#byInvoice.set(job.invoiceId, entry);
     this.#pending.push(entry);
     this.#log.info('issuance queued', { invoiceId: job.invoiceId, depth: this.#pending.length });
+    void this.#persist(entry);
     void this.#drain();
     return entry.status;
   }
@@ -186,6 +200,23 @@ export class IssuanceQueue {
     if (wait > 0) await sleep(wait);
   }
 
+  /**
+   * Mirror the entry's state into storage.
+   *
+   * Deliberately swallows its own failure. Losing a row is a degraded book — an invoice
+   * reads as "being added" for longer than it should — while letting the rejection escape
+   * would kill the drain loop and stop every remaining invoice from being issued at all.
+   */
+  async #persist(entry: QueueEntry): Promise<void> {
+    const sink = this.#opts.sink;
+    if (!sink) return;
+    try {
+      await sink.persist(entry.status, entry.job);
+    } catch (err) {
+      this.#log.error('could not persist issuance state', { invoiceId: entry.job.invoiceId, err });
+    }
+  }
+
   async #attempt(entry: QueueEntry): Promise<void> {
     const { job, status } = entry;
     status.state = 'issuing';
@@ -207,8 +238,7 @@ export class IssuanceQueue {
         gasUsed: security.gasUsed,
         attempts: status.attempts,
       });
-      // TODO: persist securityId + evmAddress onto the invoice row and flip its status,
-      // so the book can re-render the invoice as quotable.
+      await this.#persist(entry);
     } catch (err) {
       status.lastError = err instanceof Error ? err.message : String(err);
       const retryable = isRetryable(err) && status.attempts < this.#opts.maxAttempts;
@@ -221,6 +251,7 @@ export class IssuanceQueue {
           attempts: status.attempts,
           err,
         });
+        await this.#persist(entry);
         return;
       }
 
@@ -236,6 +267,7 @@ export class IssuanceQueue {
         delayMs: delay,
         err: status.lastError,
       });
+      await this.#persist(entry);
       await sleep(delay);
       this.#pending.push(entry);
     } finally {
@@ -245,21 +277,61 @@ export class IssuanceQueue {
 }
 
 /**
- * The real deployment. Kept behind the `DeployBond` seam so the queue mechanics above
- * are testable with a fake that returns BUSY on demand.
+ * The real deployment: `Factory.deployBond` through the ATS adapter.
  *
- * TODO: build and execute `Factory.deployBond` via `@hiero-ledger/sdk`
- * (`ContractExecuteTransaction`, gas from `ISSUANCE_GAS_LIMIT`, default 10M — the ATS
- * repo ships exactly that for this call on both hedera-testnet and hedera-mainnet).
- * Rate stays at the 0 it initialises to; maturity is the invoice due date; principal is
- * the face value. Leave `identityRegistry` and `compliance` at address(0) and use the
- * security's own `ControlList` and `Kyc` facets instead — a shared ERC-3643 registry is
- * `isVerified(address)` with no token parameter, so every security pointing at one
- * registry would share a single global allowlist.
+ * Kept behind the `DeployBond` seam so the queue mechanics above stay testable with a fake
+ * that returns BUSY on demand — the pacing, the backoff and the give-up rule are the parts
+ * that have to be right, and none of them should need a testnet to exercise.
+ *
+ * The adapter is resolved per call rather than captured, so `initAtsAdapter` at boot and
+ * `setAtsAdapter` in a test both take effect without rebuilding the queue. Everything the
+ * call itself decides — gas, regulation, zero coupon, `address(0)` for the registry —
+ * lives in `services/ats.ts`.
  */
-export const deployBond: DeployBond = (job) => {
-  throw notImplemented(`ATS deployBond for invoice ${job.invoiceId}`);
-};
+export const deployBond: DeployBond = (job) => getAtsAdapter().deployBond(job);
+
+/**
+ * The real sink: the durable job row, plus the projection the book reads.
+ *
+ * Both are written because they answer different questions. `issuance_jobs` carries the
+ * timing the worker needs to resume after a restart; `invoices.issuance_state` is what a
+ * page of the book renders, and making that screen join to learn whether a row is still
+ * "being added" would be a join per row.
+ *
+ * The invoice is only moved out of `draft` on success. Issuance and confirmation are
+ * independent — an invoice can be confirmed before its instrument exists, and a failed
+ * deployment must not silently unwind a debtor's acknowledgement.
+ */
+export function createStoreIssuanceSink(): IssuanceSink {
+  return {
+    async persist(status) {
+      const store = getStore();
+
+      await store.saveIssuanceJob({
+        invoiceId: status.invoiceId,
+        state: status.state,
+        attempts: status.attempts,
+        startedAt: status.startedAt === null ? null : new Date(status.startedAt),
+        completedAt: status.completedAt === null ? null : new Date(status.completedAt),
+        nextAttemptAt: status.nextAttemptAt === null ? null : new Date(status.nextAttemptAt),
+        lastError: status.lastError,
+      });
+
+      await store.updateInvoice(status.invoiceId, {
+        issuanceState: status.state,
+        issuanceAttempts: status.attempts,
+        issuanceError: status.lastError,
+        ...(status.security === null
+          ? {}
+          : {
+              securityId: status.security.securityId,
+              securityEvmAddress: status.security.evmAddress,
+              issuanceTxId: status.security.transactionId,
+            }),
+      });
+    },
+  };
+}
 
 let queue: IssuanceQueue | undefined;
 

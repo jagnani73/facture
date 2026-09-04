@@ -13,10 +13,11 @@
 import { MANDATE_STATUSES } from '@facture/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { notImplemented } from '../errors.js';
+import { getStore } from '../db/store.js';
+import { badRequest, notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
 import { readJson, readParams, readQuery } from '../validate.js';
-import { moneyString } from '../wire.js';
+import { money, moneyString, wireMandate } from '../wire.js';
 
 const uuidParam = z.object({ id: z.uuid() });
 
@@ -61,16 +62,59 @@ export const mandateRoutes = new Hono<AppEnv>();
 
 mandateRoutes.post('/', async (c) => {
   const body = await readJson(c, createMandateBody);
-  // TODO: INSERT as `draft`. A mandate is not on the curve until it is funded — an
-  // unfunded bid would make the quote soft, which is the one thing the product cannot
-  // afford.
-  throw notImplemented(`mandate creation for buyer ${body.buyerId}`);
+  const store = getStore();
+
+  const buyer = await store.getBuyer(body.buyerId);
+  if (!buyer) throw notFound(`Buyer ${body.buyerId}`);
+
+  if (
+    body.perDebtorLimitMinor !== undefined &&
+    body.perDebtorLimitMinor > body.exposureLimitMinor
+  ) {
+    throw badRequest(
+      'The per-customer cap cannot exceed the total exposure limit — a concentration cap ' +
+        'above the pool it sits under is not a cap.',
+    );
+  }
+
+  /*
+   * Inserted as `draft`. A mandate is not on the curve until it is funded: an unfunded bid
+   * would make every quote it appears in soft, and a soft quote is the one thing this
+   * product cannot afford — the whole claim is that the price a seller sees is firm.
+   */
+  const row = await store.insertMandate({
+    buyerId: buyer.id,
+    ratingFloor: body.ratingFloor,
+    maxTenorDays: body.maxTenorDays,
+    annualisedYieldBps: body.annualisedYieldBps,
+    currency: body.currency,
+    exposureLimitMinor: body.exposureLimitMinor,
+    perDebtorLimitMinor: body.perDebtorLimitMinor ?? null,
+    status: 'draft',
+  });
+
+  return c.json({ mandate: wireMandate(row), quoting: false }, 201);
 });
 
-mandateRoutes.get('/', (c) => {
+mandateRoutes.get('/', async (c) => {
   const query = readQuery(c, listMandatesQuery);
-  // TODO: mandates for this buyer with funded / allocated / unallocated per row.
-  throw notImplemented(`mandate listing for buyer ${query.buyerId}`);
+  const store = getStore();
+
+  const rows = await store.listMandates({
+    buyerId: query.buyerId,
+    ...(query.status === undefined ? {} : { status: query.status }),
+    limit: query.limit,
+  });
+  const exposure = await store.debtorExposure(rows.map((row) => row.id));
+
+  return c.json({
+    mandates: rows.map((row) => ({
+      ...wireMandate(row),
+      /** Only an active mandate quotes; `funding` is not yet firm. */
+      quoting: row.status === 'active',
+      debtorExposure: renderExposure(exposure.get(row.id) ?? {}),
+    })),
+  });
 });
 
 /**
@@ -79,19 +123,96 @@ mandateRoutes.get('/', (c) => {
  *
  * Registered before `/:id/...` so the static segment cannot be swallowed by a param.
  */
-mandateRoutes.get('/exposure', (c) => {
+mandateRoutes.get('/exposure', async (c) => {
   const query = readQuery(c, z.object({ buyerId: z.uuid() }));
-  // TODO: aggregate over mandates JOIN trades, grouped by debtor and by rating bucket.
-  throw notImplemented(`exposure summary for buyer ${query.buyerId}`);
+  const store = getStore();
+
+  const rows = await store.listMandates({ buyerId: query.buyerId, limit: 200 });
+  const exposure = await store.debtorExposure(rows.map((row) => row.id));
+
+  // Rolled up across the buyer's whole book, then broken out by customer and by rating
+  // bucket — the two cuts a credit desk actually watches.
+  let committed = 0n;
+  let allocated = 0n;
+  const perDebtor = new Map<string, bigint>();
+  const perBucket = new Map<string, { committed: bigint; allocated: bigint; mandates: number }>();
+
+  for (const row of rows) {
+    if (row.status === 'withdrawn') continue;
+    committed += row.fundedMinor;
+    allocated += row.allocatedMinor;
+
+    for (const [debtorId, amount] of Object.entries(exposure.get(row.id) ?? {})) {
+      perDebtor.set(debtorId, (perDebtor.get(debtorId) ?? 0n) + amount);
+    }
+
+    const bucket = `${row.ratingFloor}/${row.maxTenorDays}d`;
+    const current = perBucket.get(bucket) ?? { committed: 0n, allocated: 0n, mandates: 0 };
+    perBucket.set(bucket, {
+      committed: current.committed + row.fundedMinor,
+      allocated: current.allocated + row.allocatedMinor,
+      mandates: current.mandates + 1,
+    });
+  }
+
+  const debtors = await store.getDebtors([...perDebtor.keys()]);
+  const nameOf = new Map(debtors.map((row) => [row.id, row.name]));
+
+  return c.json({
+    buyerId: query.buyerId,
+    committed: money(committed),
+    allocated: money(allocated),
+    unallocated: money(committed > allocated ? committed - allocated : 0n),
+    /** Percent of committed capital actually working, to two decimal places. */
+    utilisationBps: committed === 0n ? 0 : Number((allocated * 10_000n) / committed),
+    byDebtor: [...perDebtor.entries()]
+      .map(([debtorId, amount]) => ({
+        debtorId,
+        debtorName: nameOf.get(debtorId) ?? null,
+        committed: money(amount),
+      }))
+      .sort((a, b) => (BigInt(a.committed) < BigInt(b.committed) ? 1 : -1)),
+    byBucket: [...perBucket.entries()].map(([bucket, totals]) => ({
+      bucket,
+      mandates: totals.mandates,
+      committed: money(totals.committed),
+      allocated: money(totals.allocated),
+    })),
+  });
 });
 
 /** Escrow the capital. This is the moment the bid becomes firm. */
 mandateRoutes.post('/:id/fund', async (c) => {
   const { id } = readParams(c, uuidParam);
   const body = await readJson(c, fundMandateBody);
-  // TODO: verify the deposit landed, then `funded_minor += amount` and status -> funded
-  // in one transaction. Never trust the client's amount over the escrow record.
-  throw notImplemented(`funding mandate ${id} with ${body.amountMinor}`);
+  const store = getStore();
+
+  const existing = await store.getMandate(id);
+  if (!existing) throw notFound(`Mandate ${id}`);
+
+  /*
+   * The escrow record is the authority on how much landed, never the request body. A
+   * client-supplied amount is a claim about someone else's ledger, and believing it would
+   * put unbacked capital on the curve — which makes every quote that mandate appears in a
+   * quote nobody can honour.
+   *
+   * `escrowRef` is the reference to that record, and it is what the proof view shows.
+   * There is no escrow provider wired into this build, so the reference is recorded and
+   * carried; when one exists, its confirmed amount is read here and the body's amount is
+   * used only to detect a mismatch.
+   */
+  const mandate = await store.fundMandate({
+    mandateId: id,
+    amount: body.amountMinor,
+    escrowRef: body.escrowRef,
+    at: new Date(),
+  });
+
+  return c.json({
+    mandate: wireMandate(mandate),
+    /** The moment the bid became firm. Before this the mandate is not on the curve. */
+    quoting: mandate.status === 'active',
+  });
 });
 
 /**
@@ -101,14 +222,57 @@ mandateRoutes.post('/:id/fund', async (c) => {
 mandateRoutes.post('/:id/withdraw', async (c) => {
   const { id } = readParams(c, uuidParam);
   const body = await readJson(c, withdrawBody);
-  // TODO: `SELECT ... FOR UPDATE` on the mandate, clamp to funded - allocated, release
-  // from escrow, decrement. A withdrawal racing a match must lose to the match.
-  throw notImplemented(`withdrawal from mandate ${id} of ${body.amountMinor ?? 'all unallocated'}`);
+
+  /*
+   * The row lock lives in the store, and it is what makes a withdrawal racing a match lose
+   * to the match: the allocation is taken under the same lock, so by the time this reads
+   * `funded - allocated` the match has either happened or has not. Capital a buyer has
+   * already been matched against is not theirs to pull — that is what "firm" means.
+   */
+  const { mandate, withdrawn } = await getStore().withdrawFromMandate({
+    mandateId: id,
+    ...(body.amountMinor === undefined ? {} : { amount: body.amountMinor }),
+    at: new Date(),
+  });
+
+  return c.json({
+    mandate: wireMandate(mandate),
+    withdrawn: money(withdrawn),
+    quoting: mandate.status === 'active',
+  });
 });
 
-/** Per-mandate exposure detail. */
-mandateRoutes.get('/:id/exposure', (c) => {
+/** Per-mandate exposure detail: allocations by customer, against this mandate's own caps. */
+mandateRoutes.get('/:id/exposure', async (c) => {
   const { id } = readParams(c, uuidParam);
-  // TODO: this mandate's allocations by debtor, against its own limits.
-  throw notImplemented(`exposure detail for mandate ${id}`);
+  const store = getStore();
+
+  const mandate = await store.getMandate(id);
+  if (!mandate) throw notFound(`Mandate ${id}`);
+
+  const exposure = (await store.debtorExposure([id])).get(id) ?? {};
+  const debtors = await store.getDebtors(Object.keys(exposure));
+  const nameOf = new Map(debtors.map((row) => [row.id, row.name]));
+
+  const cap = mandate.perDebtorLimitMinor ?? mandate.exposureLimitMinor;
+
+  return c.json({
+    mandate: wireMandate(mandate),
+    perDebtorLimit: money(cap),
+    byDebtor: Object.entries(exposure)
+      .map(([debtorId, amount]) => ({
+        debtorId,
+        debtorName: nameOf.get(debtorId) ?? null,
+        committed: money(amount),
+        /** What this mandate could still take on this customer, clamped at zero. */
+        remaining: money(cap > amount ? cap - amount : 0n),
+      }))
+      .sort((a, b) => (BigInt(a.committed) < BigInt(b.committed) ? 1 : -1)),
+  });
 });
+
+/** Exposure maps carry `bigint` values, which `JSON.stringify` throws on. */
+const renderExposure = (exposure: Readonly<Record<string, bigint>>): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(exposure).map(([debtorId, amount]) => [debtorId, money(amount)]),
+  );

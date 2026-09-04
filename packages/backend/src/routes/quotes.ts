@@ -14,7 +14,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv } from '../middleware/context.js';
-import { quoteEngine } from '../services/quote-engine.js';
+import { materialiseQuote, quoteEngine } from '../services/quote-engine.js';
 import { readParams, readQuery } from '../validate.js';
 import { wireQuote, wireRefusalReceipt } from '../wire.js';
 
@@ -34,7 +34,19 @@ quoteRoutes.get('/invoices/:id/quote', async (c) => {
   const { id } = readParams(c, z.object({ id: z.uuid() }));
   const { asOf, includeRefusals } = readQuery(c, quoteQuery);
 
-  const live = await quoteEngine.priceOne(id, asOf ? new Date(asOf) : new Date());
+  const pricedAt = asOf ? new Date(asOf) : new Date();
+  const live = await quoteEngine.priceOne(id, pricedAt);
+
+  /*
+   * The quote gets an id here, and only here. A trade is executed against a `quoteId`
+   * because the seller must never be filled at a price they were not shown, so the number
+   * on this screen has to be referable afterwards. An identical unexpired quote is reused
+   * rather than rewritten, so polling this route stays cheap.
+   */
+  const quoteId =
+    live.quote === null
+      ? null
+      : await materialiseQuote(live.invoiceId, live.rating, live.quote, pricedAt);
 
   /*
    * `Quote` and the refusal operands are `bigint` minor units in the domain, and
@@ -48,6 +60,8 @@ quoteRoutes.get('/invoices/:id/quote', async (c) => {
     tenorDays: live.tenorDays,
     /** null when nothing on the curve will take this paper today. */
     quote: live.quote === null ? null : wireQuote(live.quote),
+    /** The handle `POST /v1/trades` is executed against. Null whenever `quote` is. */
+    quoteId,
     /** Everything screened, matches and refusals together. */
     mandatesConsidered: live.candidatesConsidered,
     /** "three mandates would take this" comes from here. */

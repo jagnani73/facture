@@ -19,7 +19,9 @@
 
 import type { Rating } from '@facture/shared';
 import { compareRating } from '@facture/shared';
-import { notImplemented } from '../errors.js';
+import { toPaymentRecord } from '../db/projections.js';
+import { getStore } from '../db/store.js';
+import { notFound } from '../errors.js';
 
 /** How a settled receivable resolved. This is the only input a rating ever takes. */
 export type SettlementOutcome = 'on_time' | 'late' | 'default';
@@ -208,18 +210,58 @@ export interface RatingService {
 
 export const ratingService: RatingService = {
   async ratingFor(debtorId) {
-    // TODO: SELECT the debtor's accumulator row, then `assess(record)`.
-    throw notImplemented(`rating lookup for debtor ${debtorId}`);
+    const row = await getStore().getDebtor(debtorId);
+    if (!row) throw notFound(`Customer ${debtorId}`);
+    return assess(toPaymentRecord(row));
   },
 
+  /**
+   * One `WHERE id = ANY($1)` read, not one query per debtor. A seller's book screen prices
+   * every row at once, and the rating is an input to every one of those prices.
+   *
+   * A debtor id with no row comes back as an empty record rather than being dropped: an
+   * absent customer is a cold start as far as the curve is concerned, and silently omitting
+   * them would make the caller's `Map.get` return `undefined` and the invoice unpriceable.
+   */
   async ratingsFor(debtorIds) {
-    // TODO: single `WHERE debtor_id = ANY($1)` read, then `assess` each row.
-    throw notImplemented(`batched rating lookup for ${debtorIds.length} debtors`);
+    const unique = [...new Set(debtorIds)];
+    if (unique.length === 0) return new Map();
+
+    const rows = await getStore().getDebtors(unique);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+
+    return new Map(
+      unique.map((id) => {
+        const row = byId.get(id);
+        return [id, assess(row ? toPaymentRecord(row) : emptyRecord(id))];
+      }),
+    );
   },
 
+  /**
+   * Idempotent per receivable. The store writes the outcome and moves the accumulator in
+   * one transaction, keyed on `(debtor_id, invoice_id)` — maturity can be observed twice
+   * (a mirror-node replay, a retried scheduled transaction) and a rating may only move
+   * once for a payment that happened once.
+   *
+   * The stored `rating` column is refreshed from the recomputed assessment rather than
+   * being incremented alongside the counters, so the projection cannot drift from the
+   * ladder that produces it.
+   */
   async recordOutcome(input) {
-    // TODO: upsert inside the settlement transaction, keyed on (debtor_id, invoice_id)
-    // so a replayed settlement event cannot tighten a rating twice.
-    throw notImplemented(`recording ${input.outcome} for debtor ${input.debtorId}`);
+    const store = getStore();
+    const { debtor, alreadyRecorded } = await store.recordOutcome({
+      debtorId: input.debtorId,
+      invoiceId: input.invoiceId,
+      outcome: input.outcome,
+      faceValue: input.faceValue,
+      at: input.at,
+    });
+
+    const assessment = assess(toPaymentRecord(debtor));
+    if (!alreadyRecorded && debtor.rating !== assessment.rating) {
+      await store.updateDebtorRating(debtor.id, assessment.rating);
+    }
+    return assessment;
   },
 };

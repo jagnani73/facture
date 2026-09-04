@@ -38,24 +38,54 @@ export const X402_HEADERS = {
 export const X402_VERSION = 2;
 
 /**
- * TODO(shared): replace with `PaymentRequirements` from `@x402/core` once the workspace
- * is installed. Hand-written here so this module type-checks ahead of the install; the
- * field set matches the v2 schema.
+ * The 402 challenge, as this service builds it.
+ *
+ * **Settled empirically on 2026-09-01, not inferred from docs.** Three 0.001 HBAR payments
+ * were signed, verified and settled against `https://api.testnet.blocky402.com`, and
+ * confirmed on the mirror node. The shape below is the one the facilitator accepted,
+ * verbatim, and it matches `@x402/core` 2.24.0 rather than the earlier v2 spelling:
+ *
+ * ```json
+ * { "scheme": "exact", "network": "hedera:testnet", "asset": "0.0.0",
+ *   "amount": "100000", "payTo": "0.0.7162784", "maxTimeoutSeconds": 120,
+ *   "extra": { "feePayer": "0.0.7162784" } }
+ * ```
+ *
+ * So it is `amount`, not `maxAmountRequired`, and `resource` / `description` / `mimeType`
+ * are NOT requirements fields — they live on `PaymentRequired.resource: ResourceInfo`,
+ * a sibling of `accepted`. Sending the old spelling fails as an opaque rejection at settle
+ * time rather than a type error, which is why this was worth one live round trip.
+ *
+ * `extra.feePayer` is **mandatory** — the Hedera signer throws without it — and must be
+ * read from `GET /supported` at runtime rather than hardcoded.
+ *
+ * Two behaviours of this facilitator that the type cannot express, both proven:
+ * `POST /verify` does **not** check the payer signature (unsigned and wrong-key payloads
+ * both return `isValid: true`), so it is worthless as a gate and settle is the only truth.
+ * And a signed payload is valid for only ~120 seconds, so sign and settle inside one
+ * action.
  */
 export interface PaymentRequirements {
   scheme: string;
   network: string;
   /** Hedera references HTS assets by native id. `0.0.0` is HBAR. */
   asset: string;
-  /** Amount in the asset's smallest unit, as a decimal string. */
-  maxAmountRequired: string;
+  /** Amount in the asset's smallest unit, as a decimal string. v2 calls this `amount`. */
+  amount: string;
   /** Native id `0.0.x` of the receiving account. */
   payTo: string;
+  maxTimeoutSeconds: number;
+  extra: Record<string, unknown>;
+}
+
+/**
+ * The `resource` sibling of `accepted` on a `PaymentRequired`. These three fields used to
+ * be written into the requirements themselves; in 2.24.0 they are their own object.
+ */
+export interface ResourceInfo {
   resource: string;
   description: string;
   mimeType: string;
-  maxTimeoutSeconds: number;
-  extra: Record<string, unknown>;
 }
 
 export interface SupportedKind {
@@ -182,25 +212,34 @@ export class X402Client {
     return feePayer;
   }
 
-  /** Builds the 402 challenge for one trade's cash leg. */
+  /**
+   * Builds the 402 challenge for one trade's cash leg.
+   *
+   * Returns the requirements and the resource description separately, because in
+   * `@x402/core` 2.24.0 they are siblings on `PaymentRequired` rather than one flat object.
+   */
   async buildRequirements(input: {
     amountMinor: bigint;
     resource: string;
     description: string;
     maxTimeoutSeconds?: number;
-  }): Promise<PaymentRequirements> {
+  }): Promise<{ accepted: PaymentRequirements; resource: ResourceInfo }> {
     const feePayer = await this.feePayer();
     return {
-      scheme: this.#opts.scheme,
-      network: this.#opts.network,
-      asset: this.asset,
-      maxAmountRequired: input.amountMinor.toString(),
-      payTo: this.#opts.payTo,
-      resource: input.resource,
-      description: input.description,
-      mimeType: 'application/json',
-      maxTimeoutSeconds: input.maxTimeoutSeconds ?? 120,
-      extra: { feePayer },
+      accepted: {
+        scheme: this.#opts.scheme,
+        network: this.#opts.network,
+        asset: this.asset,
+        amount: input.amountMinor.toString(),
+        payTo: this.#opts.payTo,
+        maxTimeoutSeconds: input.maxTimeoutSeconds ?? 120,
+        extra: { feePayer },
+      },
+      resource: {
+        resource: input.resource,
+        description: input.description,
+        mimeType: 'application/json',
+      },
     };
   }
 
@@ -259,10 +298,17 @@ export class X402Client {
 /**
  * Signing the buyer's side of the cash leg.
  *
- * TODO: wire `@x402/fetch` (`wrapFetchWithPayment`) plus the `@x402/hedera` scheme
- * registration, all pinned to 2.24.0. Schemes register per network, so registering both
- * Hedera's scheme and Circle's Nanopayments lets one service offer both rails and lets
- * the payer choose. Until then the settlement service treats the cash leg as unwired.
+ * **This backend never signs.** It is the resource server: it issues the challenge and
+ * hands the facilitator what comes back. The payment is signed by whoever holds the
+ * buyer's key — a wallet, or the agent package — with `@x402/fetch`
+ * (`wrapFetchWithPayment`) and the `@x402/hedera` scheme registration, both pinned to
+ * 2.24.0. A venue that could sign a buyer's payment would be a venue that could spend a
+ * buyer's money.
+ *
+ * The interface is kept here because the signed payload's shape is this module's
+ * vocabulary, and because schemes register per network: registering Hedera's alongside
+ * Circle's Nanopayments is what would let one service offer both rails and let the payer
+ * choose which chain they settle on.
  */
 export interface PaymentSigner {
   sign(requirements: PaymentRequirements): Promise<unknown>;

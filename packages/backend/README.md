@@ -3,14 +3,19 @@
 The API behind the book. Hono on Node, Postgres via Drizzle, Hedera for the paper and Arc
 for the cash.
 
-> **Status: skeleton.** Route structure, config, schema and service interfaces are real.
-> Most handler and service bodies are `TODO` and return a `501` problem response rather
-> than a plausible-looking lie. Nothing has been deployed and no migration has been run.
+> **Status: implemented, undeployed.** Every route and service body is written and
+> exercised by tests — nothing returns `501` any more. What is _not_ done is the part that
+> needs somewhere to run: no migration has been applied to any database, no ATS factory is
+> configured, and no contract has been deployed. The two seams that reach a chain
+> (`services/ats.ts`, `services/compliance.ts`) fail loudly rather than simulating, which
+> is why `ATS_FACTORY_ID` being unset disables issuance instead of faking it.
 
 ## Running it
 
 ```sh
 cp .env.example .env      # then fill in the six required values
+pnpm --filter @facture/backend db:migrate
+pnpm --filter @facture/backend db:seed     # the demo book
 pnpm --filter @facture/backend dev
 curl localhost:8787/health
 ```
@@ -19,15 +24,16 @@ Config is parsed at boot. A missing or malformed variable stops the process with
 problem listed at once, naming each variable — one restart per fix is a bad way to
 configure a service.
 
-| Script        | What it does                                      |
-| ------------- | ------------------------------------------------- |
-| `dev`         | `tsx watch src/index.ts`                          |
-| `build`       | `tsc` to `dist/`                                  |
-| `start`       | `node dist/index.js`                              |
-| `typecheck`   | `tsc --noEmit`                                    |
-| `test`        | `vitest run`                                      |
-| `db:generate` | writes SQL into `src/db/migrations`               |
-| `db:migrate`  | applies it — **not yet run against any database** |
+| Script        | What it does                                           |
+| ------------- | ------------------------------------------------------ |
+| `dev`         | `tsx watch src/index.ts`                               |
+| `build`       | `tsc` to `dist/`                                       |
+| `start`       | `node dist/index.js`                                   |
+| `typecheck`   | `tsc --noEmit`                                         |
+| `test`        | `vitest run`                                           |
+| `db:generate` | writes SQL into `src/db/migrations`                    |
+| `db:migrate`  | applies it — **not yet run against any database**      |
+| `db:seed`     | fills a database with the demo book (`src/db/seed.ts`) |
 
 ## Routes
 
@@ -62,16 +68,45 @@ A **refusal is not an error.** A mandate that will not take a piece of paper is 
 in the `200` quote body with a reason in words and an HCS receipt reference, because
 telling a funder why they were not matched is a product output, not a failure.
 
+`POST /v1/trades` is **both halves of one x402 exchange**, not two routes. The first
+request arms the trade and answers `402` carrying `PAYMENT-REQUIRED`; the buyer signs the
+challenge and repeats the same request with `PAYMENT-SIGNATURE`, which is the leg that
+moves money. Splitting them would let a client execute a payment against a challenge it
+never received.
+
+`GET /v1/invoices/:id/quote` returns a `quoteId` beside the price. A trade is executed
+against that id because a seller must never be filled at a price they were not shown; an
+identical unexpired quote is reused rather than rewritten, so the route stays safe to poll.
+
 ## Services
 
-| Module                     | State                                                            |
-| -------------------------- | ---------------------------------------------------------------- |
-| `services/quote-engine.ts` | orchestration real, wraps `bestQuote`; data access stubbed       |
-| `services/issuance.ts`     | **queue is real** — serial, paced, backoff; `deployBond` stubbed |
-| `services/settlement.ts`   | interfaces and leg receipts typed; all three legs stubbed        |
-| `services/x402.ts`         | facilitator HTTP client real; payment signing stubbed            |
-| `services/rating.ts`       | **bucketing is real and tested**; persistence stubbed            |
-| `services/indexer.ts`      | chain heads read for real; cursors in memory                     |
+| Module                     | What it does                                                         |
+| -------------------------- | -------------------------------------------------------------------- |
+| `services/quote-engine.ts` | wraps `bestQuote`; `priceOne`, and `priceBook` in one batched pass   |
+| `services/issuance.ts`     | serial, paced, backoff; persists queue state through `IssuanceSink`  |
+| `services/ats.ts`          | `deployBond` and the ATS hold, over `@hiero-ledger/sdk`              |
+| `services/compliance.ts`   | the pre-match `ControlList` / `Kyc` / `isPaused` probe; fails closed |
+| `services/settlement.ts`   | prepare / execute / unwind / maturity, both legs                     |
+| `services/x402.ts`         | facilitator client — `supported`, `verify`, `settle`                 |
+| `services/rating.ts`       | the ladder, plus the idempotent outcome ledger behind it             |
+| `services/confirmation.ts` | debtor tokens: HMAC tag checked first, SHA-256 stored                |
+| `services/notifier.ts`     | **no mail transport** — the link is logged, and that is said plainly |
+| `services/indexer.ts`      | chain heads read for real; cursors persisted                         |
+
+### The persistence seam
+
+`src/db/store.ts` is the interface every route and service reads and writes through, and
+there are two implementations: `pg-store.ts` (Drizzle over Postgres) and `memory-store.ts`.
+The second is not a convenience — it is why the orchestration in the routes is real,
+exercised code rather than something that first executes on a stage with a database behind
+it. It implements the same clamping, the same idempotency and the same "a withdrawal loses
+to an allocation" ordering, because a fake that is easier to satisfy than the real thing
+tests nothing.
+
+`src/db/seed.ts` fills either one with the demo book, which is the same market the web
+package renders from its fixtures — including the two invoices that carry the argument:
+**MF-2046** clearing at 18.5% from the wide end of the book, and **MF-2047** refused by
+every mandate because `D` ranks below `UNRATED`.
 
 ### Why issuance is a queue
 
@@ -153,3 +188,16 @@ seller is worth less than the same history from five). See `services/rating.ts`.
   shared and the `face_value` column — so nothing has to be translated between layers.
 - Tests are excluded from `tsconfig.json` (they would land in `dist/`); vitest type-checks
   them itself.
+- **The ABI fragments in `services/ats.ts` are transcribed, not generated.** ATS is a
+  ~94-facet diamond this project neither deploys nor controls, and a facet upgrade can
+  reorder a struct. Verify them against the pinned factory before the first real
+  `deployBond`. A drifted selector comes back as `CONTRACT_REVERT_EXECUTED`, which
+  `isRetryable` classifies as terminal, so an invoice fails visibly on the first attempt
+  rather than burning six.
+- **`ATS_FACTORY_ID` unset disables issuance; it does not simulate it.** A plausible
+  security id for an instrument that does not exist would survive as far as the proof
+  view, which is the one screen whose whole job is to be checkable.
+- **The debtor's maturity payment has no rail here.** `settleAtMaturity` finds the current
+  holder, records the outcome and releases the mandate's capital, and reports the cash leg
+  as `pending` with the payout requirement built. Marking it `settled` would put a payment
+  on the proof view that nobody made.
