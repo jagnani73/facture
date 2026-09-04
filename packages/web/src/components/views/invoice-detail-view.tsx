@@ -1,29 +1,22 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 
-import { bestQuote, isIssued, isQuotable, priceInvoice, settledCount } from '@/lib/domain';
+import type { Invoice } from '@/lib/domain';
+import { isIssued, isQuotable, priceInvoice, settledCount } from '@/lib/domain';
 import { formatDate, formatDays, formatDueIn, formatMoney, formatRate } from '@/lib/format';
-import {
-  debtorFor,
-  debtorNameOf,
-  getInvoice,
-  mandates,
-  marketNow,
-  metaOf,
-  ratingOf,
-  seller,
-  tokenForInvoice,
-  tradeForInvoice,
-} from '@/lib/fixtures';
+import type { InvoicePricing, Market } from '@/lib/data';
+import { isDemoBook, requestConfirmation, sellInvoice } from '@/lib/data';
+import { useMarket } from '@/lib/data/hooks';
 import { curveFrom } from '@/lib/pricing';
 import { CurveStrip } from '@/components/curve-strip';
 import { driftBps, useMarketTick } from '@/components/market-tick';
 import { PriceCell } from '@/components/price-cell';
-import { RatingWithRecord } from '@/components/rating-chip';
+import { RatingChip, RatingWithRecord } from '@/components/rating-chip';
 import { RefusalNotice } from '@/components/refusal-notice';
 import { StatusPill, explainStatus } from '@/components/status-pill';
+import { Failure, Pending } from '@/components/ui/async';
 import { Button, Card, CardHead, Label, Row, buttonClasses } from '@/components/ui/primitives';
 
 /**
@@ -36,24 +29,21 @@ import { Button, Card, CardHead, Label, Row, buttonClasses } from '@/components/
  * down.
  */
 export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
-  const invoice = getInvoice(invoiceId);
-  const asOf = useMemo(() => marketNow(), []);
-  const quotable = invoice !== undefined && isQuotable(invoice);
-  const tick = useMarketTick(quotable);
+  const market = useMarket();
 
-  const model = useMemo(() => {
-    if (!invoice) return null;
-    const debtor = debtorFor(invoice);
-    return {
-      debtor,
-      result: bestQuote(invoice, mandates, debtor, { asOf }),
-      trade: tradeForInvoice(invoice.id),
-      token: tokenForInvoice(invoice.id),
-      issued: isIssued(invoice),
-    };
-  }, [invoice, asOf]);
+  if (market.status === 'loading') return <Pending what="this invoice" lines={5} />;
+  if (market.status === 'failed') {
+    return (
+      <Failure error={market.error} what="this invoice" onRetry={market.reload}>
+        <Link href="/book" className="text-accent underline underline-offset-2">
+          Back to the book
+        </Link>
+      </Failure>
+    );
+  }
 
-  if (!invoice || !model) {
+  const invoice = market.data.getInvoice(invoiceId);
+  if (!invoice) {
     return (
       <Card className="px-6 py-10 text-center">
         <p className="text-sm text-muted">No invoice with that reference is in your book.</p>
@@ -64,13 +54,26 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
     );
   }
 
-  const { debtor, result, trade, token, issued } = model;
-  const days = result.tenorDays;
-  const baseRate = result.quote?.annualisedYieldBps ?? null;
+  return <InvoiceDetail market={market.data} invoice={invoice} />;
+}
+
+function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }) {
+  const debtor = market.debtorFor(invoice);
+  const pricing: InvoicePricing = market.pricingFor(invoice.id);
+  const trade = market.tradeForInvoice(invoice.id);
+  const token = market.tokenForInvoice(invoice.id);
+  const issued = isIssued(invoice);
+  const quotable = isQuotable(invoice);
+
+  // The wobble is the demo book's stand-in for a curve that moves. Against a live venue
+  // the number on screen is the venue's and nothing here perturbs it.
+  const tick = useMarketTick(quotable && isDemoBook());
+  const days = pricing.tenorDays;
+  const baseRate = pricing.quote?.annualisedYieldBps ?? null;
   const liveRate = baseRate === null ? null : Math.max(1, baseRate + driftBps(invoice.id, tick));
   const terms = liveRate === null ? null : priceInvoice(invoice.faceValue, liveRate, days);
-  const best = result.matches[0];
-  const nearest = result.refusals[0];
+  const best = pricing.matches[0];
+  const nearest = pricing.refusals[0];
 
   return (
     <div className="space-y-8">
@@ -81,7 +84,7 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
         <div className="mt-3 flex flex-wrap items-end justify-between gap-6 border-b border-rule pb-6">
           <div>
             <Label className="mb-2">Invoice {invoice.invoiceNumber}</Label>
-            <h1 className="text-3xl leading-tight">{debtorNameOf(invoice)}</h1>
+            <h1 className="text-3xl leading-tight">{market.debtorNameOf(invoice)}</h1>
             <p className="mt-2 flex flex-wrap items-center gap-3 text-sm text-muted">
               <StatusPill status={invoice.status} issued={issued} size="md" />
               <span>{explainStatus(invoice.status, issued)}</span>
@@ -113,7 +116,7 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
                   faceValue={invoice.faceValue}
                   tenorDays={days}
                   bestRateBps={liveRate}
-                  takers={result.matches.length}
+                  takers={pricing.matchCount}
                   size="hero"
                   live={false}
                 />
@@ -128,9 +131,12 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
                 </div>
 
                 <SellPanel
+                  invoiceId={invoice.id}
+                  quoteId={pricing.quoteId}
                   proceedsLabel={formatMoney(terms.proceeds)}
-                  mandateName={best ? metaOf(best.mandate.id).name : ''}
-                  ownerName={best ? metaOf(best.mandate.id).ownerName : ''}
+                  mandateName={best ? market.metaOf(best.mandate.id).name : 'the best standing bid'}
+                  ownerName={best ? market.metaOf(best.mandate.id).ownerName : ''}
+                  takers={pricing.matchCount}
                 />
               </div>
             </Card>
@@ -143,11 +149,13 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
                 hint="Every standing bid on the book was checked. None of them will take it, and each one says why."
               />
               <div className="space-y-3 px-5 py-5">
-                {result.refusals.map((receipt) => (
+                {pricing.refusals.map((receipt) => (
                   <RefusalNotice
                     key={`${receipt.invoiceId}-${receipt.mandateId ?? 'invoice'}`}
                     receipt={receipt}
-                    mandateName={receipt.mandateId ? metaOf(receipt.mandateId).name : undefined}
+                    mandateName={
+                      receipt.mandateId ? market.metaOf(receipt.mandateId).name : undefined
+                    }
                     showTime={false}
                   />
                 ))}
@@ -160,27 +168,11 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
           ) : null}
 
           {invoice.status === 'awaiting_confirmation' ? (
-            <Card>
-              <CardHead
-                title="Waiting on your customer"
-                hint={`We asked ${debtorNameOf(invoice)} to confirm the amount and the date. Until they do, this invoice has no price.`}
-              />
-              <div className="px-5 py-5">
-                <p className="text-sm text-muted">
-                  Your customer is not being asked to vouch for anyone. They are being asked to
-                  acknowledge their own accounts payable, which is why this works and why it is
-                  usually answered the same day.
-                </p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <Button variant="primary">Send a reminder</Button>
-                  {token ? (
-                    <Link href={`/confirm/${token}`} className={buttonClasses('secondary')}>
-                      Preview what they see
-                    </Link>
-                  ) : null}
-                </div>
-              </div>
-            </Card>
+            <AwaitingCustomer
+              invoiceId={invoice.id}
+              customer={market.debtorNameOf(invoice)}
+              token={token}
+            />
           ) : null}
 
           {!issued ? (
@@ -197,7 +189,7 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
             <Card>
               <CardHead
                 title="Sold"
-                hint={`Bought by ${metaOf(trade.mandateId).ownerName} on ${formatDate(trade.settledAt ?? trade.executedAt)}.`}
+                hint={`Bought by ${market.metaOf(trade.mandateId).ownerName} on ${formatDate(trade.settledAt ?? trade.executedAt)}.`}
               />
               <div className="px-5 py-5">
                 <Row term="Face value" value={formatMoney(trade.faceValue)} />
@@ -205,7 +197,10 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
                 <Row term="Annualised rate" value={formatRate(trade.annualisedYieldBps)} />
                 <Row term="Discount" value={`− ${formatMoney(trade.discount)}`} />
                 <Row term="Proceeds paid to you" value={formatMoney(trade.proceeds)} emphasis />
-                <Link href={`/proof/${trade.id}`} className={`${buttonClasses('secondary')} mt-4`}>
+                <Link
+                  href={`/proof/${encodeURIComponent(trade.id)}`}
+                  className={`${buttonClasses('secondary')} mt-4`}
+                >
                   See the proof of settlement
                 </Link>
               </div>
@@ -217,7 +212,7 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
               <CardHead title="Where it sits on the curve" />
               <div className="px-5 py-4">
                 <CurveStrip
-                  points={curveFrom(mandates, (m) => metaOf(m.id).name)}
+                  points={curveFrom(market.mandates, (m) => market.metaOf(m.id).name)}
                   marker={{
                     tenorDays: days,
                     annualisedYieldBps: liveRate,
@@ -228,26 +223,28 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
             </Card>
           ) : null}
 
-          {result.matches.length > 0 ? (
+          {pricing.matches.length > 0 ? (
             <Card>
               <CardHead
                 title="Who would take it"
                 hint="Ranked by price. The tightest bid is the one you are being offered."
               />
               <div className="px-5 py-3">
-                {result.matches.map((match, index) => (
+                {pricing.matches.map((match, index) => (
                   <div
                     key={match.mandate.id}
                     className="ledger-row flex items-center justify-between gap-4 py-3"
                   >
                     <div className="min-w-0">
                       <p className="truncate text-sm">
-                        {metaOf(match.mandate.id).name}
+                        {market.metaOf(match.mandate.id).name}
                         {index === 0 ? (
                           <span className="label-micro ml-2 inline text-accent">best</span>
                         ) : null}
                       </p>
-                      <p className="text-xs text-muted">{metaOf(match.mandate.id).ownerName}</p>
+                      <p className="text-xs text-muted">
+                        {market.metaOf(match.mandate.id).ownerName}
+                      </p>
                     </div>
                     <div className="text-right">
                       <span className="num block text-sm" data-num>
@@ -267,11 +264,44 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
                   <RefusalNotice
                     variant="quiet"
                     receipt={nearest}
-                    mandateName={nearest.mandateId ? metaOf(nearest.mandateId).name : undefined}
+                    mandateName={
+                      nearest.mandateId ? market.metaOf(nearest.mandateId).name : undefined
+                    }
                     showTime={false}
                   />
                 </div>
               ) : null}
+            </Card>
+          ) : pricing.matchCount > 0 ? (
+            <Card>
+              <CardHead
+                title="Who would take it"
+                hint="A seller does not choose a counterparty, so the venue answers how many mandates would take this invoice rather than naming them."
+              />
+              <div className="px-5 py-5">
+                <p className="text-sm">
+                  <span className="num text-2xl font-medium" data-num>
+                    {pricing.matchCount}
+                  </span>
+                  <span className="ml-2 text-muted">
+                    of {pricing.candidatesConsidered} mandates screened would take this invoice. It
+                    settles against the tightest of them.
+                  </span>
+                </p>
+                {nearest ? (
+                  <div className="mt-4">
+                    <Label className="mb-2">And the nearest that would not</Label>
+                    <RefusalNotice
+                      variant="quiet"
+                      receipt={nearest}
+                      mandateName={
+                        nearest.mandateId ? market.metaOf(nearest.mandateId).name : undefined
+                      }
+                      showTime={false}
+                    />
+                  </div>
+                ) : null}
+              </div>
             </Card>
           ) : null}
         </div>
@@ -280,12 +310,12 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
           <Card>
             <CardHead title="The invoice" />
             <div className="px-5 py-3">
-              <Row term="Customer" value={debtorNameOf(invoice)} />
+              <Row term="Customer" value={market.debtorNameOf(invoice)} />
               <Row term="Your reference" value={invoice.invoiceNumber} />
               <Row term="Issued" value={formatDate(invoice.issuedAt)} />
               <Row term="Due" value={formatDate(invoice.dueAt)} />
               <Row term="Face value" value={formatMoney(invoice.faceValue)} />
-              <Row term="Seller" value={seller.name} />
+              <Row term="Seller" value={market.seller.name} />
             </div>
           </Card>
 
@@ -295,16 +325,30 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
               hint="Earned here, out of invoices actually settled. Nothing is imported and nothing is modelled."
             />
             <div className="px-5 py-4">
-              <RatingWithRecord
-                rating={ratingOf(invoice)}
-                settled={settledCount(debtor)}
-                late={debtor.defaultCount}
-              />
-              <div className="mt-4">
-                <Row term="Invoices settled on time" value={String(debtor.onTimeCount)} />
-                <Row term="Invoices unpaid" value={String(debtor.defaultCount)} />
-                <Row term="Invoices confirmed" value={String(debtor.confirmedCount)} />
-              </div>
+              {market.debtorHistoryKnown ? (
+                <>
+                  <RatingWithRecord
+                    rating={market.ratingOf(invoice)}
+                    settled={settledCount(debtor)}
+                    late={debtor.defaultCount}
+                  />
+                  <div className="mt-4">
+                    <Row term="Invoices settled on time" value={String(debtor.onTimeCount)} />
+                    <Row term="Invoices unpaid" value={String(debtor.defaultCount)} />
+                    <Row term="Invoices confirmed" value={String(debtor.confirmedCount)} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <RatingChip rating={market.ratingOf(invoice)} size="md" />
+                  {/* "0 settled" beside an A would be a claim about this customer, not a gap
+                      in what the venue publishes. So the count is left out entirely. */}
+                  <p className="mt-3 text-xs text-muted">
+                    The grade is what this market publishes. The invoices behind it are counted
+                    here, not shown.
+                  </p>
+                </>
+              )}
               <p className="mt-3 text-xs text-muted">
                 Every invoice this customer pays on time tightens their price, permanently. That
                 record belongs to you.
@@ -317,21 +361,103 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
   );
 }
 
+/* -------------------------------------------------------------------------- */
+
+function AwaitingCustomer({
+  invoiceId,
+  customer,
+  token,
+}: {
+  invoiceId: string;
+  customer: string;
+  token: string | undefined;
+}) {
+  const [state, setState] = useState<{ busy: boolean; message: string | null; failed: boolean }>({
+    busy: false,
+    message: null,
+    failed: false,
+  });
+
+  return (
+    <Card>
+      <CardHead
+        title="Waiting on your customer"
+        hint={`We asked ${customer} to confirm the amount and the date. Until they do, this invoice has no price.`}
+      />
+      <div className="px-5 py-5">
+        <p className="text-sm text-muted">
+          Your customer is not being asked to vouch for anyone. They are being asked to acknowledge
+          their own accounts payable, which is why this works and why it is usually answered the
+          same day.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button
+            variant="primary"
+            disabled={state.busy}
+            onClick={async () => {
+              setState({ busy: true, message: null, failed: false });
+              const result = await requestConfirmation(invoiceId);
+              setState({
+                busy: false,
+                message: result.ok ? result.note : result.reason,
+                failed: !result.ok,
+              });
+            }}
+          >
+            {state.busy ? 'Sending…' : 'Send a reminder'}
+          </Button>
+          {token ? (
+            <Link href={`/confirm/${token}`} className={buttonClasses('secondary')}>
+              Preview what they see
+            </Link>
+          ) : null}
+        </div>
+        {state.message ? (
+          <p className={`mt-3 text-xs ${state.failed ? 'text-warn' : 'text-muted'}`}>
+            {state.message}
+          </p>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
 /**
  * The sale. Three states and no ceremony: an offer, a confirmation, a receipt. Nothing here
  * mentions how settlement happens, because a seller does not need to know and the proof
  * view is one click away when they want to.
+ *
+ * A failure is a fourth state and it is written out in words — the venue said no, and here
+ * is what it said. Never a reverted transaction, and never a silent nothing.
  */
 function SellPanel({
+  invoiceId,
+  quoteId,
   proceedsLabel,
   mandateName,
   ownerName,
+  takers,
 }: {
+  invoiceId: string;
+  quoteId: string | null;
   proceedsLabel: string;
   mandateName: string;
   ownerName: string;
+  takers: number;
 }) {
-  const [stage, setStage] = useState<'idle' | 'confirm' | 'done'>('idle');
+  const [stage, setStage] = useState<'idle' | 'confirm' | 'working' | 'done' | 'refused'>('idle');
+  const [message, setMessage] = useState<string>('');
+
+  if (stage === 'refused') {
+    return (
+      <div className="mt-5 rounded-sm border border-warn/40 bg-warn-wash px-4 py-4">
+        <p className="text-sm text-ink">{message}</p>
+        <Button variant="quiet" size="sm" className="mt-3" onClick={() => setStage('idle')}>
+          Back
+        </Button>
+      </div>
+    );
+  }
 
   if (stage === 'done') {
     return (
@@ -339,30 +465,45 @@ function SellPanel({
         <p className="text-sm">
           Sold for <span className="num font-medium">{proceedsLabel}</span> to {mandateName}.
         </p>
-        <p className="mt-1 text-xs text-muted">
-          In the live market the money is with you before this message finishes rendering, and your
-          customer still pays on the due date. Nothing moved here — this book is demo data.
-        </p>
-        <Link href="/proof/TRD-4417" className={`${buttonClasses('secondary', 'sm')} mt-3`}>
-          See what a settled trade proves
+        <p className="mt-1 text-xs text-muted">{message}</p>
+        <Link
+          href={`/book/${encodeURIComponent(invoiceId)}`}
+          className={`${buttonClasses('secondary', 'sm')} mt-3`}
+        >
+          See this invoice again
         </Link>
       </div>
     );
   }
 
-  if (stage === 'confirm') {
+  if (stage === 'confirm' || stage === 'working') {
     return (
       <div className="mt-5 rounded-sm border border-rule-strong bg-sunken px-4 py-4">
         <p className="text-sm">
           Sell this invoice for <span className="num font-medium">{proceedsLabel}</span>, to{' '}
-          {mandateName} ({ownerName}). Non-recourse: if your customer does not pay, that is the
-          buyer&rsquo;s loss, not yours.
+          {mandateName}
+          {ownerName ? ` (${ownerName})` : ''}. Non-recourse: if your customer does not pay, that is
+          the buyer&rsquo;s loss, not yours.
         </p>
         <div className="mt-3 flex gap-2">
-          <Button variant="primary" onClick={() => setStage('done')}>
-            Sell for {proceedsLabel}
+          <Button
+            variant="primary"
+            disabled={stage === 'working'}
+            onClick={async () => {
+              setStage('working');
+              const result = await sellInvoice(invoiceId, quoteId);
+              if (result.ok) {
+                setMessage(result.note);
+                setStage('done');
+              } else {
+                setMessage(result.reason);
+                setStage('refused');
+              }
+            }}
+          >
+            {stage === 'working' ? 'Selling…' : `Sell for ${proceedsLabel}`}
           </Button>
-          <Button variant="quiet" onClick={() => setStage('idle')}>
+          <Button variant="quiet" disabled={stage === 'working'} onClick={() => setStage('idle')}>
             Not now
           </Button>
         </div>
@@ -376,7 +517,8 @@ function SellPanel({
         Sell for {proceedsLabel}
       </Button>
       <span className="text-xs text-muted">
-        Settles against the best mandate that will take it.
+        Settles against the best mandate that will take it
+        {takers > 0 ? `, of the ${takers} that would` : ''}.
       </span>
     </div>
   );

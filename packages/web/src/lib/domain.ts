@@ -21,6 +21,7 @@
 
 export type {
   Bps,
+  ChainKey,
   Currency,
   Debtor,
   Invoice,
@@ -32,10 +33,12 @@ export type {
   PriceBreakdown,
   Quote,
   Rating,
+  RegulationKey,
   Refusal,
   RefusalCode,
   RefusalReceipt,
   SettlementLeg,
+  SettlementLegState,
   Trade,
   BestQuoteResult,
 } from '@facture/shared';
@@ -60,17 +63,25 @@ export {
   isColdStart,
   // invoices
   INVOICE_STATUSES,
+  isInvoiceStatus,
   isIssued,
   isQuotable,
   // mandates
+  MANDATE_STATUSES,
+  isMandateStatus,
   unallocated,
   remainingForDebtor,
   debtorExposureOf,
   availableFor,
+  // trades
+  SETTLEMENT_LEG_STATES,
   // refusals
+  REFUSAL_CODES,
+  isRefusalCode,
   explainRefusal,
   refusalReceipt,
   // money
+  CURRENCIES,
   formatMinorUnits,
   CURRENCY_SYMBOL,
   // identity
@@ -78,9 +89,11 @@ export {
   isinForInvoice,
   // chains — read only by the proof view
   CHAINS,
+  CHAIN_KEYS,
   ASSET_CHAIN,
   CASH_CHAIN,
   REGULATIONS,
+  isRegulationKey,
   explorerTxUrl,
   explorerAddressUrl,
 } from '@facture/shared';

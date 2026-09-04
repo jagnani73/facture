@@ -1,0 +1,334 @@
+/**
+ * The live book, behind the same seam.
+ *
+ * This is the fixture module's promise kept: same exported shape, bodies are fetches.
+ *
+ * Two things are worth stating about how the book is assembled here, because both are
+ * product decisions rather than plumbing.
+ *
+ * **The price is the venue's, not the screen's.** Every row's number is priced against every
+ * funded mandate on the book, server-side. The screen can only enumerate the mandates
+ * belonging to whoever is looking — there is no "list all mandates" route, and bids being
+ * public does not make a buyer's exposure public — so a locally computed price would be a
+ * price against a fraction of the curve. It would also be a second opinion, and a market
+ * with two opinions about its own price has one too many.
+ *
+ * **The book is one request; the reasons are not.** `GET /v1/invoices` prices the whole page
+ * in a single batched pass and returns the price inline with every row, so "a live price in
+ * every row" costs one round trip rather than one per row. What that route deliberately
+ * omits is the refusals and the quote handle, both of which belong to one invoice — so
+ * `GET /v1/invoices/:id/quote` is asked only for the invoices that are actually quotable.
+ * That is what gives the invoice page its refusals in words, and the sale the exact price
+ * the seller was shown.
+ */
+
+import type { Debtor, Invoice, Mandate, Trade } from '@/lib/domain';
+import { ASSET_CHAIN, CHAINS, isQuotable, tenorDays } from '@/lib/domain';
+import type { Position } from '@/lib/pricing';
+import { api } from '@/lib/api/client';
+import { BUYER_ID, SELLER_ID, checkIdentity } from '@/lib/api/config';
+import type { LiveQuoteResponse } from '@/lib/api/contract';
+import { ApiError } from '@/lib/api/problem';
+import type { ConfirmationRecord, InvoicePricing, Market, ProofRecord } from './types';
+import { buildMarket, derivedMeta } from './types';
+
+/* -------------------------------------------------------------------------- */
+/* Plumbing                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Bounded fan-out. A seller with two hundred quotable invoices should not open two hundred
+ * sockets at once.
+ */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      const item = items[index];
+      if (index >= items.length || item === undefined) return;
+      results[index] = await run(item, index);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+function requireIdentity(): void {
+  const problems = [checkIdentity('seller'), checkIdentity('buyer')].filter(
+    (message): message is string => message !== null,
+  );
+
+  if (problems.length > 0) {
+    throw new ApiError({
+      code: 'misconfigured',
+      status: 0,
+      title: 'Not configured',
+      detail: problems.join(' '),
+      what: 'the book',
+    });
+  }
+}
+
+/** The venue derives the price; this only converts its answer to view shape. */
+function toPricing(invoiceId: string, live: LiveQuoteResponse): InvoicePricing {
+  return {
+    invoiceId,
+    rating: live.rating,
+    tenorDays: live.tenorDays,
+    quote: live.quote,
+    quoteId: live.quoteId,
+    // The venue answers how many mandates would take this, never which — a seller does not
+    // choose a counterparty, so the list would be decoration with a privacy cost.
+    matches: [],
+    matchCount: live.mandatesMatching,
+    candidatesConsidered: live.mandatesConsidered,
+    refusals: live.refusals,
+    pricedAt: live.pricedAt,
+  };
+}
+
+/** Tenor is measured off the trade, so the maturity it implies is the trade's own. */
+function dueAtFromTrade(trade: Trade): string {
+  return new Date(Date.parse(trade.executedAt) + trade.tenorDays * 86_400_000).toISOString();
+}
+
+function toPosition(
+  trade: Trade,
+  invoice: Invoice | undefined,
+  debtor: Debtor | undefined,
+): Position {
+  return {
+    id: trade.id,
+    mandateId: trade.mandateId,
+    invoiceId: trade.invoiceId,
+    invoiceNumber: invoice?.invoiceNumber ?? trade.invoiceId,
+    debtorId: invoice?.debtorId ?? 'unknown',
+    debtorName: debtor?.name ?? 'Customer not disclosed',
+    rating: debtor?.rating ?? 'UNRATED',
+    faceValue: trade.faceValue,
+    outlay: trade.proceeds,
+    annualisedYieldBps: trade.annualisedYieldBps,
+    boughtAt: trade.executedAt,
+    dueAt: invoice?.dueAt ?? dueAtFromTrade(trade),
+    state:
+      invoice?.status === 'matured'
+        ? 'settled'
+        : invoice?.status === 'defaulted'
+          ? 'defaulted'
+          : 'open',
+  };
+}
+
+/**
+ * No response carries the seller's own name — the book is scoped by an id, and there is no
+ * session yet. The screens say "your book" rather than inventing a company name.
+ */
+const SELLER_NAME = 'Your business';
+
+/* -------------------------------------------------------------------------- */
+/* The market                                                                  */
+/* -------------------------------------------------------------------------- */
+
+export async function apiMarket(signal?: AbortSignal): Promise<Market> {
+  requireIdentity();
+
+  const asOf = new Date();
+
+  const [book, mandatePage, sellerTrades, buyerTrades] = await Promise.all([
+    api.listInvoices({ sellerId: SELLER_ID }, signal),
+    api.listMandates({ buyerId: BUYER_ID }, signal),
+    api.listTrades({ sellerId: SELLER_ID }, signal),
+    api.listTrades({ buyerId: BUYER_ID }, signal),
+  ]);
+
+  const rows = book.items;
+  const invoices = rows.map((row) => row.invoice);
+  const mandates: Mandate[] = mandatePage.items;
+
+  /*
+   * Customers come back on the row that names them. There is no route that lists them
+   * separately — a debtor is reached through an invoice — and there does not need to be.
+   */
+  const debtorsById = new Map<string, Debtor>();
+  for (const row of rows) {
+    if (row.debtor) debtorsById.set(row.debtor.id, row.debtor);
+  }
+
+  // The batched price, straight off the row.
+  const pricing = new Map<string, InvoicePricing>(
+    rows.map((row) => [
+      row.invoice.id,
+      {
+        invoiceId: row.invoice.id,
+        rating: row.debtor?.rating ?? 'UNRATED',
+        tenorDays: row.tenorDays ?? tenorDays(row.invoice.dueAt, asOf),
+        quote: row.quote,
+        // Only `GET /invoices/:id/quote` mints a handle; filled in below where it matters.
+        quoteId: null,
+        matches: [],
+        matchCount: row.mandatesMatching,
+        candidatesConsidered: row.mandatesMatching,
+        refusals: [],
+        pricedAt: asOf.toISOString(),
+      },
+    ]),
+  );
+
+  /*
+   * The reasons, and the handle to sell at. Only for paper that can actually be quoted:
+   * why a sold or matured invoice carries no bid is not a question anyone is asking.
+   */
+  const quotable = invoices.filter(isQuotable);
+  const priced = await mapLimit(quotable, 6, (invoice) =>
+    api.getQuote(invoice.id, { includeRefusals: true }, signal),
+  );
+  for (const live of priced) {
+    pricing.set(live.invoiceId, toPricing(live.invoiceId, live));
+  }
+
+  const invoicesById = new Map(invoices.map((invoice) => [invoice.id, invoice]));
+
+  const trades: Trade[] = [];
+  const seen = new Set<string>();
+  for (const trade of [...sellerTrades.items, ...buyerTrades.items]) {
+    if (seen.has(trade.id)) continue;
+    seen.add(trade.id);
+    trades.push(trade);
+  }
+
+  const positions = buyerTrades.items.map((trade) => {
+    const invoice = invoicesById.get(trade.invoiceId);
+    return toPosition(trade, invoice, invoice ? debtorsById.get(invoice.debtorId) : undefined);
+  });
+
+  const notices: string[] = [
+    'Bids are public in this market, but this service only lists the mandates you own — so the curve on screen is your own book. Every price beside an invoice is still read against the whole curve, by the venue.',
+  ];
+
+  return buildMarket({
+    source: 'api',
+    asOf,
+    seller: { id: SELLER_ID, name: SELLER_NAME },
+    viewer: { id: BUYER_ID, name: 'Your desk' },
+    invoices,
+    debtors: [...debtorsById.values()],
+    mandates,
+    positions,
+    trades,
+    pricing,
+    meta: new Map(mandates.map((mandate) => [mandate.id, derivedMeta(mandate)])),
+    // Confirmation links are minted by the venue and emailed to the customer. The seller's
+    // screen never sees the token, which is the point of it being single-use.
+    tokens: new Map(),
+    notices,
+    // The venue publishes a customer's earned grade, not the counters behind it.
+    debtorHistoryKnown: false,
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Debtor confirmation                                                         */
+/* -------------------------------------------------------------------------- */
+
+export async function apiConfirmation(
+  token: string,
+  signal?: AbortSignal,
+): Promise<ConfirmationRecord> {
+  const prompt = await api.getConfirmation(token, signal);
+  return {
+    sellerName: prompt.sellerName,
+    debtorName: prompt.debtorName,
+    invoiceNumber: prompt.invoiceNumber,
+    amount: prompt.amount,
+    faceValue: prompt.faceValue,
+    dueAt: prompt.dueAt,
+    decision: prompt.decision,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The proof view                                                              */
+/* -------------------------------------------------------------------------- */
+
+const HEDERA = CHAINS[ASSET_CHAIN];
+
+export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<ProofRecord> {
+  const [trade, proof] = await Promise.all([
+    api.getTrade(tradeId, signal),
+    api.getTradeProof(tradeId, signal),
+  ]);
+
+  return {
+    tradeId: proof.tradeId,
+    trade,
+    instrument: {
+      tokenId: proof.invoice.securityId,
+      isin: proof.invoice.isin,
+      uniquenessHash: proof.invoice.uniquenessHash,
+      // The proof contract carries no SEC regulation field, so the row is omitted rather
+      // than filled with the default this build happens to issue under.
+      regulation: null,
+      maturity: null,
+      issuedAt: null,
+      issuedTxId: null,
+      explorerUrl:
+        proof.invoice.securityExplorerUrl ??
+        (proof.invoice.securityId
+          ? `${HEDERA.explorerUrl}/token/${proof.invoice.securityId}`
+          : null),
+    },
+    confirmation: proof.confirmation,
+    compliance: proof.compliance,
+    assetLeg: {
+      from: null,
+      to: null,
+      quantity: null,
+      transactionId: proof.assetLeg.transactionId,
+      holdId: proof.assetLeg.holdId,
+      consensusAt: proof.assetLeg.consensusAt,
+      explorerUrl: proof.assetLeg.explorerUrl,
+    },
+    cashLeg: {
+      from: proof.cashLeg.payer,
+      to: null,
+      asset: proof.cashLeg.asset,
+      scheme: proof.cashLeg.scheme,
+      network: proof.cashLeg.network,
+      transaction: proof.cashLeg.transaction,
+      explorerUrl: proof.cashLeg.explorerUrl,
+    },
+    // The venue publishes each leg and names the scheme that bound them. Nothing is invented
+    // here to fill the panel.
+    settlement:
+      proof.cashLeg.scheme === null
+        ? null
+        : {
+            protocol: proof.cashLeg.scheme,
+            facilitator: null,
+            challengeNonce: null,
+            boundAt: null,
+            note: 'Both legs are bound to one x402 challenge. Neither settles unless both do, and nothing is wrapped or bridged.',
+          },
+    refusals: proof.refusals.map((refusal) => ({
+      mandateId: refusal.mandateId,
+      mandateName: null,
+      reasonCode: refusal.reasonCode,
+      reasonText: refusal.reasonText,
+      hcsExplorerUrl: refusal.hcsExplorerUrl,
+    })),
+    invoiceNumber: proof.invoice.invoiceNumber === '' ? null : proof.invoice.invoiceNumber,
+    debtorName: null,
+    sellerName: null,
+    buyerName: null,
+    settledAt: proof.settledAt,
+  };
+}

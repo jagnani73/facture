@@ -1,0 +1,557 @@
+/**
+ * The HTTP client for the Facture service.
+ *
+ * One function per route in `packages/backend/src/routes/`, with the request shapes taken
+ * from the zod schemas there — those are frozen, so they are what this file codes against.
+ * Responses go through `contract.ts`, which is the only place a wire value becomes a domain
+ * value.
+ *
+ * Nothing in here knows about React, fixtures or screens. It is a transport: it asks, it
+ * decodes, and when either half fails it throws an `ApiError` carrying a sentence rather
+ * than a status code.
+ */
+
+import type { InvoiceStatus, MandateStatus, MinorUnits, Rating } from '@/lib/domain';
+import { API_BASE_URL, API_V1 } from './config';
+import type {
+  ConfirmationPrompt,
+  HealthResponse,
+  InvoiceDetail,
+  InvoiceRow,
+  LiveQuoteResponse,
+  Page,
+  TradeProofResponse,
+} from './contract';
+import {
+  readConfirmationPrompt,
+  readHealth,
+  readInvoice,
+  readInvoiceDetail,
+  readInvoiceRow,
+  readLiveQuote,
+  readMandate,
+  readObject,
+  readPage,
+  readTrade,
+  readTradeProof,
+  writeMoney,
+} from './contract';
+import type { Problem } from './problem';
+import { ApiError, SERVER_ERROR_CODES } from './problem';
+import type { Invoice, Mandate, Trade } from '@/lib/domain';
+
+/* -------------------------------------------------------------------------- */
+/* Transport                                                                   */
+/* -------------------------------------------------------------------------- */
+
+type Query = Record<string, string | number | boolean | undefined>;
+
+interface RequestOptions {
+  method?: 'GET' | 'POST';
+  query?: Query | undefined;
+  body?: unknown;
+  signal?: AbortSignal | undefined;
+  /** What is being asked for, in the product's words. Used to write the failure sentence. */
+  what: string;
+}
+
+function buildUrl(base: string, path: string, query?: Query): string {
+  const url = new URL(`${base}${path}`);
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value !== undefined) url.searchParams.set(key, String(value));
+  }
+  return url.toString();
+}
+
+function problemFrom(raw: unknown, status: number, url: string, what: string): ApiError {
+  const body = typeof raw === 'object' && raw !== null ? (raw as Partial<Problem>) : {};
+  const code = SERVER_ERROR_CODES.find((candidate) => candidate === body.code);
+
+  return new ApiError({
+    // A gateway or proxy in front of the service will not speak problem+json. Falling back
+    // on the status keeps the sentence honest rather than claiming a code nobody sent.
+    code: code ?? (status === 404 ? 'not_found' : status >= 500 ? 'internal_error' : 'bad_request'),
+    status,
+    title: typeof body.title === 'string' ? body.title : `HTTP ${status}`,
+    detail: typeof body.detail === 'string' ? body.detail : undefined,
+    issues: Array.isArray(body.errors) ? body.errors : undefined,
+    requestId: typeof body.requestId === 'string' ? body.requestId : undefined,
+    url,
+    what,
+  });
+}
+
+async function request<T>(
+  path: string,
+  options: RequestOptions,
+  decode: (raw: unknown) => T,
+  base: string = API_V1,
+): Promise<T> {
+  const url = buildUrl(base, path, options.query);
+  const method = options.method ?? 'GET';
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method,
+      // A price that is one poll stale is the wrong number, not a slow one — see the
+      // backend's own note that the quote route is uncached at the edge.
+      cache: 'no-store',
+      headers: {
+        accept: 'application/json, application/problem+json',
+        ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
+    throw new ApiError({
+      code: 'unreachable',
+      status: 0,
+      title: 'No answer',
+      url,
+      what: options.what,
+      cause,
+    });
+  }
+
+  const text = await response.text();
+  let payload: unknown = undefined;
+  if (text.trim() !== '') {
+    try {
+      payload = JSON.parse(text);
+    } catch (cause) {
+      throw new ApiError({
+        code: 'unreadable',
+        status: response.status,
+        title: 'Unreadable response',
+        detail: 'the body is not JSON',
+        url,
+        what: options.what,
+        cause,
+      });
+    }
+  }
+
+  if (!response.ok) throw problemFrom(payload, response.status, url, options.what);
+
+  try {
+    return decode(payload);
+  } catch (cause) {
+    // A decoder failure is an `unreadable` ApiError already; re-label it with the route so
+    // the screen can say what it was reading when the shape surprised it.
+    if (cause instanceof ApiError) {
+      throw new ApiError({
+        code: cause.code,
+        status: response.status,
+        title: cause.title,
+        detail: cause.detail,
+        issues: cause.issues,
+        url,
+        what: options.what,
+        cause,
+      });
+    }
+    throw cause;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Requests, as the zod schemas define them                                    */
+/* -------------------------------------------------------------------------- */
+
+/** `createInvoiceBody` in `routes/invoices.ts`. */
+export interface CreateInvoiceInput {
+  sellerId: string;
+  debtor: { name: string; email: string; taxId?: string | undefined };
+  invoiceNumber: string;
+  faceValue: MinorUnits;
+  currency: string;
+  issuedAt: string;
+  dueAt: string;
+}
+
+/** `createMandateBody` in `routes/mandates.ts`. `D` is deliberately not selectable there. */
+export interface CreateMandateInput {
+  buyerId: string;
+  ratingFloor: Exclude<Rating, 'D'>;
+  maxTenorDays: number;
+  annualisedYieldBps: number;
+  currency: string;
+  exposureLimitMinor: MinorUnits;
+  perDebtorLimitMinor?: MinorUnits | undefined;
+}
+
+/** `executeTradeBody` in `routes/trades.ts`. */
+export interface ExecuteTradeInput {
+  invoiceId: string;
+  quoteId: string;
+  maxSlippageBps?: number | undefined;
+}
+
+export type TradeStatus = 'preparing' | 'awaiting_payment' | 'settled' | 'unwound' | 'failed';
+
+/* -------------------------------------------------------------------------- */
+/* The routes                                                                  */
+/* -------------------------------------------------------------------------- */
+
+export const api = {
+  /** `GET /health`. Outside the version prefix: operational, not product surface. */
+  health(signal?: AbortSignal): Promise<HealthResponse> {
+    return request(
+      '/health',
+      { what: 'the service status', signal },
+      (raw) => readHealth(raw),
+      API_BASE_URL,
+    );
+  },
+
+  /* --- Seller: the book ------------------------------------------------- */
+
+  /**
+   * `GET /v1/invoices` — the seller's book, priced.
+   *
+   * One request for the whole page, price included. The service prices the page in a single
+   * batched pass for exactly this reason, so the screen does not turn "a live price in every
+   * row" into one round trip per row.
+   */
+  listInvoices(
+    params: { sellerId: string; status?: InvoiceStatus; limit?: number; cursor?: string },
+    signal?: AbortSignal,
+  ): Promise<Page<InvoiceRow>> {
+    return request(
+      '/invoices',
+      {
+        what: 'the book',
+        query: {
+          sellerId: params.sellerId,
+          status: params.status,
+          limit: params.limit ?? 200,
+          cursor: params.cursor,
+        },
+        signal,
+      },
+      (raw) => readPage(raw, 'invoices', readInvoiceRow, 'invoices'),
+    );
+  },
+
+  /** `GET /v1/invoices/:id` — invoice, customer, issuance state, live price and refusals. */
+  getInvoice(id: string, signal?: AbortSignal): Promise<InvoiceDetail> {
+    return request(`/invoices/${encodeURIComponent(id)}`, { what: 'that invoice', signal }, (raw) =>
+      readInvoiceDetail(raw),
+    );
+  },
+
+  /** `POST /v1/invoices` — tokenisation happens here, queued and paced. */
+  createInvoice(input: CreateInvoiceInput, signal?: AbortSignal): Promise<Invoice> {
+    return request(
+      '/invoices',
+      {
+        method: 'POST',
+        what: 'adding that invoice',
+        signal,
+        body: {
+          sellerId: input.sellerId,
+          debtor: {
+            name: input.debtor.name,
+            email: input.debtor.email,
+            ...(input.debtor.taxId ? { taxId: input.debtor.taxId } : {}),
+          },
+          invoiceNumber: input.invoiceNumber,
+          faceValue: writeMoney(input.faceValue),
+          currency: input.currency,
+          issuedAt: input.issuedAt,
+          dueAt: input.dueAt,
+        },
+      },
+      (raw) => {
+        const body = readObject(raw, 'invoice');
+        return readInvoice(body['invoice'] ?? body, 'invoice');
+      },
+    );
+  },
+
+  /** `POST /v1/invoices/:id/confirmation-request` — ask the customer. */
+  requestConfirmation(invoiceId: string, signal?: AbortSignal): Promise<void> {
+    return request(
+      `/invoices/${encodeURIComponent(invoiceId)}/confirmation-request`,
+      { method: 'POST', what: 'asking your customer to confirm', signal, body: {} },
+      () => undefined,
+    );
+  },
+
+  /* --- The live quote --------------------------------------------------- */
+
+  /**
+   * `GET /v1/invoices/:id/quote` — the price that is already there.
+   *
+   * Cheap and safe to poll by the backend's own description, which is what lets the book
+   * carry a number in every row rather than a button that asks for one.
+   */
+  getQuote(
+    invoiceId: string,
+    options: { asOf?: string | undefined; includeRefusals?: boolean } = {},
+    signal?: AbortSignal,
+  ): Promise<LiveQuoteResponse> {
+    return request(
+      `/invoices/${encodeURIComponent(invoiceId)}/quote`,
+      {
+        what: 'the price for that invoice',
+        query: {
+          asOf: options.asOf,
+          includeRefusals: options.includeRefusals === false ? 'false' : 'true',
+        },
+        signal,
+      },
+      (raw) => readLiveQuote(raw),
+    );
+  },
+
+  /* --- Debtor confirmation ---------------------------------------------- */
+
+  /** `GET /v1/confirm/:token` — public, token-authenticated, no wallet and no signup. */
+  getConfirmation(token: string, signal?: AbortSignal): Promise<ConfirmationPrompt> {
+    return request(
+      `/confirm/${encodeURIComponent(token)}`,
+      { what: 'this invoice', signal },
+      (raw) => readConfirmationPrompt(raw),
+    );
+  },
+
+  /** `POST /v1/confirm/:token` — single use, consumed with the decision. */
+  decideConfirmation(
+    token: string,
+    decision: 'confirmed' | 'disputed',
+    note?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return request(
+      `/confirm/${encodeURIComponent(token)}`,
+      {
+        method: 'POST',
+        what: 'your answer',
+        signal,
+        body: { decision, ...(note ? { note } : {}) },
+      },
+      () => undefined,
+    );
+  },
+
+  /* --- Buyer: mandates -------------------------------------------------- */
+
+  /** `GET /v1/mandates` — this buyer's standing bids. */
+  listMandates(
+    params: { buyerId: string; status?: MandateStatus; limit?: number },
+    signal?: AbortSignal,
+  ): Promise<Page<Mandate>> {
+    return request(
+      '/mandates',
+      {
+        what: 'your mandates',
+        query: { buyerId: params.buyerId, status: params.status, limit: params.limit ?? 200 },
+        signal,
+      },
+      (raw) => readPage(raw, 'mandates', readMandate, 'mandates'),
+    );
+  },
+
+  /** `POST /v1/mandates` — written as a draft. It is not on the curve until it is funded. */
+  createMandate(input: CreateMandateInput, signal?: AbortSignal): Promise<Mandate> {
+    return request(
+      '/mandates',
+      {
+        method: 'POST',
+        what: 'writing that mandate',
+        signal,
+        body: {
+          buyerId: input.buyerId,
+          ratingFloor: input.ratingFloor,
+          maxTenorDays: input.maxTenorDays,
+          annualisedYieldBps: input.annualisedYieldBps,
+          currency: input.currency,
+          exposureLimitMinor: writeMoney(input.exposureLimitMinor),
+          ...(input.perDebtorLimitMinor === undefined
+            ? {}
+            : { perDebtorLimitMinor: writeMoney(input.perDebtorLimitMinor) }),
+        },
+      },
+      (raw) => {
+        const body = readObject(raw, 'mandate');
+        return readMandate(body['mandate'] ?? body, 'mandate');
+      },
+    );
+  },
+
+  /** `POST /v1/mandates/:id/fund` — the moment the bid becomes firm. */
+  fundMandate(
+    id: string,
+    input: { amountMinor: MinorUnits; escrowRef: string },
+    signal?: AbortSignal,
+  ): Promise<Mandate | null> {
+    return request(
+      `/mandates/${encodeURIComponent(id)}/fund`,
+      {
+        method: 'POST',
+        what: 'funding that mandate',
+        signal,
+        body: { amountMinor: writeMoney(input.amountMinor), escrowRef: input.escrowRef },
+      },
+      (raw) => {
+        if (raw === undefined || raw === null) return null;
+        const body = readObject(raw, 'mandate');
+        const nested = body['mandate'];
+        return nested === undefined && body['id'] === undefined
+          ? null
+          : readMandate(nested ?? body, 'mandate');
+      },
+    );
+  },
+
+  /** `POST /v1/mandates/:id/withdraw` — unallocated capital only. */
+  withdrawMandate(
+    id: string,
+    amountMinor?: MinorUnits,
+    signal?: AbortSignal,
+  ): Promise<Mandate | null> {
+    return request(
+      `/mandates/${encodeURIComponent(id)}/withdraw`,
+      {
+        method: 'POST',
+        what: 'that withdrawal',
+        signal,
+        body: amountMinor === undefined ? {} : { amountMinor: writeMoney(amountMinor) },
+      },
+      (raw) => {
+        if (raw === undefined || raw === null) return null;
+        const body = readObject(raw, 'mandate');
+        const nested = body['mandate'];
+        return nested === undefined && body['id'] === undefined
+          ? null
+          : readMandate(nested ?? body, 'mandate');
+      },
+    );
+  },
+
+  /**
+   * `GET /v1/mandates/exposure` — committed, allocated, unallocated and concentration
+   * across the buyer's whole book. Registered before `/:id/...` on the server so the static
+   * segment is not swallowed by the param.
+   *
+   * Returned raw: the aggregation shape is not stated anywhere in the frozen schemas, and
+   * the mandates page computes the same figures from the mandates it already holds. This is
+   * here so the route is reachable, not so a screen can depend on a shape nobody fixed.
+   */
+  buyerExposure(buyerId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return request(
+      '/mandates/exposure',
+      { what: 'your exposure', query: { buyerId }, signal },
+      (raw) => readObject(raw, 'exposure'),
+    );
+  },
+
+  /** `GET /v1/mandates/:id/exposure` — one mandate's allocations by customer. */
+  mandateExposure(id: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return request(
+      `/mandates/${encodeURIComponent(id)}/exposure`,
+      { what: "that mandate's exposure", signal },
+      (raw) => readObject(raw, 'exposure'),
+    );
+  },
+
+  /* --- Trades ----------------------------------------------------------- */
+
+  /**
+   * `POST /v1/trades` — execute a sale.
+   *
+   * The route answers 402 carrying `PAYMENT-REQUIRED` when the cash leg still has to be
+   * signed, which is a stage of delivery-versus-payment rather than a failure, so it is
+   * returned as a state and not thrown.
+   */
+  executeTrade(
+    input: ExecuteTradeInput,
+    signal?: AbortSignal,
+  ): Promise<
+    { status: 'settled'; trade: Trade } | { status: 'payment_required'; challenge: unknown }
+  > {
+    const url = `${API_V1}/trades`;
+
+    return (async () => {
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({
+            invoiceId: input.invoiceId,
+            quoteId: input.quoteId,
+            maxSlippageBps: input.maxSlippageBps ?? 0,
+          }),
+          ...(signal ? { signal } : {}),
+        });
+      } catch (cause) {
+        if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
+        throw new ApiError({
+          code: 'unreachable',
+          status: 0,
+          title: 'No answer',
+          url,
+          what: 'this sale',
+          cause,
+        });
+      }
+
+      const text = await response.text();
+      const payload: unknown = text.trim() === '' ? undefined : JSON.parse(text);
+
+      if (response.status === 402) {
+        return { status: 'payment_required' as const, challenge: payload };
+      }
+      if (!response.ok) throw problemFrom(payload, response.status, url, 'this sale');
+
+      const body = readObject(payload, 'trade');
+      return { status: 'settled' as const, trade: readTrade(body['trade'] ?? body, 'trade') };
+    })();
+  },
+
+  /** `GET /v1/trades` — filtered to whichever side asked. */
+  listTrades(
+    params: { sellerId?: string; buyerId?: string; status?: TradeStatus; limit?: number },
+    signal?: AbortSignal,
+  ): Promise<Page<Trade>> {
+    return request(
+      '/trades',
+      {
+        what: 'your trades',
+        query: {
+          sellerId: params.sellerId,
+          buyerId: params.buyerId,
+          status: params.status,
+          limit: params.limit ?? 200,
+        },
+        signal,
+      },
+      (raw) => readPage(raw, 'trades', readTrade, 'trades'),
+    );
+  },
+
+  /** `GET /v1/trades/:id`. */
+  getTrade(id: string, signal?: AbortSignal): Promise<Trade> {
+    return request(`/trades/${encodeURIComponent(id)}`, { what: 'that trade', signal }, (raw) => {
+      const body = readObject(raw, 'trade');
+      return readTrade(body['trade'] ?? body, 'trade');
+    });
+  },
+
+  /** `GET /v1/trades/:id/proof` — the audit view, one click from any trade. */
+  getTradeProof(id: string, signal?: AbortSignal): Promise<TradeProofResponse> {
+    return request(
+      `/trades/${encodeURIComponent(id)}/proof`,
+      { what: 'the proof of that trade', signal },
+      (raw) => readTradeProof(raw),
+    );
+  },
+};
+
+export type FactureApi = typeof api;

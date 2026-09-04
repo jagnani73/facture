@@ -1,29 +1,18 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo } from 'react';
 
 import type { RefusalReceipt } from '@/lib/domain';
-import { bestQuote, unallocated } from '@/lib/domain';
+import { unallocated } from '@/lib/domain';
 import { formatMoney, formatMoneyCompact, formatRate } from '@/lib/format';
-import {
-  debtorFor,
-  getInvoice,
-  invoices,
-  marketNow,
-  metaOf,
-  otherMandates,
-  ownedMandates,
-  ownedPositions,
-  positionsOf,
-  tradeForInvoice,
-  viewer,
-} from '@/lib/fixtures';
+import type { Market } from '@/lib/data';
+import { useMarket } from '@/lib/data/hooks';
 import { maturityLadder, sumFace, sumOutlay, weightedAverageRateBps } from '@/lib/pricing';
 import { MandateCard, OperatorBadge, describeMandate } from '@/components/mandate-card';
 import { MaturityLadder } from '@/components/maturity-ladder';
 import { RatingChip } from '@/components/rating-chip';
 import { RefusalNotice } from '@/components/refusal-notice';
+import { Failure, Pending } from '@/components/ui/async';
 import { Card, CardHead, Label, PageHeader, buttonClasses } from '@/components/ui/primitives';
 
 /**
@@ -33,47 +22,75 @@ import { Card, CardHead, Label, PageHeader, buttonClasses } from '@/components/u
  * invoices anywhere on this page. There is a policy, how much of it is working, what it
  * earned, and when the money comes back.
  *
- * The refusals below are not authored. They are what running today's book against these
- * mandates actually produces, which is the only way the screen can be trusted to say the
- * same thing the venue would.
+ * The refusals below are not authored. They are the refusals the market actually produced
+ * against these mandates this morning, taken from the same pricing pass that put a number
+ * beside every row of the book — which is the only way the screen can be trusted to say
+ * the same thing the venue would.
  */
 export function MandatesView() {
-  const asOf = useMemo(() => marketNow(), []);
-  const owned = useMemo(() => ownedMandates(), []);
-  const others = useMemo(() => otherMandates(), []);
-  const mine = useMemo(() => ownedPositions().filter((p) => p.state === 'open'), []);
+  const market = useMarket();
 
-  const refusals = useMemo<RefusalReceipt[]>(() => {
-    const ownedIds = new Set(owned.map((m) => m.id));
-    const collected: RefusalReceipt[] = [];
+  if (market.status === 'loading') {
+    return (
+      <div className="space-y-8">
+        <PageHeader
+          title="Mandates"
+          lede="Standing bids, exposure used, and when the money comes back."
+        />
+        <Pending what="your mandates" lines={5} />
+      </div>
+    );
+  }
 
-    for (const invoice of invoices) {
-      const result = bestQuote(invoice, owned, debtorFor(invoice), { asOf });
-      for (const receipt of result.refusals) {
-        if (receipt.mandateId !== null && ownedIds.has(receipt.mandateId)) collected.push(receipt);
-      }
+  if (market.status === 'failed') {
+    return (
+      <div className="space-y-8">
+        <PageHeader
+          title="Mandates"
+          lede="Standing bids, exposure used, and when the money comes back."
+        />
+        <Failure error={market.error} what="your mandates" onRetry={market.reload} />
+      </div>
+    );
+  }
+
+  return <Mandates market={market.data} />;
+}
+
+function Mandates({ market }: { market: Market }) {
+  const owned = market.ownedMandates();
+  const others = market.otherMandates();
+  const mine = market.ownedPositions().filter((p) => p.state === 'open');
+
+  const ownedIds = new Set(owned.map((m) => m.id));
+  const collected: RefusalReceipt[] = [];
+  for (const invoice of market.invoices) {
+    for (const receipt of market.pricingFor(invoice.id).refusals) {
+      if (receipt.mandateId !== null && ownedIds.has(receipt.mandateId)) collected.push(receipt);
     }
+  }
 
-    // Concentration and exhaustion first: those are the ones a funder can do something
-    // about by moving a cap, rather than facts about the paper.
-    const priority: Record<string, number> = {
-      DEBTOR_CONCENTRATION: 0,
-      EXPOSURE_EXHAUSTED: 1,
-      TENOR_EXCEEDS_MANDATE: 2,
-    };
-    return collected.sort((a, b) => (priority[a.code] ?? 3) - (priority[b.code] ?? 3)).slice(0, 4);
-  }, [owned, asOf]);
+  // Concentration and exhaustion first: those are the ones a funder can do something about
+  // by moving a cap, rather than facts about the paper.
+  const priority: Record<string, number> = {
+    DEBTOR_CONCENTRATION: 0,
+    EXPOSURE_EXHAUSTED: 1,
+    TENOR_EXCEEDS_MANDATE: 2,
+  };
+  const refusals = collected
+    .sort((a, b) => (priority[a.code] ?? 3) - (priority[b.code] ?? 3))
+    .slice(0, 4);
 
   const committed = owned.reduce((total, m) => total + m.totalCommitted, 0n);
   const deployed = owned.reduce((total, m) => total + m.allocated, 0n);
-  const ladder = maturityLadder(mine, asOf);
+  const ladder = maturityLadder(mine, market.asOf);
   const sample = owned[0] ?? others[0];
   const carry = sumFace(mine) - sumOutlay(mine);
 
   return (
     <div className="space-y-8">
       <PageHeader
-        eyebrow={viewer.name}
+        eyebrow={market.viewer.name}
         title="Mandates"
         lede="You do not browse invoices. You write the policy you would have applied anyway, fund it, and let anything that fits come to you."
         actions={
@@ -88,7 +105,7 @@ export function MandatesView() {
           <Figure
             label="Committed"
             value={formatMoney(committed, { fractionDigits: 0 })}
-            note={`${owned.length} mandates`}
+            note={`${owned.length} ${owned.length === 1 ? 'mandate' : 'mandates'}`}
           />
           <Figure
             label="Deployed"
@@ -112,16 +129,28 @@ export function MandatesView() {
         </Card>
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-2">
-        {owned.map((mandate) => (
-          <MandateCard
-            key={mandate.id}
-            mandate={mandate}
-            meta={metaOf(mandate.id)}
-            positions={positionsOf(mandate.id)}
-          />
-        ))}
-      </div>
+      {owned.length === 0 ? (
+        <Card className="px-5 py-8 text-center">
+          <p className="text-sm text-muted">
+            You have no mandates yet. Until one is written and funded, nothing on the book can be
+            matched to you.
+          </p>
+          <Link href="/mandates/new" className={`${buttonClasses('primary')} mt-4`}>
+            Write a mandate
+          </Link>
+        </Card>
+      ) : (
+        <div className="grid gap-5 xl:grid-cols-2">
+          {owned.map((mandate) => (
+            <MandateCard
+              key={mandate.id}
+              mandate={mandate}
+              meta={market.metaOf(mandate.id)}
+              positions={market.positionsOf(mandate.id)}
+            />
+          ))}
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_24rem]">
         <Card>
@@ -131,15 +160,17 @@ export function MandatesView() {
           />
           <div className="space-y-3 px-5 py-5">
             {refusals.map((receipt) => {
-              const invoice = getInvoice(receipt.invoiceId);
-              const trade = tradeForInvoice(receipt.invoiceId);
+              const invoice = market.getInvoice(receipt.invoiceId);
+              const trade = market.tradeForInvoice(receipt.invoiceId);
               return (
                 <RefusalNotice
                   key={`${receipt.invoiceId}-${receipt.mandateId ?? 'invoice'}`}
                   receipt={receipt}
-                  mandateName={receipt.mandateId ? metaOf(receipt.mandateId).name : undefined}
+                  mandateName={
+                    receipt.mandateId ? market.metaOf(receipt.mandateId).name : undefined
+                  }
                   invoiceLabel={invoice?.invoiceNumber ?? receipt.invoiceId}
-                  {...(trade ? { receiptHref: `/proof/${trade.id}` } : {})}
+                  {...(trade ? { receiptHref: `/proof/${encodeURIComponent(trade.id)}` } : {})}
                 />
               );
             })}
@@ -156,7 +187,7 @@ export function MandatesView() {
           />
           <div className="px-5 py-3">
             {others.map((mandate) => {
-              const meta = metaOf(mandate.id);
+              const meta = market.metaOf(mandate.id);
               return (
                 <div key={mandate.id} className="ledger-row py-3.5">
                   <div className="flex items-start justify-between gap-3">
@@ -181,6 +212,16 @@ export function MandatesView() {
                 </div>
               );
             })}
+            {others.length === 0
+              ? market.notices.map((notice) => (
+                  <p key={notice} className="py-3 text-sm text-muted">
+                    {notice}
+                  </p>
+                ))
+              : null}
+            {others.length === 0 && market.notices.length === 0 ? (
+              <p className="py-3 text-sm text-muted">Nobody else is bidding into this book yet.</p>
+            ) : null}
           </div>
         </Card>
       </div>

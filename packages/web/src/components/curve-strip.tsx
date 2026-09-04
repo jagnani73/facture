@@ -96,9 +96,16 @@ export function CurveStrip({ points, marker, className = '' }: CurveStripProps) 
               stroke="var(--accent)"
               strokeWidth={1.5}
             />
+            {/*
+              One string child, not an interpolated fragment. React 19 treats `<title>` as a
+              hoistable element and accepts only a single text node, so a multi-child title
+              renders empty on the server and populated in the browser — a hydration mismatch
+              that took the whole book with it.
+            */}
             <title>
-              {point.label} · {point.minRating === 'UNRATED' ? 'any rating' : `${point.minRating}+`}{' '}
-              · {point.tenorDays}d · {formatRate(point.annualisedYieldBps)}
+              {`${point.label} · ${
+                point.minRating === 'UNRATED' ? 'any rating' : `${point.minRating}+`
+              } · ${point.tenorDays}d · ${formatRate(point.annualisedYieldBps)}`}
             </title>
           </g>
         ))}

@@ -6,10 +6,13 @@ import { useMemo, useState } from 'react';
 import type { Mandate, Rating } from '@/lib/domain';
 import { RATINGS, bestQuote, priceInvoice } from '@/lib/domain';
 import { formatDays, formatMoney, formatRate, toMinor } from '@/lib/format';
-import { debtorFor, debtorNameOf, invoices, marketNow, ratingOf, viewer } from '@/lib/fixtures';
+import type { Market } from '@/lib/data';
+import { writeAndFundMandate } from '@/lib/data';
+import { useMarket } from '@/lib/data/hooks';
 import { describeMandate } from '@/components/mandate-card';
 import { RatingChip } from '@/components/rating-chip';
 import { refusalShort } from '@/components/refusal-notice';
+import { Failure, Pending } from '@/components/ui/async';
 import {
   Button,
   Card,
@@ -23,7 +26,15 @@ import {
   buttonClasses,
 } from '@/components/ui/primitives';
 
-/** A floor, said the way a funder would say it. */
+/**
+ * A floor, said the way a funder would say it.
+ *
+ * `D` is not on the list, and that is the venue's rule rather than a UI simplification:
+ * `createMandateBody` accepts `UNRATED | C | B | A` only. A floor that accepts a customer
+ * already known to have defaulted is not a bid anyone means to write, and `UNRATED` is
+ * already the widest one on offer — it takes cold starts and still refuses `D`, because on
+ * this scale a default ranks below no history at all.
+ */
 const RATING_FLOOR_LABEL: Record<Rating, string> = {
   A: 'A only — the longest settled records',
   B: 'B or better',
@@ -31,6 +42,8 @@ const RATING_FLOOR_LABEL: Record<Rating, string> = {
   UNRATED: 'Anything without a default on record',
   D: 'Anything at all, defaults included',
 };
+
+const WRITABLE_FLOORS = RATINGS.filter((rating) => rating !== 'D');
 
 /**
  * Writing a mandate.
@@ -40,10 +53,43 @@ const RATING_FLOOR_LABEL: Record<Rating, string> = {
  * and exactly which of the invoices already on the book it would take this morning — run
  * through the same `bestQuote` that would match it for real. A funder should never have to
  * fund something to find out what it does.
+ *
+ * That preview is the one place in this app where a price is still computed locally, and
+ * legitimately so: the mandate does not exist yet, so there is nothing for the venue to
+ * price against. Every number attached to a real invoice comes from the market.
  */
 export function MandateComposer() {
-  const asOf = useMemo(() => marketNow(), []);
+  const market = useMarket();
 
+  if (market.status === 'loading') {
+    return (
+      <div className="space-y-8">
+        <PageHeader eyebrow="Mandates" title="Write a mandate" />
+        <Pending what="the book you would be bidding into" lines={4} />
+      </div>
+    );
+  }
+
+  if (market.status === 'failed') {
+    return (
+      <div className="space-y-8">
+        <PageHeader eyebrow="Mandates" title="Write a mandate" />
+        <Failure
+          error={market.error}
+          what="the book you would be bidding into"
+          onRetry={market.reload}
+        >
+          A mandate can still be written blind, but the point of this screen is seeing what it would
+          take before you fund it.
+        </Failure>
+      </div>
+    );
+  }
+
+  return <Composer market={market.data} />;
+}
+
+function Composer({ market }: { market: Market }) {
   const [name, setName] = useState('Investment grade, 90 days');
   const [minRating, setMinRating] = useState<Rating>('A');
   const [maxTenor, setMaxTenor] = useState(90);
@@ -52,8 +98,10 @@ export function MandateComposer() {
   const [perDebtor, setPerDebtor] = useState('50000');
   const [sampleFace, setSampleFace] = useState('40000');
   const [sampleTenor, setSampleTenor] = useState(60);
-  const [funded, setFunded] = useState(false);
+  const [funding, setFunding] = useState<'idle' | 'working' | 'funded' | 'refused'>('idle');
+  const [message, setMessage] = useState('');
 
+  const asOf = market.asOf;
   const annualisedYieldBps = Math.max(0, Math.round((Number.parseFloat(ratePct) || 0) * 100));
   const totalCommitted = toMinor(Math.max(0, Number.parseFloat(commitment) || 0));
   const maxPerDebtor = toMinor(Math.max(0, Number.parseFloat(perDebtor) || 0));
@@ -62,7 +110,7 @@ export function MandateComposer() {
   const draft: Mandate = useMemo(
     () => ({
       id: 'MND-DRAFT',
-      buyerId: viewer.buyerId,
+      buyerId: market.viewer.id,
       minRating,
       maxTenorDays: maxTenor,
       annualisedYieldBps,
@@ -73,7 +121,7 @@ export function MandateComposer() {
       currency: 'USD',
       debtorExposure: {},
     }),
-    [minRating, maxTenor, annualisedYieldBps, totalCommitted, maxPerDebtor],
+    [market.viewer.id, minRating, maxTenor, annualisedYieldBps, totalCommitted, maxPerDebtor],
   );
 
   const sample =
@@ -84,10 +132,10 @@ export function MandateComposer() {
 
   const assessed = useMemo(
     () =>
-      invoices
+      market.invoices
         .map((invoice) => ({
           invoice,
-          result: bestQuote(invoice, [draft], debtorFor(invoice), { asOf }),
+          result: bestQuote(invoice, [draft], market.debtorFor(invoice), { asOf }),
         }))
         .filter(({ result }) => result.refusals[0]?.code !== 'INVOICE_NOT_CONFIRMED')
         .sort((a, b) => {
@@ -95,7 +143,7 @@ export function MandateComposer() {
           const takenB = b.result.quote !== null ? 0 : 1;
           return takenA !== takenB ? takenA - takenB : a.result.tenorDays - b.result.tenorDays;
         }),
-    [draft, asOf],
+    [market, draft, asOf],
   );
 
   const takes = assessed.filter((a) => a.result.quote !== null);
@@ -129,14 +177,14 @@ export function MandateComposer() {
               <Field
                 label="Minimum customer rating"
                 htmlFor="rating"
-                hint="Earned here, out of invoices actually settled. A defaulted customer sits below unrated, so no floor short of D reaches them."
+                hint="Earned here, out of invoices actually settled. A defaulted customer sits below unrated, so no floor on this list reaches them."
               >
                 <Select
                   id="rating"
                   value={minRating}
                   onChange={(e) => setMinRating(e.target.value as Rating)}
                 >
-                  {RATINGS.map((rating) => (
+                  {WRITABLE_FLOORS.map((rating) => (
                     <option key={rating} value={rating}>
                       {RATING_FLOOR_LABEL[rating]}
                     </option>
@@ -200,7 +248,7 @@ export function MandateComposer() {
               <p className="text-sm">{describeMandate(draft)}</p>
             </div>
 
-            {funded ? (
+            {funding === 'funded' ? (
               <div className="rounded-sm border border-pos/40 bg-pos-wash px-4 py-4">
                 <p className="text-sm">
                   {name} funded for{' '}
@@ -209,21 +257,55 @@ export function MandateComposer() {
                   </span>
                   .
                 </p>
-                <p className="mt-1 text-xs text-muted">
-                  The capital is escrowed, which is what makes your bid firm rather than indicative.
-                  Matching is bounded by the unallocated balance, so it can never be overcommitted.
-                  Nothing moved here — this is demo data.
-                </p>
+                <p className="mt-1 text-xs text-muted">{message}</p>
+                <Link href="/mandates" className={`${buttonClasses('secondary', 'sm')} mt-3`}>
+                  See your mandates
+                </Link>
+              </div>
+            ) : funding === 'refused' ? (
+              <div className="rounded-sm border border-warn/40 bg-warn-wash px-4 py-4">
+                <p className="text-sm text-ink">{message}</p>
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => setFunding('idle')}
+                >
+                  Back
+                </Button>
               </div>
             ) : (
               <div className="flex flex-wrap items-center gap-3">
                 <Button
                   variant="primary"
                   size="lg"
-                  disabled={annualisedYieldBps <= 0 || totalCommitted <= 0n}
-                  onClick={() => setFunded(true)}
+                  disabled={
+                    annualisedYieldBps <= 0 || totalCommitted <= 0n || funding === 'working'
+                  }
+                  onClick={async () => {
+                    setFunding('working');
+                    const result = await writeAndFundMandate({
+                      ratingFloor: minRating === 'D' ? 'UNRATED' : minRating,
+                      maxTenorDays: maxTenor,
+                      annualisedYieldBps,
+                      exposureLimit: totalCommitted,
+                      perDebtorLimit: maxPerDebtor,
+                    });
+                    if (result.ok) {
+                      setMessage(
+                        result.note ??
+                          'The capital is escrowed, which is what makes your bid firm rather than indicative.',
+                      );
+                      setFunding('funded');
+                    } else {
+                      setMessage(result.reason);
+                      setFunding('refused');
+                    }
+                  }}
                 >
-                  Fund {formatMoney(totalCommitted, { fractionDigits: 0 })}
+                  {funding === 'working'
+                    ? 'Funding…'
+                    : `Fund ${formatMoney(totalCommitted, { fractionDigits: 0 })}`}
                 </Button>
                 <span className="text-xs text-muted">
                   Funding is what makes the quote firm. Until it is funded it is not a bid.
@@ -311,8 +393,10 @@ export function MandateComposer() {
                       className="ledger-row flex items-center justify-between gap-3 py-2.5"
                     >
                       <div className="flex min-w-0 items-center gap-2">
-                        <RatingChip rating={ratingOf(invoice)} />
-                        <span className="min-w-0 truncate text-xs">{debtorNameOf(invoice)}</span>
+                        <RatingChip rating={market.ratingOf(invoice)} />
+                        <span className="min-w-0 truncate text-xs">
+                          {market.debtorNameOf(invoice)}
+                        </span>
                         <span className="num shrink-0 text-xs text-faint">{result.tenorDays}d</span>
                       </div>
                       <span className="shrink-0 text-right text-xs">
@@ -329,6 +413,11 @@ export function MandateComposer() {
                     </div>
                   );
                 })}
+                {assessed.length === 0 ? (
+                  <p className="py-3 text-xs text-muted">
+                    Nothing quotable is on the book to run this against yet.
+                  </p>
+                ) : null}
               </div>
 
               <p className="mt-3 text-xs text-muted">

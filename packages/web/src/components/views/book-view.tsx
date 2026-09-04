@@ -2,26 +2,21 @@
 
 import Link from 'next/link';
 import type { ReactNode } from 'react';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 
-import type { BestQuoteResult, Invoice, InvoiceStatus } from '@/lib/domain';
-import { bestQuote, isIssued, isQuotable } from '@/lib/domain';
+import type { Invoice, InvoiceStatus } from '@/lib/domain';
+import { isIssued, isQuotable } from '@/lib/domain';
 import { formatDateShort, formatDueIn, formatMoney } from '@/lib/format';
-import {
-  debtorFor,
-  debtorNameOf,
-  invoices,
-  mandates,
-  marketNow,
-  metaOf,
-  ratingOf,
-} from '@/lib/fixtures';
+import type { InvoicePricing, Market } from '@/lib/data';
+import { isDemoBook } from '@/lib/data';
+import { useMarket } from '@/lib/data/hooks';
 import { curveFrom } from '@/lib/pricing';
 import { CurveStrip } from '@/components/curve-strip';
 import { PriceCell } from '@/components/price-cell';
 import { RatingChip } from '@/components/rating-chip';
 import { StatusPill } from '@/components/status-pill';
 import { refusalShort } from '@/components/refusal-notice';
+import { Failure, Pending } from '@/components/ui/async';
 import { Card, Label, PageHeader, buttonClasses } from '@/components/ui/primitives';
 
 /**
@@ -32,8 +27,14 @@ import { Card, Label, PageHeader, buttonClasses } from '@/components/ui/primitiv
  * form, not a callback. The number is there, it moves, and it is the number a seller would
  * actually be paid.
  *
- * The price comes from the same `bestQuote` the venue matches on, so nothing on this screen
- * is a display approximation of a figure computed somewhere else.
+ * The price is read from the market, which against the live venue means it was computed
+ * against every funded mandate on the book by the same engine that would match it. Nothing
+ * on this screen is a display approximation of a figure computed somewhere else.
+ *
+ * The page waits for the whole book rather than filling rows in as prices arrive. A table
+ * where some rows have a price and others are still thinking is a table that reads as if
+ * the market is unsure about a particular invoice, which is precisely the impression this
+ * product exists to remove.
  */
 
 type Lens = 'all' | 'priced' | 'waiting' | 'closed';
@@ -65,7 +66,7 @@ const SORT_ORDER: Record<InvoiceStatus, number> = {
 
 interface Row {
   invoice: Invoice;
-  result: BestQuoteResult;
+  pricing: InvoicePricing;
   customer: string;
   settled: number;
   issued: boolean;
@@ -73,39 +74,67 @@ interface Row {
 }
 
 export function BookView() {
+  const market = useMarket();
+
+  if (market.status === 'loading') {
+    return (
+      <div className="space-y-8">
+        <PageHeader
+          title="The book"
+          lede="Every invoice you are owed, with what it is worth today beside it."
+        />
+        <Pending what="your book" lines={6} />
+      </div>
+    );
+  }
+
+  if (market.status === 'failed') {
+    return (
+      <div className="space-y-8">
+        <PageHeader
+          title="The book"
+          lede="Every invoice you are owed, with what it is worth today beside it."
+        />
+        <Failure error={market.error} what="your book" onRetry={market.reload}>
+          No price is shown while the venue is silent. A number here has to be one a buyer would
+          actually pay.
+        </Failure>
+      </div>
+    );
+  }
+
+  return <Book market={market.data} onReload={market.reload} />;
+}
+
+function Book({ market, onReload }: { market: Market; onReload: () => void }) {
   const [lens, setLens] = useState<Lens>('all');
-  const asOf = useMemo(() => marketNow(), []);
 
-  const rows: Row[] = useMemo(
-    () =>
-      invoices
-        .map((invoice) => {
-          const debtor = debtorFor(invoice);
-          const result = bestQuote(invoice, mandates, debtor, { asOf });
-          const nearest = result.refusals[0];
+  const rows: Row[] = market.invoices
+    .map((invoice) => {
+      const pricing = market.pricingFor(invoice.id);
+      const debtor = market.debtorFor(invoice);
+      const nearest = pricing.refusals[0];
 
-          return {
-            invoice,
-            result,
-            customer: debtorNameOf(invoice),
-            settled: debtor.onTimeCount,
-            issued: isIssued(invoice),
-            noBidReason: nearest
-              ? `Nearest bid: ${refusalShort(nearest.code)}`
-              : 'No standing bid reaches this invoice',
-          };
-        })
-        .sort((a, b) => {
-          const byStatus = SORT_ORDER[a.invoice.status] - SORT_ORDER[b.invoice.status];
-          return byStatus !== 0 ? byStatus : a.result.tenorDays - b.result.tenorDays;
-        }),
-    [asOf],
-  );
+      return {
+        invoice,
+        pricing,
+        customer: debtor.name,
+        settled: debtor.onTimeCount,
+        issued: isIssued(invoice),
+        noBidReason: nearest
+          ? `Nearest bid: ${refusalShort(nearest.code)}`
+          : 'No standing bid reaches this invoice',
+      };
+    })
+    .sort((a, b) => {
+      const byStatus = SORT_ORDER[a.invoice.status] - SORT_ORDER[b.invoice.status];
+      return byStatus !== 0 ? byStatus : a.pricing.tenorDays - b.pricing.tenorDays;
+    });
 
   const visible = rows.filter((row) => {
     switch (lens) {
       case 'priced':
-        return row.result.quote !== null;
+        return row.pricing.quote !== null;
       case 'waiting':
         return row.invoice.status === 'awaiting_confirmation' || row.invoice.status === 'draft';
       case 'closed':
@@ -117,8 +146,8 @@ export function BookView() {
 
   const open = rows.filter((r) => OPEN.includes(r.invoice.status));
   const faceOpen = open.reduce((total, r) => total + r.invoice.faceValue, 0n);
-  const worthNow = rows.reduce((total, r) => total + (r.result.quote?.proceeds ?? 0n), 0n);
-  const pricedCount = rows.filter((r) => r.result.quote !== null).length;
+  const worthNow = rows.reduce((total, r) => total + (r.pricing.quote?.proceeds ?? 0n), 0n);
+  const pricedCount = rows.filter((r) => r.pricing.quote !== null).length;
   const waitingCount = rows.filter(
     (r) => r.invoice.status === 'awaiting_confirmation' || r.invoice.status === 'draft',
   ).length;
@@ -126,13 +155,26 @@ export function BookView() {
   return (
     <div className="space-y-8">
       <PageHeader
-        eyebrow="Meridian Fabrication"
+        eyebrow={market.seller.name}
         title="The book"
         lede={`${open.length} invoices outstanding. ${pricedCount} of them have a price right now, and it moves as the bids move and as the due dates come closer.`}
         actions={
-          <Link href="/book/new" className={buttonClasses('primary')}>
-            Add invoices
-          </Link>
+          <>
+            {/* Nothing to re-read when the book is already in this process. */}
+            {isDemoBook() ? null : (
+              <button
+                type="button"
+                onClick={onReload}
+                className={buttonClasses('quiet')}
+                title="Read the book again"
+              >
+                Refresh
+              </button>
+            )}
+            <Link href="/book/new" className={buttonClasses('primary')}>
+              Add invoices
+            </Link>
+          </>
         }
       />
 
@@ -162,7 +204,15 @@ export function BookView() {
             <Label>Standing bids</Label>
             <span className="text-[0.6875rem] text-faint">rate by longest tenor held</span>
           </div>
-          <CurveStrip points={curveFrom(mandates, (m) => metaOf(m.id).name)} className="mt-2" />
+          <CurveStrip
+            points={curveFrom(market.mandates, (m) => market.metaOf(m.id).name)}
+            className="mt-2"
+          />
+          {market.notices.map((notice) => (
+            <p key={notice} className="mt-2 text-[0.6875rem] text-faint">
+              {notice}
+            </p>
+          ))}
         </Card>
       </div>
 
@@ -212,10 +262,10 @@ export function BookView() {
                   >
                     <Td>
                       <Link
-                        href={`/book/${row.invoice.id}`}
+                        href={`/book/${encodeURIComponent(row.invoice.id)}`}
                         className="flex items-center gap-2 group-hover:text-accent"
                       >
-                        <RatingChip rating={ratingOf(row.invoice)} settled={row.settled} />
+                        <RatingChip rating={market.ratingOf(row.invoice)} settled={row.settled} />
                         <span className="truncate">{row.customer}</span>
                       </Link>
                     </Td>
@@ -223,7 +273,7 @@ export function BookView() {
                     <Td>
                       <span className="num">{formatDateShort(row.invoice.dueAt)}</span>
                       <span className="ml-2 text-xs text-faint">
-                        {formatDueIn(row.result.tenorDays)}
+                        {formatDueIn(row.pricing.tenorDays)}
                       </span>
                     </Td>
                     <Td align="right" className="num">
@@ -257,7 +307,7 @@ export function BookView() {
 }
 
 function PriceRow({ row }: { row: Row }) {
-  const { invoice, result, issued, noBidReason } = row;
+  const { invoice, pricing, issued, noBidReason } = row;
 
   if (!issued) return <span className="text-xs text-faint">Being added to the book</span>;
 
@@ -283,10 +333,11 @@ function PriceRow({ row }: { row: Row }) {
     <PriceCell
       seed={invoice.id}
       faceValue={invoice.faceValue}
-      tenorDays={result.tenorDays}
-      bestRateBps={result.quote?.annualisedYieldBps ?? null}
-      takers={result.matches.length}
+      tenorDays={pricing.tenorDays}
+      bestRateBps={pricing.quote?.annualisedYieldBps ?? null}
+      takers={pricing.matchCount}
       noBidReason={noBidReason}
+      live={isDemoBook()}
     />
   );
 }

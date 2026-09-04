@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 
 import { InvoiceDetailView } from '@/components/views/invoice-detail-view';
-import { debtorNameOf, getInvoice } from '@/lib/fixtures';
+import { loadInvoiceLabel } from '@/lib/data';
 
 export async function generateMetadata({
   params,
@@ -9,9 +9,9 @@ export async function generateMetadata({
   params: Promise<{ invoiceId: string }>;
 }): Promise<Metadata> {
   const { invoiceId } = await params;
-  const invoice = getInvoice(invoiceId);
+  const label = await loadInvoiceLabel(invoiceId);
   return {
-    title: invoice ? `${invoice.invoiceNumber} · ${debtorNameOf(invoice)}` : 'Invoice',
+    title: label ? `${label.invoiceNumber} · ${label.customer}` : 'Invoice',
   };
 }
 

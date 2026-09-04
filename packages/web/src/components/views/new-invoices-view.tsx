@@ -6,9 +6,12 @@ import { useMemo, useState } from 'react';
 import type { Debtor, Invoice, Rating } from '@/lib/domain';
 import { bestQuote, uniquenessHash } from '@/lib/domain';
 import { formatDate, formatDays, formatMoney, formatRate, toMinor } from '@/lib/format';
-import { debtors, getDebtorByName, mandates, marketNow, seller } from '@/lib/fixtures';
+import type { Market, NewInvoiceDraft } from '@/lib/data';
+import { addInvoices, usingApi } from '@/lib/data';
+import { useMarket } from '@/lib/data/hooks';
 import { RatingChip } from '@/components/rating-chip';
 import { StatusPill } from '@/components/status-pill';
+import { Failure, Pending } from '@/components/ui/async';
 import {
   Button,
   Card,
@@ -31,18 +34,45 @@ import {
  *
  * Nothing here promises the book will be ready instantly. Issuance is paced on purpose,
  * and the screen says so rather than showing a spinner that lies.
+ *
+ * The customer's email address is asked for because the venue needs somewhere to send the
+ * confirmation link, and confirmation is what turns the invoice green and gives it a price.
+ * It is the only new field, and it is the one the whole listing path hangs on.
  */
 
-interface Draft {
+interface Draft extends NewInvoiceDraft {
   key: string;
-  customer: string;
-  reference: string;
-  amountMajor: number;
-  dueOn: string;
   problem?: string;
 }
 
 export function NewInvoicesView() {
+  const market = useMarket();
+
+  if (market.status === 'loading') {
+    return (
+      <div className="space-y-8">
+        <PageHeader eyebrow="The book" title="Add invoices" />
+        <Pending what="your customers and the standing bids" lines={3} />
+      </div>
+    );
+  }
+
+  if (market.status === 'failed') {
+    return (
+      <div className="space-y-8">
+        <PageHeader eyebrow="The book" title="Add invoices" />
+        <Failure error={market.error} what="the book" onRetry={market.reload}>
+          Invoices cannot be added while the venue is not answering, and there would be no price to
+          show you beside them if they could.
+        </Failure>
+      </div>
+    );
+  }
+
+  return <AddInvoices market={market.data} />;
+}
+
+function AddInvoices({ market }: { market: Market }) {
   const [staged, setStaged] = useState<Draft[]>([]);
 
   return (
@@ -59,7 +89,7 @@ export function NewInvoicesView() {
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <SingleEntry onAdd={(draft) => setStaged((list) => [...list, draft])} />
+        <SingleEntry market={market} onAdd={(draft) => setStaged((list) => [...list, draft])} />
         <PasteEntry onAdd={(drafts) => setStaged((list) => [...list, ...drafts])} />
       </div>
 
@@ -70,15 +100,21 @@ export function NewInvoicesView() {
 
 /* -------------------------------------------------------------------------- */
 
-function SingleEntry({ onAdd }: { onAdd: (draft: Draft) => void }) {
+function SingleEntry({ market, onAdd }: { market: Market; onAdd: (draft: Draft) => void }) {
   const [customer, setCustomer] = useState('');
+  const [email, setEmail] = useState('');
   const [reference, setReference] = useState('');
   const [amount, setAmount] = useState('');
   const [dueOn, setDueOn] = useState('');
 
   const amountMajor = parseAmount(amount);
-  const preview = usePreview(customer, amountMajor, dueOn);
-  const ready = customer.trim() !== '' && amountMajor > 0 && isIsoDate(dueOn);
+  const preview = usePreview(market, customer, amountMajor, dueOn);
+  const emailNeeded = usingApi();
+  const ready =
+    customer.trim() !== '' &&
+    amountMajor > 0 &&
+    isIsoDate(dueOn) &&
+    (!emailNeeded || isEmail(email));
 
   return (
     <Card>
@@ -91,11 +127,13 @@ function SingleEntry({ onAdd }: { onAdd: (draft: Draft) => void }) {
           onAdd({
             key: `${Date.now()}-${reference || customer}`,
             customer: customer.trim(),
+            customerEmail: email.trim(),
             reference: reference.trim() || 'no reference',
-            amountMajor,
+            amountMinor: toMinor(amountMajor),
             dueOn,
           });
           setCustomer('');
+          setEmail('');
           setReference('');
           setAmount('');
           setDueOn('');
@@ -111,10 +149,25 @@ function SingleEntry({ onAdd }: { onAdd: (draft: Draft) => void }) {
             autoComplete="off"
           />
           <datalist id="known-customers">
-            {debtors.map((debtor) => (
+            {market.debtors.map((debtor) => (
               <option key={debtor.id} value={debtor.name} />
             ))}
           </datalist>
+        </Field>
+
+        <Field
+          label="Where to reach them"
+          htmlFor="customer-email"
+          hint="One link with one sentence goes here when you ask them to confirm. No account, nothing to install."
+        >
+          <TextInput
+            id="customer-email"
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="accounts@haldenaero.com"
+            autoComplete="off"
+          />
         </Field>
 
         <div className="grid gap-4 sm:grid-cols-2">
@@ -151,7 +204,7 @@ function SingleEntry({ onAdd }: { onAdd: (draft: Draft) => void }) {
         <PreviewStrip preview={preview} />
 
         <Button type="submit" variant="primary" disabled={!ready}>
-          Add to the book
+          Stage it
         </Button>
       </form>
     </Card>
@@ -160,9 +213,9 @@ function SingleEntry({ onAdd }: { onAdd: (draft: Draft) => void }) {
 
 /* -------------------------------------------------------------------------- */
 
-const SAMPLE = `Halden Aerospace, MF-2053, 40000, 2026-11-14
-Lumen Grid Utilities, MF-2054, 61250, 2026-10-02
-Sable Interiors, MF-2055, 4800, 2026-09-28`;
+const SAMPLE = `Halden Aerospace, MF-2053, 40000, 2026-11-14, accounts@haldenaero.com
+Lumen Grid Utilities, MF-2054, 61250, 2026-10-02, ap@lumengrid.com
+Sable Interiors, MF-2055, 4800, 2026-09-28, hello@sableinteriors.co`;
 
 function PasteEntry({ onAdd }: { onAdd: (drafts: Draft[]) => void }) {
   const [text, setText] = useState('');
@@ -173,7 +226,7 @@ function PasteEntry({ onAdd }: { onAdd: (drafts: Draft[]) => void }) {
     <Card>
       <CardHead
         title="Paste from a spreadsheet"
-        hint="Customer, reference, amount, due date — one invoice per line. A header row is ignored."
+        hint="Customer, reference, amount, due date, and where to reach them — one invoice per line. A header row is ignored."
       />
       <div className="space-y-4 px-5 py-5">
         <TextArea
@@ -196,8 +249,8 @@ function PasteEntry({ onAdd }: { onAdd: (drafts: Draft[]) => void }) {
         </div>
 
         {parsed.length > 0 ? (
-          <div className="overflow-hidden rounded-sm border border-rule">
-            <table className="w-full border-collapse text-xs">
+          <div className="overflow-x-auto rounded-sm border border-rule">
+            <table className="w-full min-w-[30rem] border-collapse text-xs">
               <tbody>
                 {parsed.map((row) => (
                   <tr key={row.key} className="border-b border-rule last:border-0">
@@ -206,8 +259,8 @@ function PasteEntry({ onAdd }: { onAdd: (drafts: Draft[]) => void }) {
                     </td>
                     <td className="num px-3 py-2 text-muted">{row.reference}</td>
                     <td className="num px-3 py-2 text-right">
-                      {row.amountMajor > 0
-                        ? formatMoney(toMinor(row.amountMajor), { fractionDigits: 0 })
+                      {row.amountMinor > 0n
+                        ? formatMoney(row.amountMinor, { fractionDigits: 0 })
                         : '—'}
                     </td>
                     <td className="num px-3 py-2">
@@ -236,7 +289,7 @@ function PasteEntry({ onAdd }: { onAdd: (drafts: Draft[]) => void }) {
             setText('');
           }}
         >
-          Add {good.length || ''} {good.length === 1 ? 'invoice' : 'invoices'}
+          Stage {good.length || ''} {good.length === 1 ? 'invoice' : 'invoices'}
         </Button>
       </div>
     </Card>
@@ -245,56 +298,126 @@ function PasteEntry({ onAdd }: { onAdd: (drafts: Draft[]) => void }) {
 
 /* -------------------------------------------------------------------------- */
 
+type Submission =
+  | { state: 'idle' }
+  | { state: 'working' }
+  | {
+      state: 'done';
+      added: number;
+      refused: { reference: string; reason: string }[];
+      note: string | null;
+    }
+  | { state: 'refused'; reason: string };
+
 function StagedList({ drafts, onClear }: { drafts: readonly Draft[]; onClear: () => void }) {
-  if (drafts.length === 0) {
+  const [submission, setSubmission] = useState<Submission>({ state: 'idle' });
+
+  if (drafts.length === 0 && submission.state !== 'done') {
     return (
       <Card className="px-5 py-8 text-center">
         <p className="text-sm text-muted">
-          Nothing added yet. Anything you add appears here while it is being set up.
+          Nothing staged yet. Anything you add appears here before it goes to the book.
         </p>
       </Card>
     );
   }
 
-  const face = drafts.reduce((total, draft) => total + toMinor(draft.amountMajor), 0n);
+  const face = drafts.reduce((total, draft) => total + draft.amountMinor, 0n);
 
   return (
     <Card>
       <CardHead
-        title="Being added"
+        title={submission.state === 'done' ? 'Sent to the book' : 'Ready to add'}
         hint="Issuance is paced deliberately, so a large book does not arrive all at once. Nothing is waiting on it — you can close this page."
         right={
-          <Button variant="quiet" size="sm" onClick={onClear}>
-            Clear
-          </Button>
+          drafts.length > 0 ? (
+            <Button
+              variant="quiet"
+              size="sm"
+              onClick={() => {
+                onClear();
+                setSubmission({ state: 'idle' });
+              }}
+            >
+              Clear
+            </Button>
+          ) : undefined
         }
       />
-      <div className="px-5 py-3">
-        {drafts.map((draft) => (
-          <div key={draft.key} className="ledger-row flex items-center justify-between gap-4 py-3">
-            <div className="min-w-0">
-              <p className="truncate text-sm">{draft.customer}</p>
-              <p className="num text-xs text-muted">
-                {draft.reference} · due {formatDate(draft.dueOn)}
-              </p>
+
+      {drafts.length > 0 ? (
+        <div className="px-5 py-3">
+          {drafts.map((draft) => (
+            <div
+              key={draft.key}
+              className="ledger-row flex items-center justify-between gap-4 py-3"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm">{draft.customer}</p>
+                <p className="num text-xs text-muted">
+                  {draft.reference} · due {formatDate(draft.dueOn)}
+                </p>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="num text-sm" data-num>
+                  {formatMoney(draft.amountMinor, { fractionDigits: 0 })}
+                </span>
+                <StatusPill status="draft" issued={submission.state === 'done'} />
+              </div>
             </div>
-            <div className="flex items-center gap-4">
-              <span className="num text-sm" data-num>
-                {formatMoney(toMinor(draft.amountMajor), { fractionDigits: 0 })}
-              </span>
-              <StatusPill status="draft" issued={false} />
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="flex items-center justify-between border-t border-rule px-5 py-3.5 text-sm">
-        <span className="text-muted">
-          {drafts.length} {drafts.length === 1 ? 'invoice' : 'invoices'} queued
-        </span>
-        <span className="num font-medium" data-num>
-          {formatMoney(face, { fractionDigits: 0 })}
-        </span>
-      </div>
+          ))}
+        </div>
+      ) : null}
+
+      {submission.state === 'done' ? (
+        <div className="border-t border-rule px-5 py-4">
+          <p className="text-sm">
+            {submission.added} {submission.added === 1 ? 'invoice' : 'invoices'} added.
+          </p>
+          {submission.note ? <p className="mt-1 text-xs text-muted">{submission.note}</p> : null}
+          {submission.refused.map((refusal) => (
+            <p key={refusal.reference} className="mt-2 text-xs text-warn">
+              {refusal.reference} — {refusal.reason}
+            </p>
+          ))}
+          <Link href="/book" className={`${buttonClasses('secondary', 'sm')} mt-3`}>
+            Open the book
+          </Link>
+        </div>
+      ) : submission.state === 'refused' ? (
+        <div className="border-t border-rule px-5 py-4">
+          <p className="text-sm text-warn">{submission.reason}</p>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-rule px-5 py-3.5 text-sm">
+          <span className="text-muted">
+            {drafts.length} {drafts.length === 1 ? 'invoice' : 'invoices'} staged ·{' '}
+            <span className="num font-medium" data-num>
+              {formatMoney(face, { fractionDigits: 0 })}
+            </span>
+          </span>
+          <Button
+            variant="primary"
+            disabled={submission.state === 'working'}
+            onClick={async () => {
+              setSubmission({ state: 'working' });
+              const result = await addInvoices(drafts);
+              setSubmission(
+                result.ok
+                  ? {
+                      state: 'done',
+                      added: result.value.added,
+                      refused: result.value.refused,
+                      note: result.note,
+                    }
+                  : { state: 'refused', reason: result.reason },
+              );
+            }}
+          >
+            {submission.state === 'working' ? 'Adding…' : 'Add to the book'}
+          </Button>
+        </div>
+      )}
     </Card>
   );
 }
@@ -322,22 +445,28 @@ const NEW_CUSTOMER: Debtor = {
 };
 
 /**
- * Priced through the same `bestQuote` the book uses, so what this strip promises is what
- * the row will say once the customer confirms it.
+ * Priced through the same `bestQuote` the venue matches on, against the standing bids the
+ * market is showing. This invoice does not exist yet, so there is nothing for the venue to
+ * quote — the strip is what the row will say once the customer confirms it.
  */
-function usePreview(customer: string, amountMajor: number, dueOn: string): Preview | null {
-  const asOf = useMemo(() => marketNow(), []);
+function usePreview(
+  market: Market,
+  customer: string,
+  amountMajor: number,
+  dueOn: string,
+): Preview | null {
+  const asOf = market.asOf;
 
   return useMemo(() => {
     if (amountMajor <= 0 || !isIsoDate(dueOn)) return null;
 
-    const match = getDebtorByName(customer);
+    const match = market.getDebtorByName(customer);
     const debtor = match ?? NEW_CUSTOMER;
     const faceValue = toMinor(amountMajor);
 
     const invoice: Invoice = {
       id: 'INV-PREVIEW',
-      sellerId: seller.id,
+      sellerId: market.seller.id,
       debtorId: debtor.id,
       faceValue,
       currency: 'USD',
@@ -348,7 +477,7 @@ function usePreview(customer: string, amountMajor: number, dueOn: string): Previ
       uniquenessHash: uniquenessHash(debtor.id, 'PREVIEW', faceValue),
     };
 
-    const result = bestQuote(invoice, mandates, debtor, { asOf });
+    const result = bestQuote(invoice, market.mandates, debtor, { asOf });
 
     return {
       rating: debtor.rating,
@@ -358,7 +487,7 @@ function usePreview(customer: string, amountMajor: number, dueOn: string): Previ
       proceeds: result.quote?.proceeds ?? 0n,
       takers: result.matches.length,
     };
-  }, [customer, amountMajor, dueOn, asOf]);
+  }, [market, customer, amountMajor, dueOn, asOf]);
 }
 
 function PreviewStrip({ preview }: { preview: Preview | null }) {
@@ -414,7 +543,14 @@ function isIsoDate(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
 }
 
+/** Matches the venue's own `z.email()` closely enough to catch a typo before the round trip. */
+function isEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
 function parseCsv(text: string): Draft[] {
+  const emailNeeded = usingApi();
+
   return text
     .split('\n')
     .map((line) => line.trim())
@@ -422,7 +558,7 @@ function parseCsv(text: string): Draft[] {
     .filter((line) => !/^customer\b/i.test(line))
     .map((line, index) => {
       const cells = line.split(',').map((cell) => cell.trim().replace(/^"|"$/g, ''));
-      const [customer = '', reference = '', amount = '', dueOn = ''] = cells;
+      const [customer = '', reference = '', amount = '', dueOn = '', email = ''] = cells;
       const amountMajor = parseAmount(amount);
 
       let problem: string | undefined;
@@ -430,12 +566,14 @@ function parseCsv(text: string): Draft[] {
       else if (customer === '') problem = 'no customer';
       else if (amountMajor <= 0) problem = 'amount not readable';
       else if (!isIsoDate(dueOn)) problem = 'date must be YYYY-MM-DD';
+      else if (emailNeeded && !isEmail(email)) problem = 'needs an email for the customer';
 
       const draft: Draft = {
         key: `${index}-${line}`,
         customer,
+        customerEmail: email,
         reference: reference || 'no reference',
-        amountMajor,
+        amountMinor: toMinor(amountMajor),
         dueOn,
       };
       return problem === undefined ? draft : { ...draft, problem };

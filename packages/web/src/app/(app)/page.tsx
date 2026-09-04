@@ -1,11 +1,9 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 
-import { CurveStrip } from '@/components/curve-strip';
-import { HeroQuote } from '@/components/views/hero-quote';
+import { HeroQuote, LandingCurve } from '@/components/views/hero-quote';
 import { Card, Label, buttonClasses } from '@/components/ui/primitives';
-import { mandates, metaOf } from '@/lib/fixtures';
-import { curveFrom } from '@/lib/pricing';
+import { proofExample } from '@/lib/links';
 
 /**
  * The argument, in the order it has to be made: the instrument was always a
@@ -79,13 +77,8 @@ export default function LandingPage() {
 
       <section className="grid gap-8 lg:grid-cols-[1fr_20rem] lg:items-center">
         <Card className="px-6 py-6">
-          <div className="flex flex-wrap items-baseline justify-between gap-3">
-            <h2 className="text-xl">The curve is just the bids, plotted</h2>
-            <span className="text-xs text-muted">
-              {mandates.filter((m) => m.status === 'active').length} funded mandates in this book
-            </span>
-          </div>
-          <CurveStrip points={curveFrom(mandates, (m) => metaOf(m.id).name)} className="mt-4" />
+          <h2 className="text-xl">The curve is just the bids, plotted</h2>
+          <LandingCurve />
           <p className="mt-4 text-sm text-muted">
             There is no model behind this line. Each point is somebody&rsquo;s standing bid with
             escrowed capital behind it, which is what makes a quote firm rather than indicative.
@@ -166,7 +159,7 @@ export default function LandingPage() {
           <Link href="/book" className={buttonClasses('primary', 'lg')}>
             Open the book
           </Link>
-          <Link href="/proof/TRD-4417" className={buttonClasses('quiet', 'lg')}>
+          <Link href={proofExample()} className={buttonClasses('quiet', 'lg')}>
             Or see how a trade is proven
           </Link>
         </div>
