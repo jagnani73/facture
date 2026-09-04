@@ -8,7 +8,7 @@
  *
  * Three reads, against the security's own diamond and nothing else:
  *
- * - `isAuthorized(address)` on the instrument's `ControlList`
+ * - `getControlListType()` + `isInControlList(address)` on the instrument's `ControlList`
  * - `getKycAccountStatus(address)` on the instrument's `Kyc`
  * - `isPaused()` — a paused instrument would refuse delivery whoever the buyer is, so
  *   catching it here turns a failed settlement into a named refusal
@@ -56,35 +56,55 @@ export interface ComplianceGate {
   check(query: ComplianceQuery): Promise<ComplianceDecision>;
 }
 
+/*
+ * These signatures were established by probing a real ATS security on Hedera testnet
+ * (`0.0.10316440`), not read off documentation. Three earlier guesses — `isAuthorized`,
+ * `getKycAccountStatus` and `isPaused` — do not exist on the diamond and revert with
+ * `FunctionNotFound(bytes4)` (`0x5416eb98`). Because the probe fails closed, that surfaced
+ * as every trade being refused for an unreadable control list rather than as an error
+ * naming a missing function, which is why it had to be found against a live instrument.
+ */
 const CONTROL_LIST_ABI = [
   {
     type: 'function',
-    name: 'isAuthorized',
+    name: 'isInControlList',
     stateMutability: 'view',
     inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ type: 'bool' }],
+  },
+  {
+    /** `true` = the list is an allowlist; `false` = it is a blocklist. */
+    type: 'function',
+    name: 'getControlListType',
+    stateMutability: 'view',
+    inputs: [],
     outputs: [{ type: 'bool' }],
   },
 ] as const;
 
 const KYC_ABI = [
   {
+    /** Returns `KycStatus`, an enum — NOT a bool. `0` NOT_GRANTED, `1` GRANTED. */
     type: 'function',
-    name: 'getKycAccountStatus',
+    name: 'getKycStatusFor',
     stateMutability: 'view',
     inputs: [{ name: 'account', type: 'address' }],
-    outputs: [{ type: 'bool' }],
+    outputs: [{ type: 'uint8' }],
   },
 ] as const;
 
 const PAUSE_ABI = [
   {
     type: 'function',
-    name: 'isPaused',
+    name: 'paused',
     stateMutability: 'view',
     inputs: [],
     outputs: [{ type: 'bool' }],
   },
 ] as const;
+
+/** `IKyc.KycStatus`. */
+const KYC_STATUS_GRANTED = 1;
 
 const decide = (checks: readonly ComplianceCheck[], checkedAt: string): ComplianceDecision => {
   const failed = checks.find((c) => !c.passed);
@@ -131,25 +151,40 @@ export function createAtsComplianceGate(options: { logger?: Logger } = {}): Comp
       const [controlList, kyc, paused] = await Promise.all([
         probe(
           'Control list',
-          () =>
-            client.readContract({
-              address: query.instrumentAddress,
-              abi: CONTROL_LIST_ABI,
-              functionName: 'isAuthorized',
-              args: [query.buyerEvmAddress],
-            }) as Promise<boolean>,
+          async () => {
+            /*
+             * Membership alone does not decide eligibility — the same list means the
+             * opposite thing depending on its type. Reading only `isInControlList` would
+             * invert the answer on a blocklist instrument and admit exactly the party it
+             * was configured to exclude.
+             */
+            const [isAllowList, isMember] = await Promise.all([
+              client.readContract({
+                address: query.instrumentAddress,
+                abi: CONTROL_LIST_ABI,
+                functionName: 'getControlListType',
+              }) as Promise<boolean>,
+              client.readContract({
+                address: query.instrumentAddress,
+                abi: CONTROL_LIST_ABI,
+                functionName: 'isInControlList',
+                args: [query.buyerEvmAddress],
+              }) as Promise<boolean>,
+            ]);
+            return isAllowList ? isMember : !isMember;
+          },
           `${who} is permitted to hold this security.`,
           `${who} is not permitted to hold this security by its control list.`,
         ),
         probe(
           'KYC status',
-          () =>
-            client.readContract({
+          async () =>
+            ((await client.readContract({
               address: query.instrumentAddress,
               abi: KYC_ABI,
-              functionName: 'getKycAccountStatus',
+              functionName: 'getKycStatusFor',
               args: [query.buyerEvmAddress],
-            }) as Promise<boolean>,
+            })) as number) === KYC_STATUS_GRANTED,
           `${who} holds a valid KYC grant on this security.`,
           `${who} does not hold a KYC grant on this security, so it cannot receive it.`,
         ),
@@ -159,7 +194,7 @@ export function createAtsComplianceGate(options: { logger?: Logger } = {}): Comp
             !((await client.readContract({
               address: query.instrumentAddress,
               abi: PAUSE_ABI,
-              functionName: 'isPaused',
+              functionName: 'paused',
             })) as boolean),
           'Transfers of this security are not paused.',
           'Transfers of this security are paused, so delivery would fail.',

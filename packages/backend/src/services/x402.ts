@@ -136,7 +136,16 @@ export const HBAR_ASSET = '0.0.0';
  * Nanopayments alongside Hedera's would let one service offer both rails.
  */
 export const DEFAULT_SCHEME = 'exact';
-export const DEFAULT_NETWORK = 'hedera-testnet';
+/**
+ * CAIP-2 style, with a **colon** — not `hedera-testnet`.
+ *
+ * Verified against the live facilitator: `GET /supported` advertises `hedera:testnet`, and
+ * the kind lookup is an exact string match, so a hyphen produces
+ * `No supported kind for scheme=exact network=hedera-testnet` at settle time — after the
+ * ATS hold has already been placed. That ordering is what makes the typo expensive: the
+ * asset leg is armed and must then be unwound.
+ */
+export const DEFAULT_NETWORK = 'hedera:testnet';
 
 export class X402Client {
   readonly #opts: X402ClientOptions;
