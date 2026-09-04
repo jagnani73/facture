@@ -1,0 +1,305 @@
+@import 'tailwindcss';
+
+/* ============================================================================
+   Facture design tokens.
+
+   The identity is short-dated credit paper: a printed money-market page.
+   Warm ecru stock, ink that is not quite black, hairline rules instead of
+   shadows, one deep teal for anything actionable. Every colour is a token so
+   that light and dark are the same layout with a different stock.
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces — printed stock */
+  --paper: #f8f3ea;
+  --paper-raised: #fdfaf4;
+  --paper-sunken: #efe7d9;
+  --paper-inset: #e8dfcd;
+
+  /* Ink */
+  --ink: #1a1815;
+  --ink-muted: #635c52;
+  --ink-faint: #948a7b;
+
+  /* Rules — hairlines carry the structure, not shadows */
+  --rule: #e2d8c7;
+  --rule-strong: #cabda5;
+
+  /* Accent — the one interactive colour */
+  --accent: #0d6e76;
+  --accent-ink: #084a50;
+  --accent-wash: #dceceb;
+
+  /* Semantics. Deliberately desaturated: this is a document, not a dashboard. */
+  --pos: #2f6b3c;
+  --pos-wash: #dfeadb;
+  --warn: #8f6412;
+  --warn-wash: #f3e8cf;
+  --neg: #9b3222;
+  --neg-wash: #f3ddd7;
+  --idle: #6a6459;
+  --idle-wash: #e7e0d2;
+
+  /* Chart / ladder ramp, cool to warm as tenor lengthens */
+  --ramp-1: #0d6e76;
+  --ramp-2: #3f8474;
+  --ramp-3: #779566;
+  --ramp-4: #a89a55;
+  --ramp-5: #c08e4a;
+  --ramp-6: #b3623c;
+
+  --shadow-card: 0 1px 0 0 rgb(26 24 21 / 4%);
+
+  /* Type stacks */
+  --stack-sans: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
+  --stack-serif: var(--font-newsreader), Georgia, 'Times New Roman', serif;
+  --stack-mono: var(--font-jetbrains), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Dark: the same page under a desk lamp at 3am. Warm charcoal, never blue-black. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --paper: #13120f;
+    --paper-raised: #1b1a16;
+    --paper-sunken: #0d0c0a;
+    --paper-inset: #232119;
+
+    --ink: #ece5d6;
+    --ink-muted: #a09889;
+    --ink-faint: #6e675c;
+
+    --rule: #2c2a23;
+    --rule-strong: #423f35;
+
+    --accent: #46a8ab;
+    --accent-ink: #7fc9c9;
+    --accent-wash: #10302f;
+
+    --pos: #6cb377;
+    --pos-wash: #16261a;
+    --warn: #d1a244;
+    --warn-wash: #2b2312;
+    --neg: #d4715c;
+    --neg-wash: #2e1a15;
+    --idle: #8b8375;
+    --idle-wash: #22201a;
+
+    --ramp-1: #46a8ab;
+    --ramp-2: #5fae94;
+    --ramp-3: #8bb173;
+    --ramp-4: #bda85f;
+    --ramp-5: #d0954f;
+    --ramp-6: #c9704a;
+
+    --shadow-card: 0 1px 0 0 rgb(0 0 0 / 30%);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --paper: #13120f;
+  --paper-raised: #1b1a16;
+  --paper-sunken: #0d0c0a;
+  --paper-inset: #232119;
+
+  --ink: #ece5d6;
+  --ink-muted: #a09889;
+  --ink-faint: #6e675c;
+
+  --rule: #2c2a23;
+  --rule-strong: #423f35;
+
+  --accent: #46a8ab;
+  --accent-ink: #7fc9c9;
+  --accent-wash: #10302f;
+
+  --pos: #6cb377;
+  --pos-wash: #16261a;
+  --warn: #d1a244;
+  --warn-wash: #2b2312;
+  --neg: #d4715c;
+  --neg-wash: #2e1a15;
+  --idle: #8b8375;
+  --idle-wash: #22201a;
+
+  --ramp-1: #46a8ab;
+  --ramp-2: #5fae94;
+  --ramp-3: #8bb173;
+  --ramp-4: #bda85f;
+  --ramp-5: #d0954f;
+  --ramp-6: #c9704a;
+
+  --shadow-card: 0 1px 0 0 rgb(0 0 0 / 30%);
+}
+
+/* Expose the tokens to Tailwind's utility generator. */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-raised: var(--paper-raised);
+  --color-sunken: var(--paper-sunken);
+  --color-inset: var(--paper-inset);
+
+  --color-ink: var(--ink);
+  --color-muted: var(--ink-muted);
+  --color-faint: var(--ink-faint);
+
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-wash: var(--accent-wash);
+
+  --color-pos: var(--pos);
+  --color-pos-wash: var(--pos-wash);
+  --color-warn: var(--warn);
+  --color-warn-wash: var(--warn-wash);
+  --color-neg: var(--neg);
+  --color-neg-wash: var(--neg-wash);
+  --color-idle: var(--idle);
+  --color-idle-wash: var(--idle-wash);
+
+  --font-sans: var(--stack-sans);
+  --font-serif: var(--stack-serif);
+  --font-mono: var(--stack-mono);
+
+  --radius-xs: 2px;
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+
+  --text-micro: 0.6875rem;
+  --text-micro--line-height: 1rem;
+  --text-micro--letter-spacing: 0.06em;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--paper);
+    color: var(--ink);
+    font-family: var(--stack-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* A financial product. Digits align, everywhere, without being asked. */
+  table,
+  input,
+  output,
+  time,
+  [data-num] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--stack-serif);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background-color: var(--accent-wash);
+    color: var(--accent-ink);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  hr {
+    border-color: var(--rule);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Small, deliberate primitives. Anything used more than three times earns
+   a class here rather than a long utility string at every call site.
+   -------------------------------------------------------------------------- */
+
+@utility label-micro {
+  font-size: var(--text-micro);
+  line-height: 1rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--ink-faint);
+}
+
+@utility num {
+  font-family: var(--stack-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'zero';
+}
+
+/* Faint horizontal ruling, like a bought ledger book. */
+@utility ledger-lines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 27px,
+    var(--rule) 27px,
+    var(--rule) 28px
+  );
+}
+
+@layer components {
+  .card {
+    background-color: var(--paper-raised);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-card);
+  }
+
+  .ledger-row {
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .ledger-row:last-child {
+    border-bottom: 0;
+  }
+}
+
+@keyframes facture-flash-up {
+  from {
+    background-color: var(--pos-wash);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@keyframes facture-flash-down {
+  from {
+    background-color: var(--neg-wash);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.flash-up {
+  animation: facture-flash-up 900ms ease-out;
+}
+
+.flash-down {
+  animation: facture-flash-down 900ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flash-up,
+  .flash-down {
+    animation: none;
+  }
+}
