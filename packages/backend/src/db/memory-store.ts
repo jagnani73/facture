@@ -172,6 +172,29 @@ export class MemoryStore implements Store {
     return this.sellers.get(id) ?? null;
   }
 
+  async getSellerByEmail(email: string): Promise<SellerRow | null> {
+    const wanted = email.trim().toLowerCase();
+    for (const row of this.sellers.values()) {
+      if (row.email.trim().toLowerCase() === wanted) return clone(row);
+    }
+    return null;
+  }
+
+  async updateSellerWallet(
+    id: string,
+    wallet: { hederaAccountId?: string | null; arcAddress?: string | null },
+  ): Promise<SellerRow> {
+    const row = this.sellers.get(id);
+    if (!row) throw notFound(`Seller ${id}`);
+    const next: SellerRow = {
+      ...row,
+      ...(wallet.hederaAccountId !== undefined ? { hederaAccountId: wallet.hederaAccountId } : {}),
+      ...(wallet.arcAddress !== undefined ? { arcAddress: wallet.arcAddress } : {}),
+    };
+    this.sellers.set(id, next);
+    return clone(next);
+  }
+
   async getBuyer(id: string): Promise<BuyerRow | null> {
     return this.buyers.get(id) ?? null;
   }

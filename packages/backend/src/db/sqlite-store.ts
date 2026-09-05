@@ -160,6 +160,24 @@ export class SqliteStore implements Store {
     return inserted;
   }
 
+  async getSellerByEmail(email: string): Promise<SellerRow | null> {
+    const [row] = await this.#db
+      .select()
+      .from(sellers)
+      .where(eq(sellers.email, email.trim().toLowerCase()))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async updateSellerWallet(
+    id: string,
+    wallet: { hederaAccountId?: string | null; arcAddress?: string | null },
+  ): Promise<SellerRow> {
+    const [row] = await this.#db.update(sellers).set(wallet).where(eq(sellers.id, id)).returning();
+    if (!row) throw notFound(`Seller ${id}`);
+    return row;
+  }
+
   async insertBuyer(row: NewBuyerRow): Promise<BuyerRow> {
     const [inserted] = await this.#db.insert(buyers).values(row).returning();
     if (!inserted) throw new Error('insertBuyer returned no row');

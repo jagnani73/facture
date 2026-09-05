@@ -1,6 +1,7 @@
 /**
  * Route table, grouped by actor.
  *
+ *   seller   /v1/sellers               sign in by email, record the wallet made from it
  *   seller   /v1/invoices              create, list, get, request confirmation
  *   debtor   /v1/confirm/:token        public, token-authenticated, no wallet, no signup
  *   seller   /v1/invoices/:id/quote    the price that is already there
@@ -17,10 +18,12 @@ import { confirmationRoutes, invoiceRoutes } from './invoices.js';
 import { mandateRoutes } from './mandates.js';
 import { proofRoutes } from './proof.js';
 import { quoteRoutes } from './quotes.js';
+import { sellerRoutes } from './sellers.js';
 import { tradeRoutes } from './trades.js';
 
 export const v1Routes = new Hono<AppEnv>();
 
+v1Routes.route('/sellers', sellerRoutes);
 v1Routes.route('/invoices', invoiceRoutes);
 v1Routes.route('/confirm', confirmationRoutes);
 v1Routes.route('/mandates', mandateRoutes);

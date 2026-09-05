@@ -161,16 +161,35 @@ export type DebtorExposureMap = ReadonlyMap<string, Readonly<Record<string, Mino
 export interface Store {
   // --- parties ------------------------------------------------------------------
   /*
-   * There is no route that creates a seller or a buyer — onboarding is out of scope for
-   * this build and is stated as such rather than half-built. These three exist so `seed.ts`
-   * can fill either implementation from one script, and so a party can be created with its
-   * accumulator intact rather than only through `upsertDebtor`, which deliberately refuses
-   * to touch a rating.
+   * `insertBuyer` still has no route behind it — a funder is onboarded by hand and stated
+   * as such. Sellers now have one: `POST /v1/sellers`, which is how a wallet made from an
+   * email address gets recorded against the business it belongs to. These exist so
+   * `seed.ts` can fill either implementation from one script, and so a party can be created
+   * with its accumulator intact rather than only through `upsertDebtor`, which deliberately
+   * refuses to touch a rating.
    */
   insertSeller(row: NewSellerRow): Promise<SellerRow>;
   insertBuyer(row: NewBuyerRow): Promise<BuyerRow>;
   insertDebtor(row: NewDebtorRow): Promise<DebtorRow>;
   getSeller(id: string): Promise<SellerRow | null>;
+  /**
+   * By email, which is the seller's identity rather than a convenience lookup: the column
+   * carries a unique index, and signing in with an email address is the only way a seller
+   * is identified at all. Normalised the way `upsertDebtor` normalises — trimmed and
+   * lowercased — so `Ada@example.com` and `ada@example.com` cannot become two businesses.
+   */
+  getSellerByEmail(email: string): Promise<SellerRow | null>;
+  /**
+   * Record the wallet addresses for a seller that had none.
+   *
+   * Deliberately not an overwrite. See `routes/sellers.ts`: rebinding an address that is
+   * already set is how a seller's money would be redirected, and nothing authenticates the
+   * caller here.
+   */
+  updateSellerWallet(
+    id: string,
+    wallet: { hederaAccountId?: string | null; arcAddress?: string | null },
+  ): Promise<SellerRow>;
   getBuyer(id: string): Promise<BuyerRow | null>;
   /** Ratings are per debtor, so an existing email is reused rather than duplicated. */
   upsertDebtor(input: UpsertDebtorInput): Promise<DebtorRow>;

@@ -28,7 +28,7 @@
 
 import type { Quote, RefusalReceipt, SettlementLegState } from '@facture/shared';
 import { z } from 'zod';
-import type { InvoiceRow, MandateRow, TradeRow } from './db/schema.js';
+import type { InvoiceRow, MandateRow, SellerRow, TradeRow } from './db/schema.js';
 
 /**
  * Inbound money: a positive integer in minor units, as a decimal string.
@@ -96,6 +96,25 @@ export const wireRefusalReceipt = (r: RefusalReceipt): WireRefusalReceipt => ({
  * ---------------------------------------------------------------------------------- */
 
 const isoOrNull = (value: Date | null): string | null => value?.toISOString() ?? null;
+
+/**
+ * A seller as their own screens read them.
+ *
+ * Both wallet fields are nullable and mean different things when null. `arcAddress` is an
+ * ordinary EVM address and is usable the moment it is recorded. `hederaAccountId` is a
+ * `0.0.x`, and a wallet made from an email address does not have one yet: the address it
+ * was issued is an *alias*, and Hedera creates the account behind it on first funding. So
+ * a seller can hold a perfectly good address and still have no account id here, and the
+ * screen has to say which of those it is rather than printing an empty cell.
+ */
+export const wireSeller = (row: SellerRow) => ({
+  id: row.id,
+  name: row.name,
+  email: row.email,
+  hederaAccountId: row.hederaAccountId,
+  arcAddress: row.arcAddress,
+  createdAt: row.createdAt.toISOString(),
+});
 
 /**
  * An invoice as the book renders it.
