@@ -61,8 +61,21 @@ const mandate = (
     allocations,
     exposureLimit: terms.totalCommitted,
     escrowedCapital: terms.totalCommitted,
+    // Backed by default: the interesting cases below say otherwise explicitly.
+    vault: BACKED,
   };
 };
+
+/** A vault the venue read and found sufficient for the mandate's whole committed capital. */
+const BACKED = {
+  checked: true,
+  depositedUsdcMinor: 5_000_000n,
+  requiredUsdcMinor: 50_000n,
+  backed: true,
+} as const;
+
+/** Read, and short. The bid would settle by an x402 challenge this agent cannot sign. */
+const UNBACKED = { ...BACKED, depositedUsdcMinor: 1_000n, backed: false } as const;
 
 const row = (over: Partial<BookRow> = {}): BookRow => ({
   invoiceId: 'invoice-1',
@@ -241,56 +254,84 @@ describe('the balance is read from the chain, not remembered', () => {
     expect(report.taken).toHaveLength(1);
   });
 
-  it('re-reads the balance again immediately before arming a live trade', async () => {
-    const wallet = fakeWallet(USDC(50_000));
-    const venue = fakeVenue({});
-    await createMarketMaker(config({ dryRun: false }), { venue, wallet, logger }).tick();
-
-    // Once for the tick, once at the moment the money is actually promised.
-    expect(wallet.balanceReads).toHaveLength(2);
-    expect(venue.armed).toHaveLength(1);
-  });
-
-  it('does not arm when the balance moved out from under the agent mid-tick', async () => {
+  /*
+   * There used to be a second read here, immediately before arming, and it was removed with
+   * the pot it guarded. The venue re-decides the rail on every `POST /v1/trades`, so a stale
+   * agent-side reading cannot cause a bad settlement — only a wasted arm the venue refuses.
+   * Buying that certainty would have cost a mandates fetch per invoice.
+   */
+  it('reads the wallet once a tick, not once an invoice', async () => {
     const wallet = fakeWallet(USDC(50_000));
     const venue = fakeVenue({
-      quote: (invoiceId) => {
-        // Someone drained the wallet between the book read and the fill.
-        wallet.setUsdc(USDC(1));
-        return {
-          invoiceId,
-          quoteId: 'quote-1',
-          mandateId: 'mandate-a',
-          proceeds: PROCEEDS,
-          discount: 82_192n,
-          annualisedYieldBps: 1250,
-          tenorDays: 60,
-          rating: 'A',
-          expiresAt: '2026-09-01T00:05:00.000Z',
-        };
-      },
+      book: [row({ invoiceId: 'invoice-1' }), row({ invoiceId: 'invoice-2' })],
     });
 
-    const report = await createMarketMaker(config({ dryRun: false }), {
+    await createMarketMaker(config({ dryRun: false }), { venue, wallet, logger }).tick();
+
+    expect(wallet.balanceReads).toHaveLength(1);
+  });
+
+  /*
+   * THE FIX, stated as the case that used to fail.
+   *
+   * An empty Circle wallet used to refuse every invoice, because the pre-flight compared it
+   * against the invoice price. The wallet pays for neither rail — an escrowed mandate settles
+   * out of the Arc vault — so a backed bid with an empty wallet is a bid that trades.
+   */
+  it('takes a backed bid even when the wallet is empty, because the vault pays', async () => {
+    const wallet = fakeWallet(null);
+    const venue = fakeVenue({});
+
+    const report = await createMarketMaker(config(), { venue, wallet, logger }).tick();
+
+    expect(report.taken).toHaveLength(1);
+    expect(report.refused).toHaveLength(0);
+  });
+
+  it('refuses a bid whose capital is not posted on Arc, and says which figures it read', async () => {
+    const venue = fakeVenue({ mandates: [{ ...mandate(), vault: UNBACKED }] });
+
+    const report = await createMarketMaker(config(), {
       venue,
-      wallet,
+      wallet: fakeWallet(USDC(50_000)),
       logger,
     }).tick();
 
-    expect(venue.armed).toHaveLength(0);
-    expect(report.taken[0]?.skippedReason).toBe('WALLET_BALANCE_SHORT');
+    expect(report.taken).toHaveLength(0);
+    expect(report.refused.map((r) => r.refusal.code)).toContain('MANDATE_NOT_ESCROWED');
+    // Both sides of the comparison, in the unit they were actually read in.
+    expect(report.refused[0]?.humanReason).toMatch(/1000 USDC minor units/);
+    expect(report.refused[0]?.humanReason).toMatch(/50000 USDC minor units/);
   });
 
-  it('refuses everything when the wallet holds no USDC at all', async () => {
-    const wallet = fakeWallet(null);
-    const venue = fakeVenue({});
-    const report = await createMarketMaker(config(), { venue, wallet, logger }).tick();
+  /* "We could not read the vault" is not "nobody posted it", and must not read as one. */
+  it('does not arm on an unreadable vault, and says it is unknown rather than false', async () => {
+    const venue = fakeVenue({
+      mandates: [{ ...mandate(), vault: { ...UNBACKED, depositedUsdcMinor: null, backed: false } }],
+    });
 
-    expect(report.walletUsdc).toBeNull();
-    expect(report.spendableMinor).toBe(0n);
+    const report = await createMarketMaker(config(), {
+      venue,
+      wallet: fakeWallet(USDC(50_000)),
+      logger,
+    }).tick();
+
     expect(report.taken).toHaveLength(0);
-    expect(report.refused.map((r) => r.refusal.code)).toContain('WALLET_BALANCE_SHORT');
-    expect(report.refused[0]?.humanReason).toMatch(/not funded/i);
+    expect(report.refused[0]?.humanReason).toMatch(/could not be read/i);
+  });
+
+  /* A venue with no vault at all cannot settle anything this agent can pay for. */
+  it('refuses when the venue escrows nothing, naming that rather than a balance', async () => {
+    const venue = fakeVenue({ mandates: [{ ...mandate(), vault: null }] });
+
+    const report = await createMarketMaker(config(), {
+      venue,
+      wallet: fakeWallet(USDC(50_000)),
+      logger,
+    }).tick();
+
+    expect(report.taken).toHaveLength(0);
+    expect(report.refused[0]?.humanReason).toMatch(/does not escrow mandate capital/i);
   });
 
   it('stops rather than pricing against a scale it does not understand', async () => {
@@ -304,10 +345,18 @@ describe('the balance is read from the chain, not remembered', () => {
 });
 
 describe('the cap is ours, and it binds within a single pass', () => {
-  it('will not spend the same balance on two invoices', async () => {
-    // $50,000 in the wallet; two $39,178 invoices on the book. Exactly one fits.
+  /*
+   * The cap that binds is the MANDATE's, and it always was — the wallet cap that used to sit
+   * on top of it was measuring a pot that settles neither rail. So this is the same claim
+   * the suite always made, tested against the budget that actually decides it: a mandate
+   * with room for one invoice does not take two, because the running allocation advances
+   * between them.
+   */
+  it('will not commit the same capital to two invoices', async () => {
     const wallet = fakeWallet(USDC(50_000));
     const venue = fakeVenue({
+      // Room for exactly one $39,178 fill.
+      mandates: [mandate({ totalCommitted: 4_000_000n, maxPerDebtor: 4_000_000n })],
       book: [row({ invoiceId: 'invoice-1' }), row({ invoiceId: 'invoice-2' })],
       quote: (invoiceId) => ({
         invoiceId,
@@ -326,7 +375,7 @@ describe('the cap is ours, and it binds within a single pass', () => {
 
     expect(report.taken).toHaveLength(1);
     expect(report.committedThisTick).toBe(PROCEEDS);
-    const shortfall = report.refused.find((r) => r.refusal.code === 'WALLET_BALANCE_SHORT');
+    const shortfall = report.refused.find((r) => r.refusal.code === 'EXPOSURE_EXHAUSTED');
     expect(shortfall?.invoiceId).toBe('invoice-2');
   });
 

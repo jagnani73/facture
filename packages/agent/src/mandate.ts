@@ -33,7 +33,7 @@
  * The README's claim is that a standing bid is firm because the capital behind it is
  * committed rather than merely permitted, and a mandate matches only up to its unallocated
  * balance. That is what {@link decide} enforces, and the agent additionally proves the
- * capital exists on-chain before committing — see `checkWalletFunded` and `agent.ts`. An
+ * capital exists on-chain before committing — see `checkMandateEscrowed` and `agent.ts`. An
  * agent that simulated a balance it did not hold would be fake liquidity, which is the one
  * thing the product cannot survive.
  *
@@ -50,7 +50,6 @@ import {
   CURRENCY_DECIMALS,
   RATING_RANK,
   explainRefusal,
-  formatMinorUnits,
   meetsRatingFloor,
   priceInvoice,
   type Bps,
@@ -191,24 +190,60 @@ export function toSharedMandate(
 /**
  * The agent's own refusal, on top of shared's union.
  *
- * `WALLET_BALANCE_SHORT` is not a venue refusal and deliberately is not in shared's
- * `RefusalCode`. It says something no venue-side check can know: the mandate's *book*
- * balance says there is room, and the wallet that actually has to pay does not hold the
- * money. That gap is a bug in this agent or an out-of-band withdrawal, and collapsing it
- * into `EXPOSURE_EXHAUSTED` would report a funding failure as ordinary capacity.
+ * `MANDATE_NOT_ESCROWED` is not a venue refusal and deliberately is not in shared's
+ * `RefusalCode` — the venue does not refuse this at all. It reroutes: a mandate whose
+ * capital is not posted on Arc gets an x402 challenge on Hedera instead, which is a
+ * perfectly good answer for a buyer who can sign one. **This agent cannot.** Its Circle
+ * wallet is an Arc EVM wallet with no Hedera account and no way to produce a native
+ * `TransferTransaction`, so arming such a trade would place a hold and reserve capital for
+ * a payment nobody in this system will ever make, and the venue would sweep it back when
+ * the challenge expired.
+ *
+ * So this is the agent declining to arm something it knows it cannot finish, and the
+ * reason is a fact about the agent rather than about the invoice.
+ *
+ * **It replaced `WALLET_BALANCE_SHORT`, which was checking the wrong pot.** That refusal
+ * compared the agent's Circle wallet balance against the invoice price, and the wallet pays
+ * for neither rail: the Arc rail draws on the vault, and the x402 rail needs a Hedera key
+ * this wallet does not have. It was also comparing at par against a venue that settles at a
+ * ppm scale, so it refused everything by a factor of a million.
  */
-export interface WalletBalanceShortRefusal {
-  readonly code: 'WALLET_BALANCE_SHORT';
-  /** Circle wallet id. Never the address alone — the id is what the API call names. */
-  readonly walletId: string;
-  readonly required: MinorUnits;
-  readonly available: MinorUnits;
-  readonly currency: Currency;
+/**
+ * The venue's reading of the Arc vault behind one mandate. USDC minor units, 6dp.
+ *
+ * Declared here rather than in `venue.ts` because `venue.ts` already imports this module —
+ * the dependency runs one way, and putting a domain type on the transport side would turn
+ * that into a cycle.
+ */
+export interface VaultBacking {
+  /** False when the venue holds no vault to ask. Then `backed` says nothing. */
+  readonly checked: boolean;
+  /** Null when the vault could not be read — which is not the same as zero. */
+  readonly depositedUsdcMinor: bigint | null;
+  readonly requiredUsdcMinor: bigint;
+  /** The vault covers this mandate's whole committed capital, not just one trade. */
+  readonly backed: boolean;
 }
 
-export type AgentRefusal = Refusal | WalletBalanceShortRefusal;
+export interface MandateNotEscrowedRefusal {
+  readonly code: 'MANDATE_NOT_ESCROWED';
+  readonly mandateId: string;
+  /**
+   * What the vault holds, in USDC minor units, when the venue could read it.
+   *
+   * Null covers two different situations and the sentence below tells them apart: the venue
+   * has no vault to ask, or it has one and could not reach it. Neither is "zero".
+   */
+  readonly depositedUsdcMinor: bigint | null;
+  /** What the vault would have to hold to back this mandate. USDC minor units. */
+  readonly requiredUsdcMinor: bigint;
+  /** False when the venue holds no vault at all, so nothing was asked. */
+  readonly checked: boolean;
+}
 
-export type AgentRefusalCode = RefusalCode | 'WALLET_BALANCE_SHORT';
+export type AgentRefusal = Refusal | MandateNotEscrowedRefusal;
+
+export type AgentRefusalCode = RefusalCode | 'MANDATE_NOT_ESCROWED';
 
 /**
  * Every refusal this agent can itself produce.
@@ -228,11 +263,11 @@ export const AGENT_EMITTED_REFUSAL_CODES = [
   'EXPOSURE_EXHAUSTED',
   'DEBTOR_CONCENTRATION',
   'INVOICE_NOT_CONFIRMED',
-  'WALLET_BALANCE_SHORT',
+  'MANDATE_NOT_ESCROWED',
 ] as const satisfies readonly AgentRefusalCode[];
 
-export const isWalletBalanceShort = (r: AgentRefusal): r is WalletBalanceShortRefusal =>
-  r.code === 'WALLET_BALANCE_SHORT';
+export const isMandateNotEscrowed = (r: AgentRefusal): r is MandateNotEscrowedRefusal =>
+  r.code === 'MANDATE_NOT_ESCROWED';
 
 /**
  * One sentence, addressed to the party being refused, naming both sides of the comparison
@@ -240,16 +275,38 @@ export const isWalletBalanceShort = (r: AgentRefusal): r is WalletBalanceShortRe
  * produce identical wording for identical refusals.
  */
 export function explainAgentRefusal(r: AgentRefusal): string {
-  if (!isWalletBalanceShort(r)) return explainRefusal(r);
+  if (!isMandateNotEscrowed(r)) return explainRefusal(r);
+
+  /*
+   * USDC minor units, deliberately rendered raw rather than through `formatMinorUnits`.
+   *
+   * That helper formats at the invoice currency's two decimals, and these are six. Putting
+   * one through the other turns 0.05 USDC into $500.00 — a ten-thousandfold error in a
+   * sentence whose entire job is naming both sides of a comparison honestly. That is the
+   * same confusion this refusal exists because of, and it would be embarrassing to
+   * reintroduce it in the explanation of it.
+   */
+  const usdc = (amount: bigint): string => `${amount.toString(10)} USDC minor units`;
+
+  if (!r.checked) {
+    return (
+      `This venue does not escrow mandate capital on Arc, so a trade against mandate ` +
+      `${r.mandateId} would settle by a payment this agent cannot sign. Not armed.`
+    );
+  }
+  if (r.depositedUsdcMinor === null) {
+    return (
+      `The Arc vault could not be read for mandate ${r.mandateId}, so whether this bid is ` +
+      'backed is unknown rather than false. Not armed, because arming a trade that cannot ' +
+      'settle costs the seller a hold.'
+    );
+  }
   return (
-    `This mandate's wallet holds ${money(r.available, r.currency)} against the ` +
-    `${money(r.required, r.currency)} this invoice needs. The bid is not funded for it, ` +
-    `so it is not firm and will not be quoted.`
+    `Mandate ${r.mandateId} holds ${usdc(r.depositedUsdcMinor)} on Arc against the ` +
+    `${usdc(r.requiredUsdcMinor)} its committed capital needs. A bid that is not escrowed ` +
+    'settles by a payment this agent cannot sign, so it is not armed.'
   );
 }
-
-const money = (amount: MinorUnits, currency: Currency): string =>
-  formatMinorUnits(amount, currency, { symbol: true });
 
 /**
  * The on-chain spelling of one refusal code, expressed as a type rather than as data.
@@ -260,7 +317,7 @@ const money = (amount: MinorUnits, currency: Currency): string =>
  */
 type OnChainSpelling<C extends AgentRefusalCode> = C extends 'INELIGIBLE_JURISDICTION'
   ? 'CONTROL_LIST_BLOCKED'
-  : C extends 'CURRENCY_MISMATCH' | 'WALLET_BALANCE_SHORT'
+  : C extends 'CURRENCY_MISMATCH' | 'MANDATE_NOT_ESCROWED'
     ? null
     : C;
 
@@ -285,8 +342,9 @@ type OnChainSpelling<C extends AgentRefusalCode> = C extends 'INELIGIBLE_JURISDI
  *   `INELIGIBLE_JURISDICTION` is absent from {@link AGENT_EMITTED_REFUSAL_CODES} precisely
  *   because only a diamond the agent has not called could decide it.
  * - `CURRENCY_MISMATCH` is `null` because the on-chain book does not model currency.
- * - `WALLET_BALANCE_SHORT` is `null` because it is this agent's own refusal about a Circle
- *   wallet, which nothing on the venue's chain can observe.
+ * - `MANDATE_NOT_ESCROWED` is `null` because the venue does not refuse this at all — it
+ *   reroutes to x402 — so there is no on-chain refusal for it to be the same as. It is this
+ *   agent declining to arm what it cannot finish, which is a fact about the agent.
  */
 export const ON_CHAIN_REASON_CODE: { readonly [C in AgentRefusalCode]: OnChainSpelling<C> } = {
   RATING_BELOW_MANDATE: 'RATING_BELOW_MANDATE',
@@ -298,7 +356,7 @@ export const ON_CHAIN_REASON_CODE: { readonly [C in AgentRefusalCode]: OnChainSp
   NOT_KYC_VERIFIED: 'NOT_KYC_VERIFIED',
   INELIGIBLE_JURISDICTION: 'CONTROL_LIST_BLOCKED',
   CURRENCY_MISMATCH: null,
-  WALLET_BALANCE_SHORT: null,
+  MANDATE_NOT_ESCROWED: null,
 };
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
@@ -448,36 +506,41 @@ export function decide(
 }
 
 /**
- * The second half of the pre-flight: does the wallet actually hold the money?
+ * The second half of the pre-flight: will this bid's capital actually settle the trade?
  *
- * {@link decide} answers a question about the mandate's *books*. This answers a question
- * about the chain. They are different questions and both have to pass, because the venue's
- * record of what a mandate has committed can be right while the wallet behind it has been
- * drained out of band — and Circle will not stop the resulting transfer, it will simply
- * fail on-chain after the asset leg has already been armed.
+ * {@link decide} answers a question about the mandate's *books* — is there headroom. This
+ * answers a question about the chain: is that headroom backed by capital posted on Arc.
+ * They are different questions and both have to pass.
  *
- * `available` and `required` must be in the same minor units. The agent converts the
- * wallet's USDC balance (6 decimals) down to the mandate's currency minor units (2), which
- * truncates — deliberately in the conservative direction, so a sub-cent dust balance is
- * never counted as spendable. The amount eventually *sent* is scaled the other way and is
- * exact; only this comparison rounds, and it rounds against spending.
+ * **No amount is compared here, and that is the point.** The venue sets `backed` by
+ * measuring the vault against the mandate's WHOLE committed capital, so a backed mandate
+ * covers anything that fits in the headroom `decide` has already checked. Comparing a
+ * per-trade price would mean converting it into USDC at the venue's ppm scale — a second
+ * copy of a number only the venue should own, and the two would drift. This agent
+ * deliberately knows nothing about that scale.
+ *
+ * An unreadable vault refuses. Elsewhere in this system an indeterminate answer is treated
+ * as "do not act on it" rather than "assume the worst", and that is what this is: the cost
+ * of not arming is a missed fill, and the cost of arming wrongly is a seller's position
+ * held for a payment that never comes.
  */
-export function checkWalletFunded(input: {
-  readonly walletId: string;
-  readonly required: MinorUnits;
-  readonly available: MinorUnits;
-  readonly currency: Currency;
-}): Result<MinorUnits, WalletBalanceShortRefusal> {
-  if (input.available < input.required) {
-    return err({
-      code: 'WALLET_BALANCE_SHORT',
-      walletId: input.walletId,
-      required: input.required,
-      available: input.available,
-      currency: input.currency,
-    });
-  }
-  return ok(input.available - input.required);
+export function checkMandateEscrowed(input: {
+  readonly mandateId: string;
+  readonly vault: VaultBacking | null;
+}): Result<true, MandateNotEscrowedRefusal> {
+  const refusal = (over: Partial<MandateNotEscrowedRefusal> = {}): MandateNotEscrowedRefusal => ({
+    code: 'MANDATE_NOT_ESCROWED',
+    mandateId: input.mandateId,
+    depositedUsdcMinor: input.vault?.depositedUsdcMinor ?? null,
+    requiredUsdcMinor: input.vault?.requiredUsdcMinor ?? 0n,
+    checked: input.vault?.checked ?? false,
+    ...over,
+  });
+
+  // The venue said nothing about a vault: it has none, so nothing here can settle on Arc.
+  if (input.vault === null) return err(refusal({ checked: false }));
+  if (!input.vault.backed) return err(refusal());
+  return ok(true);
 }
 
 /**

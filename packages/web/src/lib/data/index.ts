@@ -251,11 +251,12 @@ export async function writeAndFundMandate(
     return { ok: false, reason: describeFailure(error, 'writing that mandate') };
   }
 
+  let escrowVerified = false;
   try {
-    await api.fundMandate(mandateId, {
+    ({ escrowVerified } = await api.fundMandate(mandateId, {
       amountMinor: input.exposureLimit,
       escrowRef: `web-${Date.now()}`,
-    });
+    }));
   } catch (error) {
     return {
       ok: false,
@@ -263,10 +264,21 @@ export async function writeAndFundMandate(
     };
   }
 
+  /*
+   * Two different sentences, because they are two different facts.
+   *
+   * This said "The capital is escrowed, so the bid is firm" unconditionally, which is true
+   * only when the venue actually checked the vault. With no vault configured the amount is
+   * recorded and believed — and telling a buyer their capital is escrowed on the strength of
+   * a browser-generated reference string is the overclaim every other piece of this feature
+   * exists to prevent.
+   */
   return {
     ok: true,
     value: { mandateId },
-    note: 'The capital is escrowed, so the bid is firm. Matching is bounded by the unallocated balance.',
+    note: escrowVerified
+      ? 'The capital is escrowed and the venue checked it against the vault, so the bid is firm. Matching is bounded by the unallocated balance.'
+      : 'The commitment is recorded, but this deployment has no vault to check it against — so it is your word for it rather than the chain’s. Matching is bounded by the unallocated balance.',
   };
 }
 

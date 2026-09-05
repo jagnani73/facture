@@ -36,7 +36,7 @@ import {
   type Rating,
 } from '@facture/shared';
 import { z } from 'zod';
-import type { MandateAllocations, MandateTerms } from './mandate.js';
+import type { MandateAllocations, MandateTerms, VaultBacking } from './mandate.js';
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
  * Wire schemas
@@ -74,6 +74,26 @@ const mandateSchema = z.object({
   status: wireMandateStatus,
   quoting: z.boolean().optional(),
   debtorExposure: z.record(wireMoney).optional(),
+  /**
+   * Whether the buyer's capital is actually posted on Arc, as the venue reads it.
+   *
+   * `backed` is the one field this agent acts on, and it means more than it looks like:
+   * the venue sets it by comparing the vault's balance against the mandate's **whole**
+   * committed capital, not against one trade. So a backed mandate covers anything that
+   * fits inside the headroom `decide` already checks — which is why nothing here has to
+   * convert a price into USDC, and why this agent needs no copy of the venue's scale.
+   *
+   * Optional because a deployment with no vault omits it, and `checked` distinguishes
+   * "we asked and the answer was no" from "there was nothing to ask".
+   */
+  escrow: z
+    .object({
+      checked: z.boolean(),
+      depositedUsdcMinor: wireMoney.nullable(),
+      requiredUsdcMinor: wireMoney,
+      backed: z.boolean(),
+    })
+    .optional(),
 });
 
 const mandateListSchema = z.object({ mandates: z.array(mandateSchema) });
@@ -126,13 +146,30 @@ const liveQuoteSchema = z.object({
  * What this module hands back
  * ───────────────────────────────────────────────────────────────────────────────────── */
 
+export type { VaultBacking };
+
 /** A mandate as the venue holds it: the terms, plus what has already been spent. */
 export interface VenueMandate {
   readonly terms: MandateTerms;
   readonly allocations: MandateAllocations;
   /** The ceiling the buyer wrote, kept for reporting. `terms.totalCommitted` is what binds. */
   readonly exposureLimit: MinorUnits;
+  /**
+   * The venue's book figure for committed capital, in the MANDATE's minor units.
+   *
+   * Named "escrowed" long before anything was escrowed anywhere. It is a database number,
+   * not a chain reading — {@link VenueMandate.vault} is the chain. Two fields whose names
+   * both say escrow at two different scales is the confusion that produced this whole
+   * change, so the distinction is spelled out rather than left to the reader.
+   */
   readonly escrowedCapital: MinorUnits;
+  /**
+   * What the Arc vault actually holds behind this bid, or `null` when the venue did not say.
+   *
+   * `null` is not "unbacked". A deployment with no vault reports nothing, and treating that
+   * as a refusal would stop the agent trading against a venue that never escrows at all.
+   */
+  readonly vault: VaultBacking | null;
 }
 
 /** One line of the book, with everything the decision needs and nothing it does not. */
@@ -377,6 +414,7 @@ function toVenueMandate(row: z.infer<typeof mandateSchema>): VenueMandate {
     allocations: { total: row.allocated, byDebtor: row.debtorExposure ?? {} },
     exposureLimit: row.exposureLimit,
     escrowedCapital: row.committed,
+    vault: row.escrow ?? null,
   };
 }
 

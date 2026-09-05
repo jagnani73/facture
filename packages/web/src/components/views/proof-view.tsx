@@ -79,8 +79,8 @@ export function ProofView({ tradeId }: { tradeId: string }) {
  * whole point: one rail took a signature for this trade, the other did not need one.
  */
 const RAIL_LABEL: Record<CashRail, string> = {
-  x402: 'x402 - signed for this trade',
-  'arc-vault': 'Escrowed capital - no signature needed',
+  x402: 'x402 \u2014 signed for this trade',
+  'arc-vault': 'Escrowed capital \u2014 no signature needed',
 };
 
 function Proof({ record }: { record: ProofRecord }) {
@@ -207,10 +207,20 @@ function Proof({ record }: { record: ProofRecord }) {
         */}
         <CardHead
           title="Both legs of the settlement"
+          /*
+             The sentence follows the RAIL, not the chain.
+
+             It used to branch on whether the cash leg was on Hedera, and both branches ended
+             "bound to one challenge" — which is true of x402 and false of a vault payout,
+             where the buyer escrowed the capital in advance and signed nothing. On the rail
+             that most needs explaining, the page was describing a mechanism that did not run.
+          */
           hint={
-            record.cashLeg.chain === ASSET_CHAIN
-              ? `Both legs settled on ${HEDERA.name}: this deployment takes the cash leg in HBAR through the x402 facilitator rather than USDC on Arc. Nothing is wrapped and nothing crosses — the two legs are bound to one challenge, so neither can settle without the other.`
-              : `The paper never left ${HEDERA.name} and the cash never left ${cashChain.name}. There is no bridge here and nothing is wrapped — the two legs are bound to one challenge, so neither can settle without the other.`
+            record.cashLeg.rail === 'arc-vault'
+              ? `The paper never left ${HEDERA.name} and the cash never left ${cashChain.name}. There is no bridge here and nothing is wrapped: the buyer escrowed this capital before the invoice existed, so there was nothing to sign, and the payout is locked against the same hash the paper moved under.`
+              : record.cashLeg.chain === ASSET_CHAIN
+                ? `Both legs settled on ${HEDERA.name}: this deployment takes the cash leg in HBAR through the x402 facilitator rather than USDC on Arc. Nothing is wrapped and nothing crosses — the two legs are bound to one challenge, so neither can settle without the other.`
+                : `The paper never left ${HEDERA.name} and the cash never left ${cashChain.name}. There is no bridge here and nothing is wrapped — the two legs are bound to one challenge, so neither can settle without the other.`
           }
         />
 

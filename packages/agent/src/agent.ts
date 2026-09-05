@@ -32,7 +32,7 @@ import {
 } from '@facture/shared';
 import type { Logger } from './logger.js';
 import {
-  checkWalletFunded,
+  checkMandateEscrowed,
   decide,
   explainAgentRefusal,
   unallocated,
@@ -234,6 +234,14 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
       quoting.map((m) => [m.terms.id, m.allocations]),
     );
     const termsById = new Map<string, MandateTerms>(quoting.map((m) => [m.terms.id, m.terms]));
+    /*
+     * The venue's reading of each vault, as of this tick's mandate fetch.
+     *
+     * Read once with the mandates rather than per invoice, for the same reason the balance
+     * used to be: a value that moved mid-pass would let a later invoice see a different
+     * world from an earlier one, and the running budget below assumes one world.
+     */
+    const vaultById = new Map(quoting.map((m) => [m.terms.id, m.vault]));
     let committedThisTick = 0n;
 
     for (const row of quotableRows) {
@@ -260,18 +268,26 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
 
       /*
        * The pre-flight. Everything above is book-keeping the venue also does; this is the
-       * part only the agent can do, and the part Circle will not do for it. `spendable`
-       * already has this tick's earlier commitments taken out of it, so a mandate cannot
-       * spend the same balance twice.
+       * part only the agent can do — decide whether a trade it arms can actually finish.
+       *
+       * It used to compare the Circle wallet's balance against the invoice price, and that
+       * was wrong twice over. The wallet pays for **neither** rail: an escrowed mandate
+       * settles out of the Arc vault, and an unescrowed one gets an x402 challenge on
+       * Hedera that this wallet has no key to sign. And it compared at par against a venue
+       * that settles at a ppm scale, so it refused everything by a factor of a million and
+       * the agent took nothing at all.
+       *
+       * What replaces it asks the only question that decides whether arming is honest: is
+       * this bid's capital posted where the venue will draw it from. No amount is compared,
+       * because `backed` is measured against the mandate's whole committed capital and
+       * `decide` has already checked this trade fits inside that.
        */
-      const funded = checkWalletFunded({
-        walletId: config.walletId,
-        required: best.proceeds,
-        available: spendableMinor - committedThisTick,
-        currency: SETTLEMENT_CURRENCY,
+      const escrowed = checkMandateEscrowed({
+        mandateId: best.mandateId,
+        vault: vaultById.get(best.mandateId) ?? null,
       });
-      if (!funded.ok) {
-        record(refused, row.invoiceId, best.mandateId, funded.error);
+      if (!escrowed.ok) {
+        record(refused, row.invoiceId, best.mandateId, escrowed.error);
         continue;
       }
 
@@ -291,7 +307,14 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
         proceeds: best.proceeds,
         discount: best.discount,
         annualisedYieldBps: best.annualisedYieldBps,
-        remainingThisTick: spendableMinor - committedThisTick,
+        /*
+         * What this tick has committed, not what is left. There is no per-tick purse any
+         * more: the pot a trade settles from is the mandate's escrowed capital, and the
+         * running `allocations` map is what bounds it. Subtracting commitments from a wallet
+         * balance that pays for neither rail produced a negative "remaining" figure that
+         * meant nothing.
+         */
+        committedThisTick: committedThisTick + best.proceeds,
       });
 
       try {
@@ -397,30 +420,19 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
     }
 
     /*
-     * Last look at the chain before anything commits. The balance was read at the top of
-     * the tick and the book has been walked since; this is the moment the money is actually
-     * promised, so it is the moment the balance has to be true.
+     * There is deliberately no last look here any more.
+     *
+     * There used to be a second wallet read immediately before arming, on the reasoning that
+     * the balance had to be true at the moment money was promised. That reasoning was sound
+     * and the pot was wrong: the Circle wallet settles neither rail.
+     *
+     * The vault reading taken at the top of the tick is not re-fetched to replace it, because
+     * **the venue re-decides the rail at arm time.** `chooseRail` reads the vault itself on
+     * every `POST /v1/trades` and drops to x402 if the capital is no longer there, so a stale
+     * reading here cannot cause a bad settlement — only a wasted arm, which the venue then
+     * refuses. Paying for that certainty would mean a mandates fetch per invoice, which is
+     * the N+1 the venue's own pricing path exists to avoid.
      */
-    const confirmed = await wallet.usdcBalance(config.walletId);
-    const stillFunded = checkWalletFunded({
-      walletId: config.walletId,
-      required: live.proceeds,
-      available: usdcToInvoiceMinor(confirmed?.amount ?? 0n, SETTLEMENT_CURRENCY),
-      currency: SETTLEMENT_CURRENCY,
-    });
-    if (!stillFunded.ok) {
-      logger.warn('balance moved under the agent; not arming', {
-        invoiceId: acceptance.invoiceId,
-        mandateId: acceptance.mandateId,
-        reason: explainAgentRefusal(stillFunded.error),
-      });
-      return {
-        ...base,
-        quoteId: live.quoteId,
-        armedStatus: null,
-        skippedReason: 'WALLET_BALANCE_SHORT',
-      };
-    }
 
     const armed = await venue.armTrade({
       invoiceId: acceptance.invoiceId,

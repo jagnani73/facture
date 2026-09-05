@@ -432,12 +432,20 @@ export const api = {
     );
   },
 
-  /** `POST /v1/mandates/:id/fund` — the moment the bid becomes firm. */
+  /**
+   * `POST /v1/mandates/:id/fund` — the moment the bid becomes firm, or is merely recorded.
+   *
+   * The venue answers `escrowVerified`, and it publishes that field for one reason, stated
+   * in its own comment: *"a reader must not have to infer"* whether the amount was checked
+   * against capital that exists or simply believed. This client discarded it, and the screen
+   * told every buyer their capital was escrowed — which is the exact overclaim the vault
+   * check, `escrow.backed` and the `Escrowed on Arc` badge were all built to prevent.
+   */
   fundMandate(
     id: string,
     input: { amountMinor: MinorUnits; escrowRef: string },
     signal?: AbortSignal,
-  ): Promise<Mandate | null> {
+  ): Promise<{ mandate: Mandate | null; escrowVerified: boolean }> {
     return request(
       `/mandates/${encodeURIComponent(id)}/fund`,
       {
@@ -447,12 +455,21 @@ export const api = {
         body: { amountMinor: writeMoney(input.amountMinor), escrowRef: input.escrowRef },
       },
       (raw) => {
-        if (raw === undefined || raw === null) return null;
+        if (raw === undefined || raw === null) return { mandate: null, escrowVerified: false };
         const body = readObject(raw, 'mandate');
         const nested = body['mandate'];
-        return nested === undefined && body['id'] === undefined
-          ? null
-          : readMandate(nested ?? body, 'mandate');
+        return {
+          mandate:
+            nested === undefined && body['id'] === undefined
+              ? null
+              : readMandate(nested ?? body, 'mandate'),
+          /*
+           * Absent reads as false, deliberately. A venue that does not say whether it checked
+           * has not checked as far as this screen is concerned, and the sentence a buyer sees
+           * should understate rather than overstate what the venue verified.
+           */
+          escrowVerified: body['escrowVerified'] === true,
+        };
       },
     );
   },

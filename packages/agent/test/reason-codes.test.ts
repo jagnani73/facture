@@ -62,13 +62,20 @@ describe('the on-chain refusal vocabulary', () => {
     expect(translated).toEqual(['INELIGIBLE_JURISDICTION -> CONTROL_LIST_BLOCKED']);
   });
 
-  it('leaves exactly the currency and funding refusals without an on-chain equivalent', () => {
+  it('leaves exactly the currency and escrow refusals without an on-chain equivalent', () => {
     const unmodelled = Object.entries(ON_CHAIN_REASON_CODE)
       .filter(([, onChain]) => onChain === null)
       .map(([code]) => code)
       .sort();
 
-    expect(unmodelled).toEqual(['CURRENCY_MISMATCH', 'WALLET_BALANCE_SHORT']);
+    /*
+     * `MANDATE_NOT_ESCROWED` replaced `WALLET_BALANCE_SHORT`, and it is `null` here for a
+     * sharper reason than its predecessor was. The venue does not refuse an unescrowed bid
+     * at all — it reroutes to x402 — so there is no on-chain refusal for this to be the same
+     * as. It is the agent declining to arm what it cannot finish, which is a fact about the
+     * agent rather than about the trade.
+     */
+    expect(unmodelled).toEqual(['CURRENCY_MISMATCH', 'MANDATE_NOT_ESCROWED']);
   });
 
   it('spells every other refusal the same on both sides', () => {

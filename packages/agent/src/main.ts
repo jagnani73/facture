@@ -78,7 +78,16 @@ async function main(): Promise<void> {
      * assumption is expensive. Circle's developer-controlled wallets have no policy engine;
      * spending policies are a mainnet Agent Wallets feature and Arc is testnet-only.
      */
-    capEnforcedBy: 'this process (mandate.ts pre-flight) — Circle enforces no spending cap',
+    /*
+     * Honest about what this process does and does not do. It arms trades; it moves no money
+     * — the vault settles the cash leg and the agent's wallet is read, never spent. So the
+     * cap that binds is the mandate's own committed capital, which `decide` enforces here and
+     * the venue enforces again at arm time. Circle still enforces nothing, which is why the
+     * clause survives.
+     */
+    capEnforcedBy:
+      "the mandate's committed capital, enforced here and again by the venue — " +
+      'Circle enforces no spending cap, and this process spends nothing directly',
   });
 
   const stop = (signal: string): void => {

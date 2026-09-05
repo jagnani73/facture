@@ -23,13 +23,13 @@ import {
   AGENT_EMITTED_REFUSAL_CODES,
   assertWellFormed,
   availableFor,
-  checkWalletFunded,
+  checkMandateEscrowed,
   debtorHeadroom,
   decide,
   explainAgentRefusal,
   exposureTo,
   isQuoting,
-  isWalletBalanceShort,
+  isMandateNotEscrowed,
   NO_ALLOCATIONS,
   toSharedMandate,
   unallocated,
@@ -185,7 +185,7 @@ describe('decide — every refusal is reachable and named', () => {
     const decidable = AGENT_EMITTED_REFUSAL_CODES.filter(
       // `decide` sees neither the invoice's status nor the wallet; those two are refused
       // by the agent loop, and are covered in agent.test.ts.
-      (code) => code !== 'INVOICE_NOT_CONFIRMED' && code !== 'WALLET_BALANCE_SHORT',
+      (code) => code !== 'INVOICE_NOT_CONFIRMED' && code !== 'MANDATE_NOT_ESCROWED',
     );
     expect([...produced].sort()).toEqual([...decidable].sort());
   });
@@ -295,48 +295,76 @@ describe('money stays in bigint', () => {
   });
 });
 
-describe('checkWalletFunded', () => {
-  it('passes when the wallet covers the proceeds, and reports what is left', () => {
-    const result = checkWalletFunded({
-      walletId: 'wallet-1',
-      required: 3_917_808n,
-      available: 5_000_000n,
-      currency: 'USD',
-    });
+describe('checkMandateEscrowed', () => {
+  const BACKED = {
+    checked: true,
+    depositedUsdcMinor: 5_000_000n,
+    requiredUsdcMinor: 50_000n,
+    backed: true,
+  };
+
+  /*
+   * No amount is passed in, and that is the design rather than an omission. The venue sets
+   * `backed` by measuring the vault against the mandate's WHOLE committed capital, so a
+   * backed bid covers anything `decide` has already found headroom for. Comparing a
+   * per-trade price here would mean this package holding its own copy of the venue's ppm
+   * scale — and two copies of that number drifting apart is the defect this replaced.
+   */
+  it('passes a bid whose capital is posted, without comparing an amount', () => {
+    const result = checkMandateEscrowed({ mandateId: 'mandate-a', vault: BACKED });
     expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.value).toBe(1_082_192n);
-    expect(typeof result.value).toBe('bigint');
   });
 
-  it('refuses one minor unit short, and says so in words', () => {
-    const result = checkWalletFunded({
-      walletId: 'wallet-1',
-      required: 3_917_808n,
-      available: 3_917_807n,
-      currency: 'USD',
+  it('refuses a bid that is short, naming both figures in the unit it read them in', () => {
+    const result = checkMandateEscrowed({
+      mandateId: 'mandate-a',
+      vault: { ...BACKED, depositedUsdcMinor: 1_000n, backed: false },
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
 
-    expect(result.error.code).toBe('WALLET_BALANCE_SHORT');
-    expect(isWalletBalanceShort(result.error)).toBe(true);
+    expect(result.error.code).toBe('MANDATE_NOT_ESCROWED');
+    expect(isMandateNotEscrowed(result.error)).toBe(true);
+
+    /*
+     * USDC minor units, rendered raw. The refusal sentence for the code this replaced went
+     * through `formatMinorUnits` at the invoice currency's two decimals — put six-decimal
+     * USDC through that and 0.05 USDC reads as $500.00. Naming both sides of a comparison
+     * wrongly, in the sentence explaining a units bug, would be a poor joke.
+     */
     const sentence = explainAgentRefusal(result.error);
-    expect(sentence).toContain('$39,178.07');
-    expect(sentence).toContain('$39,178.08');
-    expect(sentence).toMatch(/not funded/i);
+    expect(sentence).toContain('1000 USDC minor units');
+    expect(sentence).toContain('50000 USDC minor units');
+    expect(sentence).not.toContain('$');
+  });
+
+  /* Three distinguishable answers, because "we could not ask" is not "the answer is no". */
+  it('says an unreadable vault is unknown rather than unbacked', () => {
+    const result = checkMandateEscrowed({
+      mandateId: 'mandate-a',
+      vault: { ...BACKED, depositedUsdcMinor: null, backed: false },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(explainAgentRefusal(result.error)).toMatch(/could not be read/i);
+  });
+
+  it('says a venue with no vault escrows nothing, rather than reporting a zero balance', () => {
+    const result = checkMandateEscrowed({ mandateId: 'mandate-a', vault: null });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.checked).toBe(false);
+    expect(explainAgentRefusal(result.error)).toMatch(/does not escrow mandate capital/i);
   });
 
   it('is a distinct code from EXPOSURE_EXHAUSTED — books and chain are different questions', () => {
-    // The mandate's books say there is room; the wallet that has to pay is empty.
+    // The mandate's books say there is room; the capital behind it is not posted.
     const bookOutcome = decide(terms(), NO_ALLOCATIONS, candidate());
     expect(bookOutcome.ok).toBe(true);
 
-    const chainOutcome = checkWalletFunded({
-      walletId: 'wallet-1',
-      required: PROCEEDS,
-      available: 0n,
-      currency: 'USD',
+    const chainOutcome = checkMandateEscrowed({
+      mandateId: 'mandate-a',
+      vault: { ...BACKED, depositedUsdcMinor: 0n, backed: false },
     });
     expect(chainOutcome.ok).toBe(false);
     if (chainOutcome.ok) return;
