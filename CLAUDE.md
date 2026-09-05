@@ -837,6 +837,74 @@ here and by the venue again at arm time. The last look before arming was deleted
 ported — re-reading the vault per invoice is a mandates fetch per row, and the venue re-decides
 the rail anyway. Verified live: the agent takes 2 invoices where it took 0.
 
+### Resolved: the agent pays for its own trades, and why it could not before
+
+**Built 2026-09-03.** `@facture/agent` completes an x402 payment on Hedera. The Hedera **AI &
+Agentic Payments** track ($6,000) asks for an agent that completes a real paid request, and
+`POST /v1/trades` was already the x402-gated service; what was missing was a buyer that could
+sign.
+
+**The agent was not stopping at the 402. It was never receiving one.** `checkMandateEscrowed`
+refused any mandate whose capital was not escrowed on Arc, and the venue settles an escrowed
+mandate out of the vault — so every trade the agent would arm came back **200, already
+settled**, and the x402 branch was unreachable by construction. Nothing errored. The branch
+had a log line describing the signature it was waiting for, and that line ran on the Arc path
+too, where nothing was waiting and the money had already moved. This is the nineteen-mechanisms
+pattern in a form worth watching for separately: the mechanism had a caller, and the caller
+could not reach it.
+
+- **`cash.ts` holds the buyer's Hedera key, and no other key can do this job.**
+  `@x402/hedera`'s `exact` scheme signs a native `TransferTransaction` serialised to base64,
+  verified against the payer's on-chain account key from the mirror node. It is a protobuf
+  body, not EIP-712 and not `eth_sendTransaction`, so the Circle Arc wallet cannot produce it
+  and neither can a Privy signer. The buyer therefore has two identities on purpose: an Arc
+  address that funds the vault, and a Hedera account that pays per trade.
+- **`checkCashLegPayable` asks about both rails and takes either.** Escrowed on Arc, or a key
+  that can pay on Hedera. The refusal, now `CASH_LEG_UNPAYABLE`, names **both** halves — a
+  sentence naming only the vault sends the reader off to deposit USDC to fix a missing key.
+  It is the third name for this refusal after `WALLET_BALANCE_SHORT` and
+  `MANDATE_NOT_ESCROWED`, and it stays out of shared's `RefusalCode`: the venue never refuses
+  for this reason, because it holds two rails and always has one to offer.
+- **No price is converted in this package, still.** The pre-flight compares no amounts at all.
+  The one comparison is **tinybars against tinybars**, made after the challenge has named the
+  figure in the payer's own unit — so the venue's ppm scale stays where it belongs, which is
+  the defect this pre-flight was rewritten once already to remove. The pre-flight proves only
+  that the payer exists and is not empty, which is exactly what it claims.
+- **The challenge is read from the `payment-required` header, not the copy in the body.** The
+  venue duplicates `accepts` into its JSON for convenience, and reading that copy would make
+  the agent a client of Facture's response shape rather than of x402. A non-CAIP-2 network is
+  refused at the parse — before the ATS hold, rather than at the facilitator's kind lookup
+  after it.
+- **The buyer pays no gas, and that is a property of the payload rather than a courtesy.** The
+  transaction id is generated against `extra.feePayer`, the facilitator's account, which is
+  also why the payload is only _partially_ signed: it is not submittable until the facilitator
+  adds its own signature. A leaked payload is a transfer nobody but the facilitator can
+  broadcast, to an account the challenge already named. `extra.feePayer` is read at runtime,
+  never pinned.
+- **HBAR only, refused early.** An HTS asset needs an explicit association on the receiving
+  side, and without one the transfer fails at consensus with
+  `TOKEN_NOT_ASSOCIATED_TO_ACCOUNT` — after the venue has held the seller's paper.
+- **Signing needs no network, which is what makes it testable.** `freezeWith` wants only the
+  node addresses an SDK client already knows and `sign` is arithmetic, so a test decodes the
+  signed bytes and checks them against the challenge. That matters because the failure on this
+  rail is not an exception: a payload built from the wrong field is a valid signature over the
+  wrong transfer, and the facilitator submits it.
+- **`AGENT_HEDERA_ACCOUNT_ID` and `AGENT_HEDERA_PRIVATE_KEY` are optional and all-or-nothing.**
+  Unset disables the rail rather than relaxing it, in the same shape as issuance with no ATS
+  factory. Half a pair behaves exactly like no rail while looking like a working one in a
+  `.env`, so it is refused by name. The key is registered with the log redactor from
+  `process.env` **before** the schema parses it, because `PrivateKey.fromStringECDSA` throws on
+  a bad key and that is the one path guaranteed to run while holding it.
+- **A live run now spends.** `AGENT_DRY_RUN=false` with a key set signs and submits a transfer
+  of the buyer's HBAR per trade, and nothing between the decision and consensus asks a second
+  time. The boot log used to say this process spends nothing directly; that was true while the
+  vault settled everything, and it is corrected rather than deleted.
+
+**Not yet run against the live facilitator.** Everything above is what the code does and what
+the payload decodes to, not a settlement record. The recipe it reproduces is proven —
+`facture-prep/x402-probe/settle-venue.mjs` closed 22 trades this way — but this agent has not
+made one.
+
 ### The full sweep for mechanisms nobody calls — ten more, 2026-09-03
 
 A systematic pass over every export, interface member, column, env var, contract function and
