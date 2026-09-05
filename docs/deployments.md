@@ -689,3 +689,58 @@ Two things worth writing down because they cost time:
 No `hardhat-verify` plugin was added. A new dependency in this workspace brings an unapproved
 build script that breaks `pnpm -r` until `allowBuilds` is edited by hand, and Sourcify's v2 API
 takes the solc standard JSON that `artifacts/build-info` already contains.
+
+## The Arc rail has carried a trade — 2026-09-03
+
+**MF-2061.** A receivable sold, paid in USDC on Arc out of capital the buyer escrowed before
+the invoice existed, and collected by the seller with their own key. The caveat that stood in
+the README and the demo script until today — _no trade has taken the Arc rail_ — is closed.
+
+|            |                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------- |
+| invoice    | MF-2061, `5b852e40-6789-44d7-8477-2ff761a017f3`, $15,000 face, 45 days             |
+| customer   | Calder & Roe, rated **B**                                                          |
+| instrument | `0.0.10348484` / `0xf982958c1c89fb402ac3ecf360b791edf3108ca3`, ISIN `USABMT8HS428` |
+| issuance   | `0.0.10311549@1788439625.100623187`                                                |
+| trade      | `07c9b966-5192-46f4-ae90-b7dab62b11ad`                                             |
+| mandate    | `8b879d02…`, Harrow Point, 850 bps — **the escrowed one**                          |
+| proceeds   | $14,842.80 → **14,843 USDC minor units** at 1 ppm                                  |
+
+**Why this invoice routed to Arc, by the book's own arithmetic rather than by arrangement.**
+The two tighter bids (675 and 800 bps) carry an **A** floor and refuse a B-rated customer; the
+only other B-taker quotes 925. So 850 wins on merit, and that mandate is the one with capital
+in the vault. Nothing was seeded, re-pointed or hand-edited to make this happen — the earlier
+demo invoices route to x402 for the same reason, because their customers are rated A.
+
+### Both legs
+
+| leg   | transaction                                                                |
+| ----- | -------------------------------------------------------------------------- |
+| cash  | `0x96c5c8625dde0c10b5469aa05cab572ac33c01504f391bae551b285091094318` (Arc) |
+| asset | `0.0.10311549@1788439835.810844400` (Hedera), SUCCESS, 445,892 gas         |
+| claim | `0x290928b2b5d7d3323cb09954ab63e5fda8e7ea6367122d3a2b939802802841fa` (Arc) |
+
+Read off chain afterwards, not from the receipt:
+
+|                           | before | after        |
+| ------------------------- | ------ | ------------ |
+| vault, mandate `8b879d02` | 5 USDC | 4.985157     |
+| `DvpEscrow` on Arc        | 0      | 0.014843 → 0 |
+| seller `0x2Da63Ac0…`      | 0.5    | **0.512972** |
+
+The seller's delta is 0.012972 rather than 0.014843 because **they paid their own gas**, which
+is the whole point: `claim` requires `msg.sender == beneficiary`, so the venue could not have
+collected for them. `demo:reset` had funded that account earlier the same day, and without it
+this last step could not have run at all.
+
+`payoutOf(matchId)` reads `seller 0x2Da63Ac0…, price 14843, executed true`, and the lock's
+`tradeRef` equals the match id — the two legs are paired on chain rather than only in this
+database. The lock is now `Claimed` and the escrow holds the preimage in the clear, which is
+the cross-chain channel working exactly as `IDvpEscrow` describes.
+
+### What this proves, precisely
+
+The paper never left Hedera and the cash never left Arc. Nothing was wrapped and nothing
+bridged. The buyer signed nothing for this trade — their mandate had already agreed to
+anything meeting its terms, which is what makes a standing bid firm — and the seller signed
+exactly once, to collect money already bound to their address.

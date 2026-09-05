@@ -258,9 +258,12 @@ USDC into `DvpEscrow` locked for the seller. The ordering is chosen by which way
 the cash commits into escrow before the paper moves, so a failed delivery leaves money that returns
 to the mandate rather than a buyer holding paper nobody paid for.
 
-**What has not happened is a trade taking it.** That is the precise claim: not "the rail is not
-built" and not "no USDC is on Arc" — 5 USDC is escrowed against Harrow Point's mandate, deposited by
-that buyer's own wallet. No sale has yet drawn on it.
+**A trade has now taken it.** MF-2061 — a B-rated receivable the escrowed mandate won on merit,
+because the two tighter bids carry an A floor — settled out of the vault on 2026-09-03, and the
+seller collected with their own key. Cash `0x96c5c862…` on Arc, paper
+`0.0.10311549@1788439835.810844400` on Hedera, claim `0x290928b2…`. The seller's balance moved
+0.5 → 0.512972 USDC: they received 0.014843 and paid their own gas, because `claim` requires
+`msg.sender == beneficiary` and the venue cannot collect for them.
 
 Two operational facts a rehearsal has to include, both of which surprised us:
 
