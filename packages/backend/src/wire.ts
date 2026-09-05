@@ -211,13 +211,23 @@ export const wireTrade = (row: TradeRow) => ({
     consensusAt: isoOrNull(row.assetConsensusAt),
   },
   cashLeg: {
-    chain: row.cashNetwork?.startsWith('hedera') === true ? ('hedera' as const) : ('arc' as const),
+    chain: cashLegChain(row),
+    /**
+     * Which rail settled it, read from the row rather than guessed from the network string.
+     *
+     * Null until a rail has run. That is a third state and it matters: the guess this
+     * replaced defaulted a null network to Arc, so a trade that had not settled at all
+     * rendered as an Arc trade.
+     */
+    rail: row.cashRail,
     state: cashLegState(row),
     scheme: row.cashScheme,
     network: row.cashNetwork,
     asset: row.cashAsset,
     transaction: row.cashTransaction,
     payer: row.cashPayer,
+    /** What moved, in the settlement asset's own minor units. See the column's own note. */
+    settledAmountMinor: row.cashAmountMinor === null ? null : money(row.cashAmountMinor),
   },
   createdAt: row.createdAt.toISOString(),
   settledAt: isoOrNull(row.settledAt),
@@ -235,6 +245,21 @@ function assetLegState(row: TradeRow): SettlementLegState {
   if (row.status === 'unwound') return 'released';
   if (row.status === 'failed') return 'failed';
   return row.holdId === null ? 'pending' : 'held';
+}
+
+/**
+ * The chain the cash leg settled on, from the rail rather than a string prefix.
+ *
+ * `cash_rail` is what the venue recorded; `cashNetwork` is a fallback for the rows written
+ * before that column existed, and it keeps its original meaning for them. A trade with
+ * neither is `null` — it has not settled — where the old inference answered `'arc'`.
+ */
+function cashLegChain(row: TradeRow): 'hedera' | 'arc' | null {
+  if (row.cashRail === 'arc-vault') return 'arc';
+  if (row.cashRail === 'x402')
+    return row.cashNetwork?.startsWith('hedera') === true ? 'hedera' : 'arc';
+  if (row.cashNetwork === null) return null;
+  return row.cashNetwork.startsWith('hedera') ? 'hedera' : 'arc';
 }
 
 function cashLegState(row: TradeRow): SettlementLegState {

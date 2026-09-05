@@ -17,6 +17,7 @@ import { explorer } from '../chain.js';
 import { getStore } from '../db/store.js';
 import { notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
+import { getArcEscrow } from '../services/arc.js';
 import { getScheduleAdapter } from '../services/schedule.js';
 import { readParams } from '../validate.js';
 import { money } from '../wire.js';
@@ -86,15 +87,36 @@ export interface TradeProof {
     consensusAt: string | null;
     explorerUrl: string | null;
   };
-  /** Cash leg: the x402 payment. Arc, or Hedera when settling in HBAR. */
+  /**
+   * Cash leg. Two rails, and which one ran is stated rather than inferred.
+   *
+   * `x402` is a payment the buyer signed for this trade, on Hedera in HBAR. `arc-vault` draws
+   * on USDC the buyer escrowed in `MandateVault` before the invoice existed — no signature,
+   * because a funded mandate already agreed to anything meeting its terms.
+   *
+   * `chain` and `rail` are both null before either rail has run. The inference these replaced
+   * answered `'arc'` for a trade that had not settled at all.
+   */
   cashLeg: {
-    chain: 'arc' | 'hedera';
+    chain: 'arc' | 'hedera' | null;
+    rail: 'x402' | 'arc-vault' | null;
     scheme: string | null;
     network: string | null;
     asset: string | null;
     transaction: string | null;
     payer: string | null;
+    /** Settlement-asset minor units — tinybars or USDC — not the invoice currency. */
+    settledAmountMinor: string | null;
     explorerUrl: string | null;
+    /** Arc only: where a payout is sitting, and whether the seller has taken it. */
+    lock: {
+      lockId: string;
+      status: string;
+      beneficiary: string | null;
+      amountMinor: string | null;
+      claimableUntil: string | null;
+      explorerUrl: string | null;
+    } | null;
   };
   /**
    * Maturity: the third receipt, and the one that makes a resale legitimate.
@@ -167,6 +189,60 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
         })();
 
   /*
+   * The cash leg's chain, from what the venue recorded rather than a prefix test on the
+   * network string. `cash_rail` is authoritative; `cashNetwork` covers the rows written
+   * before that column existed; neither means the trade has not settled.
+   */
+  const cashChain: 'arc' | 'hedera' | null =
+    trade.cashRail === 'arc-vault'
+      ? 'arc'
+      : trade.cashNetwork === null
+        ? null
+        : trade.cashNetwork.startsWith('hedera')
+          ? 'hedera'
+          : 'arc';
+
+  /*
+   * Whether the seller has actually taken an Arc payout, asked of the escrow every time.
+   *
+   * The same rule the maturity block follows: a payout that has been *locked* is not a payout
+   * that has been *received*, and the difference is visible only on chain. Storing a "claimed"
+   * flag would be storing something this service could be wrong about — and a reader checking
+   * a proof view is precisely the person who should not have to trust it.
+   *
+   * A read that fails leaves the lock unreported rather than reported as unclaimed, for the
+   * same reason `escrow.backed` distinguishes those two: accusing a paid seller of being
+   * unpaid is worse than saying nothing.
+   */
+  const lockState: TradeProof['cashLeg']['lock'] =
+    trade.arcLockId === null
+      ? null
+      : await (async () => {
+          const lockId = trade.arcLockId as string;
+          const base = {
+            lockId,
+            beneficiary: null,
+            amountMinor: null,
+            claimableUntil: null,
+            explorerUrl: link(trade.cashTransaction, explorer.arcTx),
+          };
+          try {
+            const lock = await getArcEscrow().lockOf(lockId);
+            if (lock === null) return { ...base, status: 'unknown' };
+            return {
+              lockId,
+              status: lock.status,
+              beneficiary: lock.beneficiary,
+              amountMinor: money(lock.amount),
+              claimableUntil: new Date(lock.timeout * 1000).toISOString(),
+              explorerUrl: base.explorerUrl,
+            };
+          } catch {
+            return { ...base, status: 'unreadable' };
+          }
+        })();
+
+  /*
    * Every link below is built from an identifier this service actually holds, and any
    * identifier that is null produces a null link rather than a URL. An explorer link that
    * 404s is worse than an absent one: this is the one screen whose whole purpose is that a
@@ -218,18 +294,37 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
       explorerUrl: link(trade.assetTxId, explorer.hederaTx),
     },
     cashLeg: {
-      chain: trade.cashNetwork?.startsWith('hedera') === true ? 'hedera' : 'arc',
+      chain: cashChain,
+      /** Which rail paid, recorded at settlement rather than inferred here and in `wire.ts`. */
+      rail: trade.cashRail,
       scheme: trade.cashScheme,
       network: trade.cashNetwork,
       asset: trade.cashAsset,
       transaction: trade.cashTransaction,
       payer: trade.cashPayer,
+      /**
+       * The figure that matches the transaction, in the settlement asset's own minor units.
+       *
+       * `pricing.proceedsMinor` above is US cents. The two differ by the deployment's
+       * ppm scale, so a proof view showing only the first invites a reader to check
+       * `$59,331.78` against a transfer of 0.059331 USDC and conclude the venue is lying.
+       */
+      settledAmountMinor: trade.cashAmountMinor === null ? null : money(trade.cashAmountMinor),
       explorerUrl:
         trade.cashTransaction === null
           ? null
-          : trade.cashNetwork?.startsWith('hedera') === true
+          : cashChain === 'hedera'
             ? explorer.hederaTx(trade.cashTransaction)
             : explorer.arcTx(trade.cashTransaction),
+      /**
+       * Arc only. Where a payout is sitting, and whether the seller has taken it.
+       *
+       * A vault payout moves capital into `DvpEscrow` claimable by the seller alone, for 24
+       * hours. Reporting the cash leg as settled without this would report a payment that has
+       * not reached anyone yet. Read from the escrow on every call for the same reason
+       * `maturity` is: whether someone was paid is asked, never remembered.
+       */
+      lock: lockState,
     },
     maturity: maturity,
     /** Kept for the funders who were told no, not only for the one who was matched. */

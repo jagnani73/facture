@@ -1,0 +1,319 @@
+/**
+ * Settling out of the buyer's escrowed capital, on Arc.
+ *
+ * Two rails now carry the cash leg, and they are not two ways of doing one thing. `x402` is a
+ * payment the buyer signs for this trade. `arc-vault` draws on USDC the buyer put in
+ * `MandateVault` before the invoice existed — no challenge and no signature, because a funded
+ * mandate already agreed to anything meeting its terms. Asking for a second consent is what
+ * would make a standing bid not standing.
+ *
+ * So the rail decides what `POST /v1/trades` even returns: 402 with something to sign, or 200
+ * with a trade already settled. That is worth testing at the route rather than the service,
+ * because the status code is the first thing a client branches on.
+ *
+ * The ordering inside a vault settlement is the other thing under test, and it is chosen by
+ * which way a failure hurts. Cash commits into the escrow *before* the paper moves: reverse
+ * the two and a failed payout leaves the buyer holding paper nobody paid for, which cannot be
+ * undone. This way a failed delivery leaves money in an escrow that returns it to the mandate
+ * after a day, and the seller keeps their position.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { call, createHarness, fakeArcEscrow, type Harness } from './helpers.js';
+import { MARKET_NOW_ISO, marketNow } from '../src/db/seed.js';
+import { usdcRequiredFor, type ArcEscrow } from '../src/services/arc.js';
+
+let h: Harness;
+
+/*
+ * The seeded book is priced as of a fixed instant, and a quote carries an expiry. Without the
+ * clock pinned, every arming here races the quote it just took and fails as "expired" —
+ * which is a true refusal about the wrong thing.
+ */
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(MARKET_NOW_ISO));
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  h.restore();
+});
+
+const asOf = `?asOf=${marketNow().toISOString()}`;
+
+/** What the seeded book's ordinary invoice costs, in USDC minor units at the test scale. */
+const priceOf = (proceedsMinor: bigint) => usdcRequiredFor(proceedsMinor, 'USD', 1);
+
+/** A vault holding enough for anything on the book, recording every call it receives. */
+function vault(overrides: Partial<ArcEscrow> = {}) {
+  const calls = {
+    registerMatch: [] as { tradeId: string; seller: string; priceUsdcMinor: bigint }[],
+    executePayout: [] as { tradeId: string; secretHash: string }[],
+  };
+  const escrow = fakeArcEscrow({
+    depositedFor: () => Promise.resolve(1_000_000_000n),
+    registerMatch: (input) => {
+      calls.registerMatch.push({
+        tradeId: input.tradeId,
+        seller: input.seller,
+        priceUsdcMinor: input.priceUsdcMinor,
+      });
+      return Promise.resolve({ transactionHash: '0xmatchtx', matchId: '0xmatch' });
+    },
+    executePayout: (input) => {
+      calls.executePayout.push({ tradeId: input.tradeId, secretHash: input.secretHash });
+      return Promise.resolve({
+        transactionHash: '0xpayouttx',
+        lockId: '0xlock',
+        authId: '0xauth',
+      });
+    },
+    ...overrides,
+  });
+  return { escrow, calls };
+}
+
+async function arm(invoiceLabel = 'INV-2041') {
+  const invoiceId = h.seeded.invoiceIds[invoiceLabel] ?? '';
+  const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
+  const armed = await call(h.app, 'POST', '/v1/trades', {
+    body: { invoiceId, quoteId: quote.body.quoteId },
+  });
+  return { invoiceId, quoteId: quote.body.quoteId as string, armed };
+}
+
+describe('choosing a rail', () => {
+  it('settles out of the vault when the bid is escrowed, without a challenge', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(200);
+    expect(armed.body.cashLeg.rail).toBe('arc-vault');
+    expect(armed.body.cashLeg.chain).toBe('arc');
+    expect(armed.body.cashLeg.state).toBe('settled');
+    // Nothing to sign, so nothing that says how to sign it.
+    expect(armed.body.accepts).toBeUndefined();
+    expect(armed.body.signatureHeader).toBeUndefined();
+  });
+
+  /* The old path, unchanged. An unfunded bid still pays per trade. */
+  it('issues an x402 challenge when the vault holds nothing', async () => {
+    const { escrow } = vault({ depositedFor: () => Promise.resolve(0n) });
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(402);
+    expect(armed.body.rail.chosen).toBe('x402');
+    expect(armed.body.rail.reason).toContain('USDC minor units on Arc');
+    expect(armed.body.accepts).toHaveLength(1);
+  });
+
+  it('issues a challenge when no vault is configured at all', async () => {
+    h = await createHarness();
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(402);
+    expect(armed.body.rail.reason).toContain('No Arc vault is configured');
+  });
+
+  /*
+   * An unreadable vault must not stop a sale. The other rail is right there and works, and
+   * refusing to trade because a second rail was unavailable would be the same mistake the
+   * compliance gate makes when it lets an indeterminate answer move a price.
+   */
+  it('falls back to x402 rather than refusing when the vault cannot be read', async () => {
+    const { escrow } = vault({ depositedFor: () => Promise.reject(new Error('rpc down')) });
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(402);
+    expect(armed.body.rail.reason).toContain('could not be read');
+  });
+
+  /*
+   * `registerMatch` binds the payee permanently and the vault will happily bind an address
+   * nobody controls. A seller with none on file is a reason to use the other rail, not a
+   * reason to open a lock into the void.
+   */
+  it('refuses the vault rail when the seller has no Arc address', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+    await h.store.updateSellerWallet(h.seeded.sellerId, { arcAddress: null });
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(402);
+    expect(armed.body.rail.reason).toContain('no Arc address');
+  });
+});
+
+describe('what a vault settlement does, and in what order', () => {
+  it('binds the payout before the paper moves', async () => {
+    const { escrow, calls } = vault();
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+
+    expect(calls.registerMatch).toHaveLength(1);
+    expect(calls.executePayout).toHaveLength(1);
+    expect(h.ats.executed).toHaveLength(1);
+
+    // The binding names the seller and the price the venue actually charged.
+    const trade = armed.body.trade;
+    expect(calls.registerMatch[0]?.tradeId).toBe(trade.id);
+    expect(calls.registerMatch[0]?.priceUsdcMinor).toBe(priceOf(BigInt(trade.proceeds)));
+  });
+
+  /*
+   * The number a reader can check against the transaction. `proceeds` is US cents and the
+   * money that moved is that figure scaled into USDC, so a receipt carrying only the first
+   * invites someone to compare $59,331.78 against a transfer of 0.059331 and conclude the
+   * venue is lying.
+   */
+  it('reports what moved in the settlement asset, not only the invoice price', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+    const cash = armed.body.cashLeg;
+
+    expect(cash.amountMinor).toBe(armed.body.trade.proceeds);
+    expect(cash.settledAmountMinor).toBe(priceOf(BigInt(armed.body.trade.proceeds)).toString(10));
+    expect(cash.settledAmountMinor).not.toBe(cash.amountMinor);
+  });
+
+  /*
+   * A payout that has been locked is not a payout that has been received. Saying "settled"
+   * without saying where the money is would report a payment that has not reached anyone.
+   */
+  it('says the money is in an escrow the seller has still to claim', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+
+    expect(armed.body.cashLeg.lock.lockId).toBe('0xlock');
+    expect(armed.body.cashLeg.lock.status).toBe('locked');
+    // Without the preimage nobody can ever claim it, so it has to leave this service.
+    expect(armed.body.cashLeg.lock.secret).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it('records the rail on the trade rather than leaving it to be inferred', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+    const stored = await h.store.getTrade(armed.body.trade.id);
+
+    expect(stored?.cashRail).toBe('arc-vault');
+    expect(stored?.arcLockId).toBe('0xlock');
+    expect(stored?.arcSecret).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(stored?.status).toBe('settled');
+  });
+
+  it('marks the quote taken and the invoice sold, like the other rail', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+
+    const { invoiceId, quoteId, armed } = await arm();
+
+    expect(armed.status).toBe(200);
+    expect((await h.store.getQuote(quoteId))?.status).toBe('accepted');
+    expect((await h.store.getInvoice(invoiceId))?.status).toBe('sold');
+  });
+});
+
+describe('when a vault settlement goes wrong', () => {
+  /*
+   * The recoverable half-settle, and the reason the order is what it is. The cash is locked
+   * in an escrow that returns it to the mandate after a day and the seller keeps their
+   * position — so unlike the x402 half-settle, nobody has paid for nothing.
+   */
+  it('fails loudly and keeps the secret when the paper does not move', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+    h.ats.failExecute = true;
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(500);
+    expect(armed.body.detail).toContain('locked on Arc');
+    expect(armed.body.detail).toContain('seller keeps their position');
+  });
+
+  /*
+   * `registerMatch` cannot be called twice — it reverts even from the attester with identical
+   * arguments — so a retry has to read the binding rather than re-send it.
+   */
+  it('does not bind a match twice when one already exists', async () => {
+    const { escrow, calls } = vault({
+      payoutFor: (tradeId) =>
+        Promise.resolve({
+          matchId: '0xmatch',
+          mandateId: 1n,
+          seller: '0xseller',
+          executed: false,
+          price: 1n,
+          tradeId,
+        } as never),
+    });
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(200);
+    expect(calls.registerMatch).toHaveLength(0);
+    expect(calls.executePayout).toHaveLength(1);
+  });
+
+  /*
+   * A match whose capital already left can never be paid again: `reclaimPayout` returns the
+   * money to the buyer but leaves `executed` true forever. Refusing is the only honest
+   * answer — a second payout would revert, and reporting success would promise a payment
+   * that cannot happen.
+   */
+  it('refuses a trade whose payout the vault has already executed', async () => {
+    const { escrow } = vault({
+      payoutFor: () =>
+        Promise.resolve({
+          matchId: '0xmatch',
+          mandateId: 1n,
+          seller: '0xseller',
+          executed: true,
+          price: 1n,
+        }),
+    });
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(409);
+    expect(armed.body.detail).toContain('already drawn its payout');
+  });
+
+  /* Arming failed, so nothing is owed and the bid must not be left quoting money it cannot spend. */
+  it('gives the mandate its capital back when the payout reverts', async () => {
+    const { escrow } = vault({
+      executePayout: () => Promise.reject(new Error('InsufficientVaultBalance')),
+    });
+    h = await createHarness({ arc: escrow });
+
+    const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
+    const mandateId = quote.body.mandateId as string;
+    const before = (await h.store.getMandate(mandateId))?.allocatedMinor;
+
+    const armed = await call(h.app, 'POST', '/v1/trades', {
+      body: { invoiceId, quoteId: quote.body.quoteId },
+    });
+
+    expect(armed.status).toBeGreaterThanOrEqual(400);
+    expect((await h.store.getMandate(mandateId))?.allocatedMinor).toBe(before);
+  });
+});

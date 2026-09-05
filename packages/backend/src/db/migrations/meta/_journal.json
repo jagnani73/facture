@@ -43,6 +43,20 @@
       "when": 1788429090575,
       "tag": "0005_meridian_real_arc_wallet",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788430342822,
+      "tag": "0006_cash_rail",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788431002369,
+      "tag": "0007_backfill_x402_rail",
+      "breakpoints": true
     }
   ]
 }

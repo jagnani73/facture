@@ -415,12 +415,55 @@ export const trades = sqliteTable(
     assetTxId: text('asset_tx_id'),
     assetConsensusAt: instant('asset_consensus_at'),
 
+    /**
+     * Which rail settled the cash leg: `x402` on Hedera, or `arc-vault` on Arc.
+     *
+     * **Stored rather than inferred, which is the point of the column.** It used to be
+     * derived in two places from `cashNetwork.startsWith('hedera')`, defaulting to `arc` for
+     * a null network — so a trade that had not settled at all rendered as an Arc trade, and
+     * two copies of one guess could drift apart. A funded mandate settles out of its escrow
+     * on Arc and an unfunded one settles pay-as-you-go over x402; which of those happened is
+     * a fact about the trade, and a reader must not have to reconstruct it from a string
+     * prefix.
+     *
+     * Null means neither rail has run yet.
+     */
+    cashRail: text('cash_rail').$type<'x402' | 'arc-vault' | null>(),
+
     // Cash leg — x402. `cashTransaction` is the facilitator's settlement reference.
     cashScheme: text('cash_scheme'),
     cashNetwork: text('cash_network'),
     cashAsset: text('cash_asset'),
     cashTransaction: text('cash_transaction'),
     cashPayer: text('cash_payer'),
+
+    /**
+     * What actually moved, in the settlement asset's own minor units.
+     *
+     * Every amount elsewhere on this row is invoice currency — `proceedsMinor` is US cents.
+     * The money that changed hands is that figure put through `toSettlementAmount`: tinybars
+     * on Hedera, USDC minor units on Arc, both scaled by `X402_SETTLEMENT_SCALE_PPM`. Nothing
+     * recorded it, so the one number a reader could check against the chain was the one
+     * number the venue never wrote down — the receipt said `$59,331.78` beside a transaction
+     * that moved 0.059331 USDC.
+     */
+    cashAmountMinor: bigintText('cash_amount_minor'),
+
+    /**
+     * The Arc escrow lock a payout opened, and the preimage that releases it.
+     *
+     * `executePayout` moves the mandate's capital into `DvpEscrow` claimable by the seller
+     * alone, with the preimage of a hash, for 24 hours. Both halves have to survive a restart:
+     * without the lock id the venue cannot tell whether the seller was paid or the money is
+     * still sitting there, and without the secret nobody can ever claim it — the lock would
+     * time out and `reclaimPayout` would return the capital to the buyer, while
+     * `payout.executed` stays true forever and that match can never be paid again.
+     *
+     * The secret is not a credential. It is published in the clear by `DvpEscrow.claim` the
+     * moment the seller takes the money, because that log is the cross-chain channel.
+     */
+    arcLockId: text('arc_lock_id'),
+    arcSecret: text('arc_secret'),
 
     /** The pre-match ControlList / Kyc decision, kept verbatim for the proof view. */
     complianceDecision: text('compliance_decision', { mode: 'json' }).$type<Record<

@@ -16,7 +16,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { call, createHarness, type Harness } from './helpers.js';
+import { call, createHarness, fakeArcEscrow, type Harness } from './helpers.js';
 import {
   createDisabledArcEscrow,
   usdcRequiredFor,
@@ -51,13 +51,10 @@ const needs = (amountMinor: bigint): bigint => usdcRequiredFor(amountMinor, 'USD
  * fixed one, which is how the original defect stayed invisible: the numbers matched.
  */
 function stubVault(deposited: bigint): ArcEscrow {
-  return {
-    enabled: true,
-    requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, SCALE_PPM),
+  return fakeArcEscrow({
     depositedFor: () => Promise.resolve(deposited),
     buyerOf: () => Promise.resolve('0x1c755e95cb11e5d5af498bb0ea595b56e1adb035'),
-    registerMandate: () => Promise.resolve({ transactionHash: '0xabc' }),
-  };
+  });
 }
 
 async function draftMandate(): Promise<string> {
@@ -262,13 +259,7 @@ describe('which bids are backed', () => {
   /* "We could not check" must never render as "nobody posted this". */
   it('answers null rather than zero when the vault cannot be read', async () => {
     h = await createHarness({
-      arc: {
-        enabled: true,
-        requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, SCALE_PPM),
-        depositedFor: () => Promise.reject(new Error('rpc down')),
-        buyerOf: () => Promise.resolve(null),
-        registerMandate: () => Promise.resolve({ transactionHash: '0x' }),
-      },
+      arc: fakeArcEscrow({ depositedFor: () => Promise.reject(new Error('rpc down')) }),
     });
     const id = await draftMandate();
 

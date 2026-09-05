@@ -552,6 +552,35 @@ checking: `settlementToken` `0x3600…` (USDC), `paymentEscrow` `0x32e3511A2F…
 Arc escrow — and `attester` and `owner` both `0x46783EeC…`, the key in
 `ARC_SETTLEMENT_PRIVATE_KEY`. **Nothing needs redeploying for the payout leg.**
 
+### What the payout leg has to work with
+
+Read from the deployed bytecode rather than the source, so these are the bounds that will
+actually apply:
+
+| bound                                | value           |                                     |
+| ------------------------------------ | --------------- | ----------------------------------- |
+| `DvpEscrow.MIN_LOCK_DURATION`        | 900s (15 min)   |                                     |
+| `DvpEscrow.MAX_LOCK_DURATION`        | 172,800s (48 h) |                                     |
+| `DvpEscrow.MIN_LEG_GAP`              | 3,600s (1 h)    |                                     |
+| `MandateVault.PAYMENT_LOCK_DURATION` | 86,400s (24 h)  | inside the band with a day to spare |
+
+USDC on Arc, ERC-20 view, 2026-09-03:
+
+| account                   | USDC       | note                                                   |
+| ------------------------- | ---------- | ------------------------------------------------------ |
+| attester `0x46783EeC…`    | 213.949511 | topped up since the 93.949 recorded above; gas is fine |
+| vault `0x217256d0…`       | 5          | Harrow Point's escrowed mandate                        |
+| escrow `0x32e3511A…`      | 0          | nothing locked yet                                     |
+| buyer/agent `0x1c755e95…` | 0.996822   |                                                        |
+| **seller `0x2Da63Ac0…`**  | **0**      | **can receive; cannot pay gas to claim**               |
+
+The last row is the one with a consequence. Arc gas is USDC, so a seller holding nothing can
+be paid into the escrow and then cannot afford the transaction that claims it. Whether that
+matters depends on who may call `DvpEscrow.claim` — if the lock pays its named recipient
+regardless of who submits the claim, the venue can submit it and the money still lands with
+the seller. If only the recipient may call, the seller needs a gas top-up before any payout is
+claimable, and that is a step the demo has to include rather than discover.
+
 ### The seller's Arc address was invented
 
 `sellers.arc_address` was `0x2Ee0aB7c…`, fabricated exactly as the seeded buyers' were, and

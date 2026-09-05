@@ -25,7 +25,12 @@ import { unauthorized } from '../src/errors.js';
 import { createLogger, setRootLogger } from '../src/logger.js';
 import type { AtsAdapter, HoldReceipt } from '../src/services/ats.js';
 import { setAtsAdapter } from '../src/services/ats.js';
-import { createDisabledArcEscrow, setArcEscrow, type ArcEscrow } from '../src/services/arc.js';
+import {
+  createDisabledArcEscrow,
+  setArcEscrow,
+  usdcRequiredFor,
+  type ArcEscrow,
+} from '../src/services/arc.js';
 import type { MaturityPayoutRequest, ScheduleAdapter } from '../src/services/schedule.js';
 import { setScheduleAdapter } from '../src/services/schedule.js';
 import type { ComplianceDecision, ComplianceGate } from '../src/services/compliance.js';
@@ -374,6 +379,42 @@ export const VALID_ID_TOKEN = 'privy-identity-token-for-tests';
 export const signedIn = (token = VALID_ID_TOKEN): Record<string, string> => ({
   authorization: `Bearer ${token}`,
 });
+
+/**
+ * Parts-per-million scale the harness converts at, matching the deployment default.
+ *
+ * At 1 ppm a USD amount in cents becomes USDC minor units by dividing by 100: the decimals
+ * shift multiplies by 10^4 and the scale divides by 10^6. So $50,000.00 needs 0.05 USDC.
+ */
+export const TEST_SCALE_PPM = 1;
+
+/**
+ * A vault that answers, with every method present.
+ *
+ * One factory rather than an object literal per test, because a partial literal only fails to
+ * compile until someone adds the missing key by hand — and a fake that has drifted from the
+ * interface it stands in for is a test passing for the wrong reason. Typechecking the test
+ * tree already caught this twice on this interface alone.
+ *
+ * `requiredFor` delegates to the service's own conversion. A stub with its own arithmetic
+ * could agree with a broken service and disagree with a fixed one, which is exactly how the
+ * USD-against-USDC comparison stayed invisible: the numbers matched.
+ */
+export function fakeArcEscrow(overrides: Partial<ArcEscrow> = {}): ArcEscrow {
+  return {
+    enabled: true,
+    requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, TEST_SCALE_PPM),
+    depositedFor: () => Promise.resolve(0n),
+    buyerOf: () => Promise.resolve(null),
+    registerMandate: () => Promise.resolve({ transactionHash: '0xarc-register' }),
+    payoutFor: () => Promise.resolve(null),
+    registerMatch: () => Promise.resolve({ transactionHash: '0xarc-match', matchId: '0xmatch' }),
+    executePayout: () =>
+      Promise.resolve({ transactionHash: '0xarc-payout', lockId: '0xlock', authId: '0xauth' }),
+    lockOf: () => Promise.resolve(null),
+    ...overrides,
+  };
+}
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   resetConfig();

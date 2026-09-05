@@ -20,13 +20,16 @@
  * counterparty has already been refused with a receipt.
  */
 
+import { randomBytes } from 'node:crypto';
 import type { Currency, SettlementLegState } from '@facture/shared';
 import { CURRENCY_DECIMALS } from '@facture/shared';
+import { keccak256 } from 'viem';
 import { explorer } from '../chain.js';
 import { getConfig } from '../config.js';
 import { getStore } from '../db/store.js';
 import { badRequest, conflict, internalError, notFound, upstreamUnavailable } from '../errors.js';
 import { rootLogger } from '../logger.js';
+import { getArcEscrow } from './arc.js';
 import { accountIdToEvmAddress, getAtsAdapter, operatorEvmAddress } from './ats.js';
 import type { SettlementOutcome } from './rating.js';
 import { ratingService } from './rating.js';
@@ -48,9 +51,16 @@ export interface DvpIntent {
   tradeId: string;
   invoiceId: string;
   mandateId: string;
+  /** The accepted quote. Marked taken once both legs are done, on either rail. */
+  quoteId: string;
   /** ATS security for this invoice, native id `0.0.x`. */
   securityId: string;
   sellerHederaAccountId: string;
+  /**
+   * Where a vault payout lands. Bound into `registerMatch` and unchangeable afterwards, so
+   * an address nobody controls is a sale that settles and pays nobody.
+   */
+  sellerArcAddress: string | null;
   buyerHederaAccountId: string;
   buyerArcAddress: `0x${string}`;
   /*
@@ -81,15 +91,63 @@ export interface AssetLegReceipt {
   explorerUrl: string | null;
 }
 
-/** Cash leg: an x402 payment. `transaction` is the facilitator's settlement reference. */
+/**
+ * Which rail carried the cash.
+ *
+ * `x402` is a payment the buyer signs, per trade, on Hedera. `arc-vault` draws on capital the
+ * buyer escrowed in `MandateVault` before any of these invoices existed — no per-trade
+ * signature, because a funded mandate already said yes to anything meeting its terms. That is
+ * what "firm bid" means, and it is why the two rails are not two ways of doing one thing.
+ */
+export type CashRail = 'x402' | 'arc-vault';
+
+/** Cash leg. `transaction` is the facilitator's reference, or the Arc payout transaction. */
 export interface CashLegReceipt {
   chain: 'arc' | 'hedera';
-  scheme: 'x402';
+  /**
+   * Stated, never inferred. This used to be reconstructed from `network.startsWith('hedera')`
+   * in two places, which defaulted an unsettled trade to Arc and left two copies of one guess
+   * free to drift apart.
+   */
+  rail: CashRail;
+  scheme: string;
   state: LegState;
   asset: string;
+  /**
+   * The trade's price in INVOICE currency minor units — US cents, not the asset's units.
+   * Kept under this name because every consumer already reads it as the price.
+   */
   amountMinor: string;
+  /**
+   * What actually moved, in the settlement asset's own minor units: tinybars on Hedera, USDC
+   * minor units on Arc, both after `X402_SETTLEMENT_SCALE_PPM`. The receipt used to show
+   * `$59,331.78` beside a transaction that moved 0.059331 USDC, with nothing naming the
+   * second figure — so the one number a reader could check was the one nobody wrote down.
+   */
+  settledAmountMinor: string | null;
   transaction: string | null;
   payer: string | null;
+  explorerUrl: string | null;
+  /**
+   * Arc only. The escrow lock the payout opened, and whether the seller has taken it.
+   *
+   * A payout puts the money in `DvpEscrow` claimable by the seller alone for 24 hours; it
+   * does not put it in the seller's wallet. Reporting a settled cash leg without saying that
+   * would be reporting a payment that has not happened yet.
+   */
+  lock: CashLegLock | null;
+}
+
+/** The Arc escrow lock behind a vault payout. */
+export interface CashLegLock {
+  lockId: string;
+  /** `locked` until the seller claims, then `claimed`. `refunded` if it timed out. */
+  status: string;
+  /** The preimage that releases it. Public the moment the seller claims — not a credential. */
+  secret: string;
+  /** Unix seconds. Claiming is permitted strictly before this. */
+  claimableUntil: number | null;
+  beneficiary: string | null;
   explorerUrl: string | null;
 }
 
@@ -178,7 +236,44 @@ export interface ReclaimedTrade {
   releasedMinor: string;
 }
 
+/**
+ * Which rail a trade will settle on, decided before anything is armed.
+ *
+ * `reason` is carried because "this bid is not escrowed" and "this deployment has no vault"
+ * are different facts that produce the same rail, and a demo that cannot tell them apart
+ * cannot tell whether the Arc path is broken or simply not in use.
+ */
+export interface RailChoice {
+  rail: CashRail;
+  reason: string;
+  /** USDC minor units the vault holds for this mandate. Null when it could not be asked. */
+  depositedUsdcMinor: bigint | null;
+  /** USDC minor units this trade would draw. */
+  priceUsdcMinor: bigint;
+}
+
 export interface SettlementService {
+  /**
+   * Which rail this trade settles on.
+   *
+   * Arc when the mandate's escrowed capital covers the price and the seller has an address to
+   * be paid at; x402 otherwise. Asked once, before arming, because the answer decides what
+   * `POST /v1/trades` even returns — a challenge to sign, or a settled trade.
+   */
+  chooseRail(input: {
+    mandateId: string;
+    proceedsMinor: bigint;
+    currency: string;
+    sellerArcAddress: string | null;
+  }): Promise<RailChoice>;
+  /**
+   * Settle out of the buyer's escrowed capital on Arc. One call, both legs.
+   *
+   * There is no challenge half because there is nothing for the buyer to sign: they escrowed
+   * the capital and wrote the terms, and an invoice meeting those terms is a trade they have
+   * already agreed to. A second consent would make the standing bid not standing.
+   */
+  settleFromVault(intent: DvpIntent): Promise<SettlementResult>;
   prepare(intent: DvpIntent): Promise<DvpPreparation>;
   execute(input: {
     tradeId: string;
@@ -208,6 +303,30 @@ export interface SettlementService {
  * so the two cannot disagree about when the challenge dies.
  */
 export const CHALLENGE_WINDOW_SECONDS = 180;
+
+/**
+ * The Arc rail's (network, scheme) pair, in the same shape the x402 rail records.
+ *
+ * `arc:testnet` is CAIP-2 style with a colon, matching `hedera:testnet` — the web's chain
+ * reconciler reads the colon form on both rails, so a hyphen here would render an Arc trade
+ * as whatever the fallback is.
+ *
+ * The scheme is not `x402`, because this is not an x402 payment: no challenge is issued and
+ * nothing is signed per trade. Calling it x402 would make the receipt claim a protocol that
+ * never ran.
+ */
+export const ARC_NETWORK = 'arc:testnet';
+export const ARC_SCHEME = 'vault-payout';
+
+/**
+ * The preimage a seller needs to take their money.
+ *
+ * 32 bytes from the platform CSPRNG, because `DvpEscrow` hashes exactly `bytes32` and
+ * `keccak256(abi.encodePacked(bytes32))` is the raw 32 bytes. Random rather than derived from
+ * the trade id: a derivation is computable by anyone who learns it, and until the seller
+ * claims, this is the only thing between an open lock and the money.
+ */
+const randomSecret = (): `0x${string}` => `0x${randomBytes(32).toString('hex')}`;
 
 /**
  * A receivable paid within this many days of the due DATE still counts as on time.
@@ -294,6 +413,77 @@ export const buildTradeChallenge = (input: {
 
 export const settlementService: SettlementService = {
   /**
+   * Ask the vault, then decide.
+   *
+   * One chain read, on the arming path only. `priceBook` must never do this — it prices the
+   * whole book in one pass and a read per row is the N+1 that design exists to avoid — but a
+   * trade about to be armed is a single mandate, and the answer changes what the caller gets
+   * back rather than merely decorating it.
+   *
+   * An unreadable vault chooses x402, deliberately. The alternative is refusing to trade
+   * because a second rail was unavailable, and the first rail is right there and works.
+   */
+  async chooseRail({ mandateId, proceedsMinor, currency, sellerArcAddress }) {
+    const escrow = getArcEscrow();
+    const priceUsdcMinor = escrow.requiredFor(proceedsMinor, currency);
+
+    if (!escrow.enabled) {
+      return {
+        rail: 'x402',
+        reason: 'No Arc vault is configured on this deployment, so no bid is escrowed.',
+        depositedUsdcMinor: null,
+        priceUsdcMinor,
+      };
+    }
+
+    /*
+     * Checked before the balance, because `registerMatch` binds this address permanently and
+     * the vault will happily bind one nobody controls. A seller with no address on file is a
+     * seller who cannot be paid on Arc, which is a reason to use the other rail rather than
+     * a reason to open a lock into the void.
+     */
+    if (sellerArcAddress === null || sellerArcAddress === '') {
+      return {
+        rail: 'x402',
+        reason: 'The seller has no Arc address on file, so a payout would have no payee.',
+        depositedUsdcMinor: null,
+        priceUsdcMinor,
+      };
+    }
+
+    let deposited: bigint;
+    try {
+      deposited = await escrow.depositedFor(mandateId);
+    } catch (err) {
+      rootLogger.warn('could not read the Arc vault; settling over x402', { mandateId, err });
+      return {
+        rail: 'x402',
+        reason: 'The Arc vault could not be read, so this trade settles on the rail that can.',
+        depositedUsdcMinor: null,
+        priceUsdcMinor,
+      };
+    }
+
+    if (deposited < priceUsdcMinor) {
+      return {
+        rail: 'x402',
+        reason:
+          `This bid holds ${deposited} USDC minor units on Arc and this trade needs ` +
+          `${priceUsdcMinor}, so the buyer pays per trade instead.`,
+        depositedUsdcMinor: deposited,
+        priceUsdcMinor,
+      };
+    }
+
+    return {
+      rail: 'arc-vault',
+      reason: 'The buyer escrowed this capital on Arc before the invoice existed.',
+      depositedUsdcMinor: deposited,
+      priceUsdcMinor,
+    };
+  },
+
+  /**
    * Arm both legs. Nothing moves.
    *
    * The ATS hold is placed first because it is the leg that can fail for a reason worth
@@ -302,6 +492,210 @@ export const settlementService: SettlementService = {
    * the 402 challenge is built for the proceeds and the hold id is written onto the trade
    * so `unwind` can find it after a restart.
    */
+  /**
+   * Both legs, one call, out of capital the buyer posted before the invoice existed.
+   *
+   * The order is the whole design, and it is chosen by which way a failure hurts:
+   *
+   *   1. hold the seller's position (nothing moves)
+   *   2. `registerMatch` — bind payee, price and mandate ON CHAIN, before delivery
+   *   3. `executePayout` — capital leaves the vault into `DvpEscrow`, locked for the seller
+   *   4. execute the hold — the paper moves to the buyer
+   *   5. hand the seller the preimage, which is what lets them take the cash
+   *
+   * **Cash commits before the paper moves.** Reverse 3 and 4 and a failed payout leaves the
+   * buyer holding paper nobody paid for, which is unrecoverable. This way a failed step 4
+   * leaves money locked in an escrow that returns it to the mandate after 24 hours, and the
+   * seller still has their position — so the bad case costs a day, not a receivable.
+   *
+   * Step 2 is not bookkeeping. `registerMatch` is what lets a seller read `payoutOf(matchId)`
+   * and see the price and the payee fixed and public **before** parting with the paper. It is
+   * also one-shot and uncorrectable, which is why every write here reads first.
+   */
+  async settleFromVault(intent) {
+    const store = getStore();
+    const ats = getAtsAdapter();
+    const escrow = getArcEscrow();
+
+    if (intent.sellerArcAddress === null || intent.sellerArcAddress === '') {
+      throw conflict(
+        'conflict',
+        'This seller has no Arc address on file, so a payout would have no payee. ' +
+          'The trade cannot settle out of the vault.',
+      );
+    }
+
+    const sellerEvmAddress = accountIdToEvmAddress(intent.sellerHederaAccountId);
+    const priceUsdcMinor = escrow.requiredFor(intent.proceedsMinor, intent.currency);
+
+    /*
+     * Read before the hold, because a hold moves units out of the free balance and the same
+     * call afterwards answers a smaller number. Identical to `prepare`; the asset leg does
+     * not care which rail pays for it.
+     */
+    const position = await ats.balanceOf({
+      securityId: intent.securityId,
+      ownerEvmAddress: sellerEvmAddress,
+    });
+    if (position <= 0n) {
+      throw conflict(
+        'conflict',
+        `The seller holds no units of ${intent.securityId}, so there is no position to ` +
+          'sell. Either the instrument has not been issued to them yet, or it has ' +
+          'already been sold.',
+      );
+    }
+
+    const hold = await ats.createHold({
+      securityId: intent.securityId,
+      holderEvmAddress: sellerEvmAddress,
+      toEvmAddress: accountIdToEvmAddress(intent.buyerHederaAccountId),
+      escrowEvmAddress: operatorEvmAddress(getConfig().env.HEDERA_OPERATOR_KEY),
+      units: position,
+      expiresAt: new Date(Date.now() + CHALLENGE_WINDOW_SECONDS * 1000),
+    });
+
+    await store.updateTrade(intent.tradeId, {
+      status: 'awaiting_payment',
+      holdId: hold.holdId,
+      unitsMinor: position,
+      assetTxId: hold.transactionId,
+      assetConsensusAt: new Date(hold.consensusAt),
+      cashRail: 'arc-vault',
+      cashNetwork: ARC_NETWORK,
+      cashScheme: ARC_SCHEME,
+      cashAsset: getConfig().chain.arc.usdcAddress,
+      cashAmountMinor: priceUsdcMinor,
+    });
+
+    /*
+     * Bound already? Then a previous attempt got this far and died. `registerMatch` cannot be
+     * called twice — it reverts `MatchAlreadyRegistered` even from the attester with identical
+     * arguments — so asking is the only way to tell a retry from a first attempt without
+     * spending a transaction to find out.
+     */
+    const existing = await escrow.payoutFor(intent.tradeId);
+    if (existing === null) {
+      await escrow.registerMatch({
+        tradeId: intent.tradeId,
+        mandateUuid: intent.mandateId,
+        seller: intent.sellerArcAddress,
+        priceUsdcMinor,
+      });
+    } else if (existing.executed) {
+      /*
+       * The capital already left the vault for this match and can never leave again —
+       * `reclaimPayout` returns it to the buyer but leaves `executed` true forever. Refusing
+       * loudly is the only honest answer; arming a second payout would revert, and pretending
+       * it settled would report a payment that cannot happen.
+       */
+      throw conflict(
+        'conflict',
+        `Trade ${intent.tradeId} has already drawn its payout from the vault. If the seller ` +
+          'never claimed it, the capital returns to the buyer when the lock expires and this ' +
+          'receivable needs a new sale rather than a retry of this one.',
+      );
+    }
+
+    /*
+     * The preimage. Random rather than derived: a derivation would make every secret
+     * computable by anyone who learned it, and this one is the only thing standing between an
+     * open lock and the seller's money until the moment they claim.
+     */
+    const secret = randomSecret();
+    const secretHash = keccak256(secret);
+    await store.updateTrade(intent.tradeId, { arcSecret: secret });
+
+    const payout = await escrow.executePayout({
+      tradeId: intent.tradeId,
+      attempt: 0,
+      secretHash,
+    });
+    await store.updateTrade(intent.tradeId, {
+      arcLockId: payout.lockId,
+      cashTransaction: payout.transactionHash,
+      cashPayer: intent.buyerArcAddress,
+    });
+
+    const cashLeg: CashLegReceipt = {
+      chain: 'arc',
+      rail: 'arc-vault',
+      scheme: ARC_SCHEME,
+      state: 'settled',
+      asset: getConfig().chain.arc.usdcAddress,
+      amountMinor: intent.proceedsMinor.toString(10),
+      settledAmountMinor: priceUsdcMinor.toString(10),
+      transaction: payout.transactionHash,
+      payer: intent.buyerArcAddress,
+      explorerUrl: explorer.arcTx(payout.transactionHash),
+      lock: {
+        lockId: payout.lockId,
+        status: 'locked',
+        secret,
+        claimableUntil: null,
+        beneficiary: intent.sellerArcAddress,
+        explorerUrl: explorer.arcTx(payout.transactionHash),
+      },
+    };
+
+    let assetLeg: AssetLegReceipt;
+    try {
+      const executed = await ats.executeHold({
+        securityId: intent.securityId,
+        holderEvmAddress: sellerEvmAddress,
+        toEvmAddress: accountIdToEvmAddress(intent.buyerHederaAccountId),
+        holdId: hold.holdId,
+        units: position,
+      });
+      assetLeg = {
+        chain: 'hedera',
+        state: 'settled',
+        holdId: hold.holdId,
+        unitsMinor: position.toString(10),
+        transactionId: executed.transactionId,
+        consensusAt: executed.consensusAt,
+        explorerUrl: explorer.hederaTx(executed.transactionId),
+      };
+    } catch (err) {
+      await store.updateTrade(intent.tradeId, { status: 'failed' });
+      /*
+       * Loud, but not the same emergency as the x402 half-settled case. There the buyer has
+       * paid and cannot be unpaid. Here the money is in an escrow the vault gets back after
+       * the lock expires, and the seller keeps their position — so this is recoverable by
+       * waiting, and the secret is deliberately never handed over.
+       */
+      rootLogger.error('Arc payout locked but the asset leg did not execute', {
+        tradeId: intent.tradeId,
+        lockId: payout.lockId,
+        payoutTransaction: payout.transactionHash,
+        err,
+      });
+      throw internalError(
+        `The payout was locked on Arc but the security did not transfer. Trade ` +
+          `${intent.tradeId} is being reconciled; the capital returns to the buyer when the ` +
+          'lock expires and the seller keeps their position. Quote this id.',
+      );
+    }
+
+    const settledAt = new Date();
+    await store.updateTrade(intent.tradeId, {
+      status: 'settled',
+      assetTxId: assetLeg.transactionId,
+      assetConsensusAt: assetLeg.consensusAt === null ? null : new Date(assetLeg.consensusAt),
+      settledAt,
+    });
+    await store.setQuoteStatus(intent.quoteId, 'accepted');
+    await store.updateInvoice(intent.invoiceId, { status: 'sold' });
+
+    rootLogger.info('trade settled out of the Arc vault', {
+      tradeId: intent.tradeId,
+      lockId: payout.lockId,
+      priceUsdcMinor: priceUsdcMinor.toString(10),
+    });
+
+    return { tradeId: intent.tradeId, assetLeg, cashLeg, settledAt: settledAt.toISOString() };
+  },
+
   async prepare(intent) {
     const store = getStore();
     const ats = getAtsAdapter();
@@ -449,15 +843,24 @@ export const settlementService: SettlementService = {
 
     const cashLeg: CashLegReceipt = {
       chain: input.requirements.network.startsWith('hedera') ? 'hedera' : 'arc',
-      scheme: 'x402',
+      rail: 'x402',
+      scheme: input.requirements.scheme,
       state: 'settled',
       asset: input.requirements.asset,
       amountMinor: trade.proceedsMinor.toString(10),
+      /*
+       * `requirements.amount` is the figure the payer actually signed over, in the settlement
+       * asset's smallest unit. It is the only number on this receipt a reader can check
+       * against the transaction, and until now nothing carried it.
+       */
+      settledAmountMinor: input.requirements.amount,
       transaction: settlement.transaction ?? null,
       payer: settlement.payer ?? verification.payer ?? null,
       explorerUrl: settlement.transaction
         ? explorerFor(input.requirements.network, settlement.transaction)
         : null,
+      // x402 pays the seller directly; there is no escrow lock standing between them and it.
+      lock: null,
     };
 
     const invoice = await store.getInvoice(trade.invoiceId);
@@ -505,9 +908,11 @@ export const settlementService: SettlementService = {
       status: 'settled',
       assetTxId: assetLeg.transactionId,
       assetConsensusAt: assetLeg.consensusAt === null ? null : new Date(assetLeg.consensusAt),
+      cashRail: 'x402',
       cashTransaction: cashLeg.transaction,
       cashPayer: cashLeg.payer,
       cashAsset: cashLeg.asset,
+      cashAmountMinor: BigInt(input.requirements.amount),
       cashNetwork: input.requirements.network,
       cashScheme: input.requirements.scheme,
       settledAt,
@@ -893,16 +1298,25 @@ export const settlementService: SettlementService = {
        */
       cashLeg: {
         chain: challenge.accepted.network.startsWith('hedera') ? 'hedera' : 'arc',
+        /*
+         * Maturity is on Hedera whichever rail bought the paper. The debtor pays into the
+         * venue's collection account off chain and a Scheduled Transaction pays the holder in
+         * HBAR — none of which involves the Arc vault, whose capital was spent at settlement.
+         * So this is the x402 rail's chain and asset even for a trade that settled on Arc.
+         */
+        rail: 'x402',
         scheme: 'x402',
         state: payout?.executed === true ? 'settled' : 'pending',
         asset: challenge.accepted.asset,
         amountMinor: invoice.faceValue.toString(10),
+        settledAmountMinor: payoutAmount.toString(10),
         transaction: payout?.executedTransactionId ?? null,
         payer: payout?.executed === true ? payout.payerAccountId : null,
         explorerUrl:
           payout?.executedTransactionId === undefined || payout?.executedTransactionId === null
             ? null
             : explorer.hederaTx(payout.executedTransactionId),
+        lock: null,
       },
       payout,
       payoutError,

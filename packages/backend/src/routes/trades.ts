@@ -211,32 +211,74 @@ async function prepareTrade(
     complianceCheckedAt: new Date(compliance.checkedAt),
   });
 
-  let prepared;
-  try {
-    prepared = await settlementService.prepare({
-      tradeId: trade.id,
-      invoiceId: invoice.id,
-      mandateId: mandate.id,
-      securityId: invoice.securityId,
-      sellerHederaAccountId: seller.hederaAccountId ?? '',
-      buyerHederaAccountId: buyer.hederaAccountId ?? '',
-      buyerArcAddress: (buyer.arcAddress ?? '0x') as `0x${string}`,
-      /*
-       * No unit count. `prepare` reads the seller's whole position off the instrument with
-       * `balanceOf` — partial sales are cut-list item 4, so this is all-or-nothing, and
-       * "all" is whatever the seller actually holds rather than a number asserted here.
-       */
-      proceedsMinor: live.quote.proceeds,
-      faceValue: invoice.faceValue,
-      currency: invoice.currency,
-    });
-  } catch (err) {
-    // Arming failed, so nothing is owed. Give the mandate its capacity back rather than
-    // leaving a bid quoting money it cannot spend.
-    await store.release(mandate.id, live.quote.proceeds);
+  const intent = {
+    tradeId: trade.id,
+    invoiceId: invoice.id,
+    mandateId: mandate.id,
+    quoteId: accepted.id,
+    securityId: invoice.securityId,
+    sellerHederaAccountId: seller.hederaAccountId ?? '',
+    sellerArcAddress: seller.arcAddress,
+    buyerHederaAccountId: buyer.hederaAccountId ?? '',
+    buyerArcAddress: (buyer.arcAddress ?? '0x') as `0x${string}`,
+    /*
+     * No unit count. Both rails read the seller's whole position off the instrument with
+     * `balanceOf` — partial sales are cut-list item 4, so this is all-or-nothing, and
+     * "all" is whatever the seller actually holds rather than a number asserted here.
+     */
+    proceedsMinor: live.quote.proceeds,
+    faceValue: invoice.faceValue,
+    currency: invoice.currency,
+  };
+
+  /*
+   * Both failure paths give the capital back. Arming failed means nothing is owed, and a bid
+   * left quoting money it cannot spend is worse than a refused trade.
+   */
+  const committed = live.quote.proceeds;
+  const abandon = async (err: unknown): Promise<never> => {
+    await store.release(mandate.id, committed);
     await store.updateTrade(trade.id, { status: 'failed' });
     throw err;
+  };
+
+  /*
+   * Which rail, decided here because it decides what this request even returns.
+   *
+   * A funded mandate settles out of its escrow on Arc and comes back **200, already settled**:
+   * the buyer escrowed the capital and wrote the terms, so an invoice meeting those terms is
+   * a trade they have already agreed to, and asking them to sign again would make a standing
+   * bid not standing. An unfunded one comes back 402 with a challenge to sign, as before.
+   *
+   * The status code is therefore the honest signal of which rail ran, and the body says so in
+   * words as well — `cashLeg.rail` — because a reader should not have to infer a rail from an
+   * HTTP status any more than from a string prefix.
+   */
+  const railChoice = await settlementService.chooseRail({
+    mandateId: mandate.id,
+    proceedsMinor: live.quote.proceeds,
+    currency: invoice.currency,
+    sellerArcAddress: seller.arcAddress,
+  });
+
+  if (railChoice.rail === 'arc-vault') {
+    const settled = await settlementService.settleFromVault(intent).catch(abandon);
+    return c.json(
+      {
+        trade: wireTrade(await refresh(trade.id)),
+        quote: wireQuote(live.quote),
+        assetLeg: settled.assetLeg,
+        cashLeg: settled.cashLeg,
+        compliance,
+        /** Why this settled without a challenge, rather than leaving the reader to guess. */
+        rail: { chosen: railChoice.rail, reason: railChoice.reason },
+        settledAt: settled.settledAt,
+      },
+      200,
+    );
   }
+
+  const prepared = await settlementService.prepare(intent).catch(abandon);
 
   /*
    * The header carries a whole `PaymentRequired`, not a bare requirements object.
@@ -265,6 +307,8 @@ async function prepareTrade(
       accepts: [prepared.requirements],
       resource: prepared.resourceInfo,
       expiresAt: prepared.expiresAt,
+      /** Why a challenge was issued rather than the trade settling out of an escrow. */
+      rail: { chosen: railChoice.rail, reason: railChoice.reason },
       /** Repeat this request with the signed payload in this header. */
       signatureHeader: X402_HEADERS.signature,
     },
