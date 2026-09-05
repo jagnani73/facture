@@ -146,7 +146,17 @@ const BUYERS: readonly BuyerSpec[] = [
     name: 'Harrow Point',
     email: 'ops@harrowpoint.example',
     hederaAccountId: '0.0.6098467',
-    arcAddress: '0x77Ba0e4c9351Df82a60C1e5B4739Ac06d81F2E35',
+    /*
+     * A real wallet, and the only one in this list that is. It is the Circle
+     * developer-controlled wallet the agent operates, which is what makes Harrow Point the
+     * one seeded desk whose mandate can actually be escrowed on Arc.
+     *
+     * The rest of these addresses are invented, and that is survivable only while nothing
+     * pays them. `MandateVault.executeRelease` returns capital to the address registered
+     * against the mandate, so an invented one is a release nobody can receive — which is why
+     * this changed the moment a mandate was registered on chain for real.
+     */
+    arcAddress: '0x1c755e95cb11e5d5af498bb0ea595b56e1adb035',
     agent: { label: 'Deep value, long tenor, policy-capped', capsMinor: '25000000' },
   },
 ];

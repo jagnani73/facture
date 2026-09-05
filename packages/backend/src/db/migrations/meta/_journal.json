@@ -29,6 +29,13 @@
       "when": 1788346138357,
       "tag": "0003_regulation_is_reg_s",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1788367825910,
+      "tag": "0004_harrow_point_real_arc_wallet",
+      "breakpoints": true
     }
   ]
 }
