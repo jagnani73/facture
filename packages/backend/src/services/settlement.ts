@@ -30,6 +30,7 @@ import { getStore } from '../db/store.js';
 import { badRequest, conflict, internalError, notFound, upstreamUnavailable } from '../errors.js';
 import { rootLogger } from '../logger.js';
 import { getArcEscrow } from './arc.js';
+import { publishMatch } from './hcs.js';
 import { accountIdToEvmAddress, getAtsAdapter, operatorEvmAddress } from './ats.js';
 import type { SettlementOutcome } from './rating.js';
 import { ratingService } from './rating.js';
@@ -53,6 +54,9 @@ export interface DvpIntent {
   mandateId: string;
   /** The accepted quote. Marked taken once both legs are done, on either rail. */
   quoteId: string;
+  /** Carried so a settled match can be committed to consensus without re-reading the row. */
+  buyerId: string;
+  sellerId: string;
   /** ATS security for this invoice, native id `0.0.x`. */
   securityId: string;
   sellerHederaAccountId: string;
@@ -426,6 +430,48 @@ export const buildTradeChallenge = (input: {
     maxTimeoutSeconds: CHALLENGE_WINDOW_SECONDS,
   });
 
+/**
+ * Commit a settled match to the topic, and write back where it landed.
+ *
+ * `trades.hcs_topic_id` and `hcs_sequence_number` have been on this table since the first
+ * migration and the proof view has rendered a link off them the whole time — **and nothing
+ * ever wrote them.** Only `seed.ts` did, so on every trade this venue actually settled the
+ * block was null. This is the writer.
+ *
+ * It runs after both legs are done and it never throws: the sale has already happened, both
+ * legs are on chain and checkable there, so an unavailable topic costs the convenience of a
+ * consensus coordinate rather than the trade.
+ */
+async function commitMatch(input: {
+  tradeId: string;
+  invoiceId: string;
+  mandateId: string;
+  buyerId: string;
+  sellerId: string;
+  faceValue: bigint;
+  proceedsMinor: bigint;
+  rail: CashRail;
+  assetTransactionId: string | null;
+}): Promise<void> {
+  const published = await publishMatch({
+    tradeId: input.tradeId,
+    invoiceId: input.invoiceId,
+    mandateId: input.mandateId,
+    buyerId: input.buyerId,
+    sellerId: input.sellerId,
+    faceValue: input.faceValue.toString(10),
+    proceedsMinor: input.proceedsMinor.toString(10),
+    rail: input.rail,
+    assetTransactionId: input.assetTransactionId ?? '',
+  });
+  if (published === null) return;
+
+  await getStore().updateTrade(input.tradeId, {
+    hcsTopicId: published.topicId,
+    hcsSequenceNumber: published.sequenceNumber,
+  });
+}
+
 export const settlementService: SettlementService = {
   /**
    * Ask the vault, then decide.
@@ -752,6 +798,18 @@ export const settlementService: SettlementService = {
       settledAt,
     });
 
+    await commitMatch({
+      tradeId: intent.tradeId,
+      invoiceId: intent.invoiceId,
+      mandateId: intent.mandateId,
+      buyerId: intent.buyerId,
+      sellerId: intent.sellerId,
+      faceValue: intent.faceValue,
+      proceedsMinor: intent.proceedsMinor,
+      rail: 'arc-vault',
+      assetTransactionId: assetLeg.transactionId,
+    });
+
     rootLogger.info('trade settled out of the Arc vault', {
       tradeId: intent.tradeId,
       lockId: payout.lockId,
@@ -992,6 +1050,17 @@ export const settlementService: SettlementService = {
     });
     await store.setQuoteStatus(trade.quoteId, 'accepted');
     await store.updateInvoice(trade.invoiceId, { status: 'sold' });
+    await commitMatch({
+      tradeId: trade.id,
+      invoiceId: trade.invoiceId,
+      mandateId: trade.mandateId,
+      buyerId: trade.buyerId,
+      sellerId: trade.sellerId,
+      faceValue: trade.faceValue,
+      proceedsMinor: trade.proceedsMinor,
+      rail: 'x402',
+      assetTransactionId: assetLeg.transactionId,
+    });
 
     return {
       tradeId: trade.id,

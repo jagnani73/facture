@@ -216,6 +216,8 @@ async function prepareTrade(
     invoiceId: invoice.id,
     mandateId: mandate.id,
     quoteId: accepted.id,
+    buyerId: buyer.id,
+    sellerId: seller.id,
     securityId: invoice.securityId,
     sellerHederaAccountId: seller.hederaAccountId ?? '',
     sellerArcAddress: seller.arcAddress,

@@ -56,6 +56,33 @@ export interface RefusalCommitment {
   tenorDaysAtRefusal: number;
 }
 
+/**
+ * The fields a settled trade is committed to, in the order they are hashed.
+ *
+ * `trades.hcs_topic_id` and `hcs_sequence_number` have existed since the first migration and
+ * the proof view has rendered a link off them the whole time — **and nothing ever wrote
+ * them.** Only the seed did, so on every live trade that block was null. This is what fills
+ * it: the venue's statement that this match happened on these terms, timestamped by
+ * consensus rather than by the venue's own clock.
+ *
+ * Deliberately not the same shape as a refusal. A refusal is about a mandate that said no; a
+ * match is about the one that said yes, and it commits to the terms the money moved on.
+ */
+export interface MatchCommitment {
+  tradeId: string;
+  invoiceId: string;
+  mandateId: string;
+  buyerId: string;
+  sellerId: string;
+  /** Invoice currency minor units. */
+  faceValue: string;
+  proceedsMinor: string;
+  /** Which rail carried the cash: `x402` or `arc-vault`. */
+  rail: string;
+  /** The asset leg's Hedera transaction, which is what a reader checks the digest against. */
+  assetTransactionId: string;
+}
+
 export interface PublishedRefusal {
   topicId: string;
   sequenceNumber: bigint;
@@ -66,6 +93,8 @@ export interface HcsPublisher {
   /** Whether a topic is configured. False means refusals are recorded but not committed. */
   readonly enabled: boolean;
   publish(commitment: RefusalCommitment): Promise<PublishedRefusal>;
+  /** The same topic, a different kind of message. See {@link MatchCommitment}. */
+  publishMatch(commitment: MatchCommitment): Promise<PublishedRefusal>;
 }
 
 export interface HcsPublisherConfig {
@@ -112,6 +141,48 @@ export function refusalMessage(c: RefusalCommitment): string {
 }
 
 /**
+ * The canonical bytes a match digest is taken over.
+ *
+ * Its own function and its own field order, under its own `kind`. Sharing a canonical form
+ * with refusals would mean one reordering silently invalidated both, and the two are
+ * published for different reasons and checked by different people.
+ */
+export function canonicaliseMatch(c: MatchCommitment): string {
+  return JSON.stringify([
+    c.tradeId,
+    c.invoiceId,
+    c.mandateId,
+    c.buyerId,
+    c.sellerId,
+    c.faceValue,
+    c.proceedsMinor,
+    c.rail,
+    c.assetTransactionId,
+  ]);
+}
+
+export function matchDigest(c: MatchCommitment): string {
+  return createHash('sha256').update(canonicaliseMatch(c), 'utf8').digest('hex');
+}
+
+/**
+ * What goes on the topic for a match.
+ *
+ * A digest and a trade id, exactly as a refusal carries a digest and a receipt id. The terms
+ * themselves stay off the topic: a topic is public, and a buyer's price and a seller's
+ * customer are the same two facts the refusal path already refuses to broadcast. Whoever
+ * holds the trade can recompute the digest; nobody else learns anything from it.
+ */
+export function matchMessage(c: MatchCommitment): string {
+  return JSON.stringify({
+    v: 1,
+    kind: 'facture.match',
+    tradeId: c.tradeId,
+    digest: matchDigest(c),
+  });
+}
+
+/**
  * No topic configured.
  *
  * Refuses naming the variable, in the same shape as issuance with no ATS factory. The
@@ -121,6 +192,13 @@ export function refusalMessage(c: RefusalCommitment): string {
 export function createDisabledHcsPublisher(): HcsPublisher {
   return {
     enabled: false,
+    publishMatch: () =>
+      Promise.reject(
+        badRequest(
+          'Committing a match needs a topic. HCS_REFUSAL_TOPIC_ID is not set, so trades are ' +
+            'recorded but not committed to consensus on this deployment.',
+        ),
+      ),
     publish: () =>
       Promise.reject(
         badRequest(
@@ -137,45 +215,67 @@ export function createHcsPublisher(config: HcsPublisherConfig): HcsPublisher {
   const topicId = config.topicId;
   const log = (config.logger ?? rootLogger).child({ svc: 'hcs' });
 
+  /**
+   * One submit, whatever the message is about.
+   *
+   * Both kinds go to the same topic and differ only in their `kind` field and their digest,
+   * so the transaction is shared and the two callers below decide what is being said. Two
+   * copies of this would be two places for the sequence-number handling to drift.
+   */
+  const submit = async (
+    message: string,
+    context: Record<string, unknown>,
+  ): Promise<PublishedRefusal> => {
+    const { AccountId, Client, PrivateKey, TopicId, TopicMessageSubmitTransaction } =
+      await import('@hiero-ledger/sdk');
+
+    const client = Client.forName(config.network).setOperator(
+      AccountId.fromString(config.operatorId),
+      PrivateKey.fromStringECDSA(config.operatorKey),
+    );
+
+    try {
+      const response = await new TopicMessageSubmitTransaction()
+        .setTopicId(TopicId.fromString(topicId))
+        .setMessage(message)
+        .execute(client);
+
+      /*
+       * The receipt is what carries the sequence number, and the sequence number is the
+       * whole point — it is the coordinate a party is given so they can find their own
+       * commitment without reading the entire topic.
+       */
+      const receipt = await response.getReceipt(client);
+      const record = await response.getRecord(client);
+      const sequenceNumber = BigInt(receipt.topicSequenceNumber?.toString() ?? '0');
+
+      log.info('committed to consensus', {
+        ...context,
+        topicId,
+        sequenceNumber: sequenceNumber.toString(),
+      });
+
+      return { topicId, sequenceNumber, consensusAt: record.consensusTimestamp.toDate() };
+    } finally {
+      client.close();
+    }
+  };
+
   return {
     enabled: true,
 
     async publish(commitment) {
-      const { AccountId, Client, PrivateKey, TopicId, TopicMessageSubmitTransaction } =
-        await import('@hiero-ledger/sdk');
+      return submit(refusalMessage(commitment), {
+        kind: 'refusal',
+        receiptId: commitment.receiptId,
+      });
+    },
 
-      const client = Client.forName(config.network).setOperator(
-        AccountId.fromString(config.operatorId),
-        PrivateKey.fromStringECDSA(config.operatorKey),
-      );
-
-      try {
-        const response = await new TopicMessageSubmitTransaction()
-          .setTopicId(TopicId.fromString(topicId))
-          .setMessage(refusalMessage(commitment))
-          .execute(client);
-
-        /*
-         * The receipt is what carries the sequence number, and the sequence number is the
-         * whole point — it is the coordinate a refused party is given so they can find their
-         * own commitment without reading the entire topic.
-         */
-        const receipt = await response.getReceipt(client);
-        const record = await response.getRecord(client);
-        const sequenceNumber = BigInt(receipt.topicSequenceNumber?.toString() ?? '0');
-
-        // The coordinate a refused party is handed. Worth a line: it is the only way to find
-        // one commitment again without reading the whole topic.
-        log.info('refusal committed to consensus', {
-          receiptId: commitment.receiptId,
-          topicId,
-          sequenceNumber: sequenceNumber.toString(),
-        });
-
-        return { topicId, sequenceNumber, consensusAt: record.consensusTimestamp.toDate() };
-      } finally {
-        client.close();
-      }
+    async publishMatch(commitment) {
+      return submit(matchMessage(commitment), {
+        kind: 'match',
+        tradeId: commitment.tradeId,
+      });
     },
   };
 }
@@ -195,6 +295,37 @@ export function setHcsPublisher(next: HcsPublisher | undefined): void {
 export function getHcsPublisher(): HcsPublisher {
   if (!publisher) throw new Error('HCS publisher accessed before initHcsPublisher().');
   return publisher;
+}
+
+/**
+ * Commit a settled match, and never let it cost the trade.
+ *
+ * The same rule `publishRefusals` follows, for the same reason: a topic that is down costs
+ * the checkable copy, not the thing itself. A settled trade whose commitment failed is still
+ * a settled trade — both legs are on chain and both are checkable there — so throwing here
+ * would turn an unavailable side service into a failed sale, and the sale has already
+ * happened by the time this runs.
+ *
+ * Returns null when there is nothing to record, so the caller writes no coordinates rather
+ * than writing empty ones.
+ */
+export async function publishMatch(
+  commitment: MatchCommitment,
+  logger: Logger = rootLogger,
+): Promise<PublishedRefusal | null> {
+  const hcs = getHcsPublisher();
+  if (!hcs.enabled) return null;
+
+  try {
+    return await hcs.publishMatch(commitment);
+  } catch (err) {
+    // Deliberately not rethrown. See the note above.
+    logger.child({ svc: 'hcs' }).warn('match not committed to consensus', {
+      tradeId: commitment.tradeId,
+      err,
+    });
+    return null;
+  }
 }
 
 /**

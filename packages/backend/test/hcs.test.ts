@@ -17,12 +17,16 @@ import { MARKET_NOW_ISO } from '../src/db/seed.js';
 import { call, createHarness, type Harness } from './helpers.js';
 import {
   canonicalise,
+  canonicaliseMatch,
   createDisabledHcsPublisher,
+  matchDigest,
+  matchMessage,
   publishRefusals,
   refusalDigest,
   refusalMessage,
   setHcsPublisher,
   type HcsPublisher,
+  type MatchCommitment,
   type RefusalCommitment,
 } from '../src/services/hcs.js';
 
@@ -36,6 +40,86 @@ const RECEIPT: RefusalCommitment = {
   ratingAtRefusal: 'B',
   tenorDaysAtRefusal: 48,
 };
+
+/**
+ * A settled match, committed to the same topic under its own kind.
+ *
+ * `trades.hcs_topic_id` and `hcs_sequence_number` existed from the first migration and the
+ * proof view rendered a link off them the whole time, while **nothing wrote them** — so on
+ * every trade the venue actually settled, that block was null.
+ */
+const MATCH: MatchCommitment = {
+  tradeId: '3d129208-a99e-4667-bc4a-1d7bc5a537eb',
+  invoiceId: '11111111-2222-4333-8444-555555555555',
+  mandateId: '8b879d02-4593-4d66-82bf-52d4833401b6',
+  buyerId: 'f888dd62-6df0-5600-925e-06469ef0aef6',
+  sellerId: 'e37a8422-960d-5a77-9825-8964df79ed49',
+  faceValue: '6230000',
+  proceedsMinor: '6085000',
+  rail: 'arc-vault',
+  assetTransactionId: '0.0.10311549@1788345825.712636474',
+};
+
+describe('committing a match', () => {
+  /*
+   * Field order is a promise here for the same reason it is for a refusal: a digest anyone
+   * has been handed stops verifying the moment the order changes, and a test that recomputed
+   * the digest would agree with whatever the new code produced. Appending is the only safe
+   * change, and it still needs the version bumped.
+   */
+  it('pins the field order the digest is taken over', () => {
+    expect(canonicaliseMatch(MATCH)).toBe(
+      JSON.stringify([
+        MATCH.tradeId,
+        MATCH.invoiceId,
+        MATCH.mandateId,
+        MATCH.buyerId,
+        MATCH.sellerId,
+        MATCH.faceValue,
+        MATCH.proceedsMinor,
+        MATCH.rail,
+        MATCH.assetTransactionId,
+      ]),
+    );
+  });
+
+  it.each([
+    ['the rail', { rail: 'x402' }],
+    ['the price', { proceedsMinor: '6085001' }],
+    ['the face value', { faceValue: '6230001' }],
+    ['the buyer', { buyerId: '4c94a6a6-e8a2-59af-b244-b7f90c402a25' }],
+    ['the asset transaction', { assetTransactionId: '0.0.1@1.2' }],
+  ])('changes the digest when %s changes', (_label, patch) => {
+    expect(matchDigest({ ...MATCH, ...patch })).not.toBe(matchDigest(MATCH));
+  });
+
+  /*
+   * The terms stay off the topic. A topic is public, and a price and a customer are the same
+   * two facts the refusal path already refuses to broadcast — the difference being that here
+   * the venue is publishing about its own successful trade rather than someone's refusal, and
+   * the reasoning does not change with the outcome.
+   */
+  it('publishes a digest and a trade id, never the terms', () => {
+    const message = JSON.parse(matchMessage(MATCH)) as Record<string, unknown>;
+
+    expect(message).toEqual({
+      v: 1,
+      kind: 'facture.match',
+      tradeId: MATCH.tradeId,
+      digest: matchDigest(MATCH),
+    });
+    const raw = matchMessage(MATCH);
+    expect(raw).not.toContain(MATCH.proceedsMinor);
+    expect(raw).not.toContain(MATCH.invoiceId);
+    expect(raw).not.toContain(MATCH.buyerId);
+  });
+
+  /* A refusal and a match must never be mistaken for one another on a shared topic. */
+  it('is a different kind from a refusal', () => {
+    expect(JSON.parse(matchMessage(MATCH)).kind).toBe('facture.match');
+    expect(JSON.parse(refusalMessage(RECEIPT)).kind).toBe('facture.refusal');
+  });
+});
 
 describe('the commitment', () => {
   /*
@@ -121,6 +205,7 @@ describe('publishRefusals', () => {
 
   const workingTopic = (): HcsPublisher => ({
     enabled: true,
+    publishMatch: () => Promise.reject(new Error('not under test here')),
     publish: (c) =>
       Promise.resolve({
         topicId: '0.0.10342152',
@@ -158,6 +243,7 @@ describe('publishRefusals', () => {
   it('never throws when the topic refuses the message', async () => {
     setHcsPublisher({
       enabled: true,
+      publishMatch: () => Promise.reject(new Error('not under test here')),
       publish: () => Promise.reject(new Error('INVALID_TOPIC_ID')),
     });
 
@@ -203,6 +289,7 @@ describe('the receipt a funder reads', () => {
   it('attaches consensus coordinates to the receipts an arming produced', async () => {
     setHcsPublisher({
       enabled: true,
+      publishMatch: () => Promise.reject(new Error('not under test here')),
       publish: () =>
         Promise.resolve({
           topicId: '0.0.10342152',
