@@ -55,6 +55,42 @@ The size differences are the rename itself: `MandateBook` lost six bytes and
 Deploy order runs one way and never doubles back: Arc escrow, Arc vault, then the Hedera book
 which records the vault. Deploying both contracts cost 0.047 USDC.
 
+### USDC has crossed — 2026-09-03
+
+The Arc leg was deployed and idle from the first day. `MandateVault` now holds real capital
+against a real mandate, deposited by the buyer's own wallet.
+
+|                   |                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------------------------ |
+| mandate           | `8b879d02-4593-4d66-82bf-52d4833401b6`, Harrow Point                                                         |
+| vault key         | `uint256(keccak256(uuid))` = `15346442137576820289478969865486017349700696992123142042335952903215516347363` |
+| buyer registered  | `0x1C755e95CB11E5D5aF498bb0EA595b56e1adb035` — the Circle agent wallet                                       |
+| `registerMandate` | `0x86c198869e9ee8aa3ea8ef62eede563a5881b2fc8acba0b6c778f3fadfb3c08d`, 48,503 gas                             |
+| top-up            | `0x69d933f0691ab84e2db41c03caf9d645e021018e8afd51c5ace821dee487b4b6`                                         |
+| deposited         | **5,000,000 minor units — 5 USDC**                                                                           |
+
+Balances either side, read from the ERC-20 interface:
+
+| account                | before | after    |
+| ---------------------- | ------ | -------- |
+| vault `0x217256d0…`    | 0      | 5        |
+| buyer `0x1c755e95…`    | 6      | 0.996822 |
+| attester `0x46783EeC…` | 94.951 | 93.949   |
+
+The buyer was topped up 5 → 6 first, because Arc gas is USDC and the native and ERC-20 views
+are **one balance**: depositing all five would have left nothing to pay for depositing them.
+
+`registerMandate` had to come first — a deposit against an unregistered mandate reverts,
+which is the vault refusing capital with no way out. It also forced a correction:
+**Harrow Point's `arc_address` was invented**, like every seeded buyer's, and
+`executeRelease` returns capital to the registered address, so an invented one is a release
+nobody can receive. Migration `0004` points it at the wallet that exists.
+
+`ARC_MANDATE_VAULT_ADDRESS` is set on the demo deployment, so funding is now verified against
+this vault. **Five seeded mandates still quote against capital nobody posted** — the check
+guards the funding path and does not retroactively unfund anything, so that is stopped from
+growing rather than undone.
+
 ## ATS security (the paper)
 
 |              |                                                                      |

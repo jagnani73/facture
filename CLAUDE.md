@@ -61,13 +61,13 @@ repo in `facture-prep/BLOCKERS.md`.
    Continuity Track" pointed the other way. The copy is written for one kind of entrant and
    the eligibility is wider than the copy; Circle is the authority on that and has answered.
 
-   Two things that were true before the answer still are. **Arc's public mainnet lands
-   Sept 16, after submissions close**, so nothing in this project may depend on it — whatever
-   "push to mainnet" is judged on, it cannot be a mainnet transaction made before the
-   deadline. And the Arc leg here is deployed and idle: `MandateVault` and the payment-side
-   `DvpEscrow` are live on testnet and the Hedera book records the vault and chain id as
-   construction-time immutables, but **no USDC has crossed that link yet**. That gap is the
-   thing worth closing for this track, not the eligibility question.
+   One thing that was true before the answer still is: **Arc's public mainnet lands Sept 16,
+   after submissions close**, so nothing in this project may depend on it — whatever "push to
+   mainnet" is judged on, it cannot be a mainnet transaction made before the deadline.
+
+   The other is no longer true. **USDC has crossed (2026-09-03):** `MandateVault` holds 5 USDC
+   against Harrow Point's mandate, deposited by the buyer's own wallet, and funding is verified
+   against it. See [docs/deployments.md](./docs/deployments.md).
 
 3. **Blocky402 facilitator.** `GET /supported` returns 200 and advertises `hedera:testnet` under
    x402 v2, scheme `exact`. Fee payer `0.0.7162784` is ECDSA and holds ~290,667 HBAR, so funding

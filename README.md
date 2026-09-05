@@ -22,10 +22,10 @@
 >
 > What that does **not** mean: this is a hackathon build on Hedera and Arc testnets, with a
 > seeded demo book behind it. The cash leg that has actually settled ran over x402 on Hedera,
-> in HBAR under a declared scale — the Arc contracts are deployed and the Hedera book records
-> the Arc vault and chain id as construction-time immutables, but no USDC has crossed that link
-> yet. Where a section describes behaviour the build does not have yet, it says so in place
-> rather than leaving you to find out.
+> in HBAR under a declared scale. Real USDC is escrowed on Arc — 5 of it, behind one mandate,
+> deposited by that buyer's own wallet — but it is capital backing a bid, not a leg that has
+> settled: no sale has yet paid its seller in USDC. Where a section describes behaviour the
+> build does not have yet, it says so in place rather than leaving you to find out.
 
 Factoring is bond pricing done over the phone. A business that is owed money and needs it now calls
 a factor, the factor prices the paper privately, and the business takes 2&ndash;5% off the face value
@@ -327,11 +327,13 @@ Recorded here so they are not relitigated mid-build.
   ceiling binds. Live operations are cheap by comparison: a role grant is 180k, a KYC grant 190k, a
   mint 465k, a transfer 254k warm. Heterogeneous per-invoice paper stands.
 
-- **What makes a bid firm.** Matching is bounded by a mandate's unallocated balance, which is also
-  what resolves two invoices arriving against one mandate. That bound is enforced. The escrow behind
-  it is not yet: no escrow provider is wired into this build, so funding records the reference and
-  the amount rather than reading a confirmed deposit, and the store is the authority on how much
-  landed.
+- **What makes a bid firm.** Matching is bounded by a mandate's unallocated balance, and the escrow
+  behind that bound is `MandateVault` on Arc. Funding is checked against what the vault actually
+  holds &mdash; `balanceOf` is a view, so it costs nothing to ask &mdash; and a mandate cannot be
+  credited with capital nobody deposited. One mandate is backed this way today, with 5 USDC posted
+  by that buyer's own wallet. **The five seeded mandates are not**, and still quote against capital
+  nobody posted: the check stops that growing rather than undoing it, and the demo book says which
+  is which.
 - **Where a rating comes from.** Earned on the platform out of settled payment behaviour, starting
   unrated. No oracle, and no invented score.
 - **Whether an invoice is real.** Debtor confirmation gates listability, and a uniqueness registry
