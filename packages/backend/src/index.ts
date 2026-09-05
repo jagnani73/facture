@@ -16,6 +16,7 @@ import { setStoreFactory } from './db/store.js';
 import { createLogger, rootLogger, setRootLogger } from './logger.js';
 import { initAtsAdapter } from './services/ats.js';
 import { createAtsComplianceGate, setComplianceGate } from './services/compliance.js';
+import { initArcEscrow } from './services/arc.js';
 import { initIndexer } from './services/indexer.js';
 import { initPrivyVerifier } from './services/privy.js';
 import {
@@ -79,6 +80,14 @@ function boot(): void {
     // Unset disables seller sign-in rather than trusting an email nobody verified.
     appId: env.PRIVY_APP_ID,
     appSecret: env.PRIVY_APP_SECRET,
+    logger: log,
+  });
+
+  initArcEscrow({
+    // Unset leaves funding recorded rather than verified; it does not fake an escrow.
+    vaultAddress: env.ARC_MANDATE_VAULT_ADDRESS,
+    settlementPrivateKey: env.ARC_SETTLEMENT_PRIVATE_KEY,
+    maxFeePerGasGwei: env.ARC_MAX_FEE_PER_GAS_GWEI,
     logger: log,
   });
 

@@ -84,6 +84,14 @@ export const envSchema = z
 
     // Arc
     ARC_SETTLEMENT_PRIVATE_KEY: HEX_32,
+    /**
+     * `MandateVault` on Arc, which holds the cash leg. Unset means funding is recorded but
+     * not verified against capital that exists — see `services/arc.ts`.
+     */
+    ARC_MANDATE_VAULT_ADDRESS: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/)
+      .optional(),
     ARC_MAX_FEE_PER_GAS_GWEI: z.coerce
       .number()
       .int()

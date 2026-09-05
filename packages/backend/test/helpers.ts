@@ -25,6 +25,7 @@ import { unauthorized } from '../src/errors.js';
 import { createLogger, setRootLogger } from '../src/logger.js';
 import type { AtsAdapter, HoldReceipt } from '../src/services/ats.js';
 import { setAtsAdapter } from '../src/services/ats.js';
+import { createDisabledArcEscrow, setArcEscrow, type ArcEscrow } from '../src/services/arc.js';
 import type { MaturityPayoutRequest, ScheduleAdapter } from '../src/services/schedule.js';
 import { setScheduleAdapter } from '../src/services/schedule.js';
 import type { ComplianceDecision, ComplianceGate } from '../src/services/compliance.js';
@@ -315,6 +316,8 @@ export interface HarnessOptions {
   settleFails?: string;
   /** Stands in for Privy. Absent means every sign-in verifies as {@link DEFAULT_SIGN_IN}. */
   privy?: PrivyVerifier;
+  /** Absent means no vault: funding is recorded, not verified, as it is today. */
+  arc?: ArcEscrow;
 }
 
 /** What the stub verifier attests to when a test does not say otherwise. */
@@ -365,6 +368,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
   setScheduleAdapter(schedule);
   setComplianceGate(options.gate ?? createAllowingGate());
   setPrivyVerifier(options.privy ?? stubPrivy());
+  setArcEscrow(options.arc ?? createDisabledArcEscrow());
   setNotifier(silentNotifier);
 
   initIssuanceQueue({ minIntervalMs: 0, maxAttempts: 3, backoffBaseMs: 1 });
@@ -403,6 +407,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
       setScheduleAdapter(undefined);
       setComplianceGate(undefined);
       setPrivyVerifier(undefined);
+      setArcEscrow(undefined);
       resetConfig();
     },
   };

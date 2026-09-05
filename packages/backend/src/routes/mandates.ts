@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { getStore } from '../db/store.js';
 import { badRequest, notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
+import { getArcEscrow } from '../services/arc.js';
 import { settlementService } from '../services/settlement.js';
 import { readJson, readParams, readQuery } from '../validate.js';
 import { money, moneyString, wireMandate } from '../wire.js';
@@ -207,10 +208,28 @@ mandateRoutes.post('/:id/fund', async (c) => {
    * quote nobody can honour.
    *
    * `escrowRef` is the reference to that record, and it is what the proof view shows.
-   * There is no escrow provider wired into this build, so the reference is recorded and
-   * carried; when one exists, its confirmed amount is read here and the body's amount is
-   * used only to detect a mismatch.
+   *
+   * The escrow provider is `MandateVault` on Arc, and its `balanceOf` is a view — so this
+   * costs no key, no gas and no signature, and the venue simply asks the chain how much is
+   * actually there. Funding is refused when it would count capital the vault does not hold.
+   * With no vault configured the read is unavailable rather than zero, `enabled` is how the
+   * two are told apart, and the response says which happened so that "escrowed" is never an
+   * assumption a reader has to make.
    */
+  const escrow = getArcEscrow();
+  if (escrow.enabled) {
+    const deposited = await escrow.depositedFor(id);
+    const wouldBeCommitted = existing.fundedMinor + body.amountMinor;
+
+    if (wouldBeCommitted > deposited) {
+      throw badRequest(
+        `This mandate would be counted as holding ${wouldBeCommitted} but the vault holds ` +
+          `${deposited}. Capital has to arrive on Arc before the book will quote against it — ` +
+          'a bid backed by a request body is not a firm bid.',
+      );
+    }
+  }
+
   const mandate = await store.fundMandate({
     mandateId: id,
     amount: body.amountMinor,
@@ -222,6 +241,12 @@ mandateRoutes.post('/:id/fund', async (c) => {
     mandate: wireMandate(mandate),
     /** The moment the bid became firm. Before this the mandate is not on the curve. */
     quoting: mandate.status === 'active',
+    /**
+     * Whether the amount above was checked against capital that actually exists, or merely
+     * recorded. A reader must not have to infer which, so it is stated rather than implied
+     * by the presence of an escrow reference.
+     */
+    escrowVerified: escrow.enabled,
   });
 });
 
