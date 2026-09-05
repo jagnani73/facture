@@ -948,24 +948,46 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
 1. **`ArcEscrow.registerMandate` had no caller.** The vault refuses a deposit against an
    unregistered mandate, so **no mandate created through `POST /v1/mandates` could ever be
    escrowed** — its key is `keccak256(uuid)` and nothing registered it. The one working
-   mandate had been registered by hand. **Closed operationally by `pnpm demo:reset`**, which
-   registers any active mandate that is missing; it is still not called from the funding
-   route, so a mandate written between resets stays unescrowable until the next one.
+   mandate had been registered by hand. Closed operationally first, by `pnpm demo:reset`.
+   **Closed properly 2026-09-04:** `POST /v1/mandates` registers the mandate as soon as the
+   row is inserted, and `POST /v1/mandates/:id/fund` repairs a missing registration before
+   the buyer deposits — registration has to precede the deposit, or the vault reverts
+   `MandateNotRegistered`. The address is guarded with viem's strict `isAddress`,
+   **deliberately the same check `scripts/demo-reset.mjs` makes**, so the script and the route
+   cannot disagree; all three invented seeded buyer addresses fail it.
+   `buyerOf` is read before every write, so a binding is never overwritten.
 2. **`SettlementOutcome: 'default'` is never produced** and no route writes
    `invoices.status = 'defaulted'`. So the permanent-rating-mark story has no code path, and
    worse: maturing an overdue unpaid receivable records it as **`late`**, which is a default
-   written into the ledger as a payment.
+   written into the ledger as a payment. **Closed 2026-09-04, and both halves of this
+   finding are now wrong — including the sharper half.** `POST /v1/invoices/:id/default`
+   produces the outcome and writes the status. And maturity no longer records a receivable
+   nobody paid as `late`: the root cause was that `late` compared the due date against the
+   instant the operator pressed the button, so it was the fallback for both "not paid yet"
+   and "never paid". **The payment date is stated now, with `paidAt`**, and absent-and-past-due
+   is refused with a sentence rather than guessed at.
 3. **`MandateVault.executeRelease` has no caller and is not even in `VAULT_ABI`.** "Withdraw
    unallocated capital" decrements a SQLite row; real USDC in the vault has no path out of it
-   in this repo. Migration `0004` fixed a buyer's address _for this call_.
+   in this repo. Migration `0004` fixed a buyer's address _for this call_. **Closed
+   2026-09-04:** it is in the ABI and the withdraw route calls it. **Book first, chain
+   second**, because a failed release leaves USDC in the vault against a book that no longer
+   quotes it, which re-funding recovers; reversed, it leaves a mandate quoting capital that
+   has already left. The amount converts through `toSettlementAmount` and rounds **down** —
+   the vault's lower-bound invariant survives the smaller book only in that direction.
 4. **`@facture/shared/state` is an entire unused module** — both machines, every guard.
    Status changes go through unguarded `updateInvoice({ status })`, so nothing validates a
-   lifecycle transition and `IllegalTransition` cannot be constructed at runtime.
+   lifecycle transition and `IllegalTransition` cannot be constructed at runtime. **It has a
+   first production caller as of 2026-09-04** — `services/settlement.ts` guards
+   `sold -> defaulted` with `transitionInvoice`. **That is a beginning, not a closure:** the
+   general status-change path still bypasses the machine entirely, so one edge of the
+   lifecycle is validated and the rest are not.
 5. **`listed` is an unreachable invoice status.** Only the seed writes it, so the secondary
    market the README's argument rests on has a table row and no code — which
-   `settlement.ts` already concedes in a comment.
+   `settlement.ts` already concedes in a comment. It stays unreachable on purpose; see
+   _Declined: the secondary market_ below for the wall it hits.
 6. **`ArcEscrow.buyerOf` is called by nothing, not even a test.** It is the one check that
-   would have caught the invented-address problem `0004` fixed by hand.
+   would have caught the invented-address problem `0004` fixed by hand. **Closed
+   2026-09-04:** it has callers, and direct test coverage.
 7. **The agent's entire money-moving surface has no caller** — `transferUsdc`,
    `executeContract`, every wallet-set method. `AGENT_WALLET_SET_ID` is parsed and read by
    nothing. `executeContract` is also the only way the agent could ever deposit into the
@@ -975,7 +997,10 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
    is what makes its refusal real.
 9. **`settlement_outcomes` is a write-only table.** Its header calls it the append-only fact
    behind the `debtors` accumulator, and the counters are incremented in place and cannot be
-   rebuilt, because nothing can read the facts.
+   rebuilt, because nothing can read the facts. **Partly closed 2026-09-04:**
+   `RecordOutcomeResult` carries the outcome the ledger actually holds, read back inside the
+   transaction that lost the insert — without which a default landing on an already-recorded
+   payment is invisible. Partly, because the counters still cannot be rebuilt from the facts.
 10. **`invoices.regulation_type` never reaches the proof screen.** `api-source.ts` hardcodes
     `regulation: null`, so the Reg S declaration renders only from fixtures.
 
@@ -985,9 +1010,81 @@ across all five packages. **`arc.ts` claims `PAYMENT_LOCK_DURATION` is "read fro
 contract" — it is not in the ABI and never read**; the 24-hour figure is prose beside a
 hardcoded constant.
 
-The lesson stands and is now quantified: **nineteen mechanisms in this repo have a definition,
-documentation, and no caller.** Look for the caller before believing the comment — including
-comments written in this file.
+The lesson stands and is now quantified: **nineteen mechanisms in this repo had a definition,
+documentation, and no caller.** Six of them have a caller as of 2026-09-04 — four outright
+(1, 2, 3 and 6) and two only partly (4 and 9, where the caller exists and the claim beside it
+still does not hold) — so the count is **thirteen**. Of this list, 5, 7, 8 and 10 stand
+untouched, and 5 is now declined rather than pending. `reclaimPayout` stands from the earlier
+nine, deliberately.
+Look for the caller before believing the comment — including comments written in this file.
+
+### Every status write, mapped — the machines and the code disagree
+
+A read-only pass over every place an invoice or mandate status is written, 2026-09-04. It asks
+the sweep's question backwards: not what has no caller, but what the callers actually do.
+
+- **Two edges the running code performs are forbidden by the declared machine.**
+  `confirmed -> sold` fires on **every trade, on both rails**, and
+  `awaiting_confirmation -> awaiting_confirmation` fires whenever a confirmation link is
+  re-requested, which is an unconditional write. Only **6 of 15** declared invoice edges have a
+  writer at all. This is why wiring the machine in further is not a free change: dropping the
+  `transitionInvoice` guard into the settlement paths would refuse the trade the product made
+  this morning.
+- **The mandate machine has the same defect as `listed`, and it was not in the nineteen.**
+  `'funding'` is written by **nothing anywhere in the repo** — it appears in the status union,
+  in the machine, in refusal prose and in fixtures, and nowhere else. `fundMandate` goes
+  `draft -> active` in one write, which the machine also forbids, and all seven live mandates
+  are `active` with no row ever having held `funding`. **The state is not decorative:** the
+  machine's own comment says it is where escrow begins and that a mandate does not quote from
+  `draft`, which is exactly the distinction the Arc vault makes between committed capital and
+  posted capital.
+
+### Declined: the secondary market, and the wall it hits
+
+**Decided 2026-09-04.** `sold -> listed` stays unbuilt. The edge is in `invoice-machine.ts` and
+its comment is right that without it there is one market rather than two — but the reason it
+cannot be built here is the same reason seller self-custody was declined, seen from the other
+side of the trade.
+
+**`createHoldByPartition` acts on the caller's own tokens.** After a sale the units are in the
+buyer's Hedera account, so for a relist the venue is not the holder and a hold would be placed
+against its own zero balance. Making it work needs the previous buyer to authorise the venue as
+an ERC-1400 operator, and that is three things rather than one: `authorizeOperatorByPartition`
+is not in `ATS_ABI`, the grant is a native Hedera transaction, and it has to be signed by the
+buyer's own key. **No wallet this build issues can produce that signature** — a Privy signer
+prefixes EIP-191 or types EIP-712 and Hedera rejects both, which is already written down above
+as the reason the seller's x402 leg is impossible. The buyer's side is the same fact.
+
+So the honest options were a relist that prices and matches but cannot deliver, or none. A
+database row that changes owner while the token does not move is precisely the overclaim the
+sweep above exists to catch, and it would break the one property maturity depends on:
+settlement routes to whoever holds the paper **now**, read from the newest settled trade.
+
+Worth recording, because it is not obvious from the outside:
+
+- **Pricing is already relist-ready and needs no change.** `quote-engine.ts` never reads
+  `sellerId`, and tenor is recomputed from `dueAt` against the clock on every quote, so a
+  seasoned invoice would price on its shorter remaining tenor with no code at all. That is the
+  README's _"sold at 4% on day zero, lists into the same bids on day thirty and clears
+  tighter"_, and the arithmetic behind it works today.
+- **`settleAtMaturity` and `recordDefault` are already relist-ready**, because both take the
+  holder from the newest settled trade rather than from the invoice row.
+- **What is not ready is everything that names the seller.** `routes/trades.ts` reads the seller
+  off `invoice.sellerId`, which names the originator forever, and it flows into the hold, the
+  Arc `registerMatch` — which is one-shot and uncorrectable — and the HCS match commitment,
+  which would publish the wrong seller permanently. `trades.seller_id` is also a foreign key
+  into `sellers`, and a previous holder is a buyer with no row in that table, so a relist trade
+  could not be inserted at all.
+- **`debtorExposure` would double-count.** It sums proceeds over every settled trade on an
+  unmatured invoice, so after a relist the previous holder's mandate keeps carrying exposure it
+  no longer has. `settlement.ts` already names this as the thing `execute` would have to free.
+- **The on-chain registry would not block it, and that is itself a gap.** `InvoiceRegistry`
+  models `Matched` and `Settled` and refuses `Settled -> Confirmed`, but the venue only ever
+  writes `Draft` and `Confirmed`, so the public record is frozen before the point where it would
+  have an opinion.
+
+Everything above the asset leg is about a day's work. The asset leg is not a day's work, and
+pretending otherwise is how the row moves without the token.
 
 ### Provisioning: `pnpm demo:reset`
 
