@@ -229,6 +229,70 @@ zero once, Petra Foods Group's on-time count moved from 5 to 6 rather than to 9,
 schedule exists rather than four. The stored `trades.maturity_schedule_id` is what stops the
 second call arranging a second claim on the same face value.
 
+## A clean lifecycle — MF-2051, 2026-09-02
+
+Every earlier proof involved the gas-probe bond somewhere. This one does not: MF-2051 was
+issued its own instrument by the venue, sold, and matured, and the ISIN on its proof view is
+the one its own bond carries.
+
+| step        |                                                                                |
+| ----------- | ------------------------------------------------------------------------------ |
+| instrument  | `0.0.10331926`, `Meridian Fabrication receivable MF-2051`, ISIN `US0P7LQIQII6` |
+| supply      | 1,225,000 units to the seller, `maxSupply` equal to face                       |
+| confirmed   | _"Meridian Fabrication says you owe them $12,250.00, due 30 September."_       |
+| quoted      | 850 bps, 28 days, proceeds 1,217,012, discount 7,988 — 0.65% of face           |
+| asset leg   | hold `1`, 1,225,000 units, `0.0.10311549@1788340765.589124475`                 |
+| cash leg    | x402 `exact`, `0.0.7162784@1788340765.029692827`, payer `0.0.10314099`         |
+| maturity    | schedule `0.0.10332092`, executed `0.0.10311549@1788340781.520345720`          |
+| holder paid | `0.0.10314099` +1,225,000 tinybars — par                                       |
+
+Trade `3d129208-a99e-4667-bc4a-1d7bc5a537eb`.
+
+### The refusal happened first, and said why
+
+The tightest standing bid was Cordell Credit Partners at 925 bps. Arming the trade returned
+**403**, not a reverted transaction:
+
+> Cordell Credit Partners is not permitted to hold this security by its control list.
+
+Cordell is a seeded buyer with no allowlist entry on this instrument. The trade settled only
+after a real funded bid existed from a buyer the security actually permits — Harrow Point at
+850 bps, which won the auction on price rather than by anything being removed from the book.
+
+**A wrinkle worth naming.** The compliance gate runs when a trade is armed, not when a price is
+quoted, so the book can show a price from a bid whose buyer cannot hold that security. The
+refusal is correct and legible, but the quote that preceded it was not honourable. Checking
+every mandate against every security's control list on every book render is an on-chain read
+per row, which is the cost this design avoids elsewhere — so the fix is a decision, not an
+oversight to patch quietly.
+
+### Preparing a security
+
+`deployBond` leaves an instrument with no supply, an empty allowlist and no KYC, and a transfer
+against it reverts without naming any of that. `facture-prep/x402-probe/prepare-security.mjs`
+walks the sequence, reading before each step so a re-run is free:
+
+```
+grantRole × 4      the deployer holds DEFAULT_ADMIN_ROLE and nothing else
+addToControlList   seller and buyer — the list is an ALLOW list here
+addIssuer          grantKyc reverts with AccountIsNotIssuer until this exists
+grantKyc           seller and buyer, five arguments including the issuer
+issue              face-value-many units to the seller
+```
+
+Role hashes come from `contracts/constants/roles.sol`, never the ATS README:
+
+| role                | hash                                                                 |
+| ------------------- | -------------------------------------------------------------------- |
+| `ROLE_CONTROL_LIST` | `0x6ed9a91e996c6475ecdc28ecbdbe9bd1122fc62b30cdbe6da8271884b51ec74d` |
+| `ROLE_SSI_MANAGER`  | `0x3120494a82251fe85b0403877539486dbfcf0f94c20741a3229cfad31f625ee1` |
+| `ROLE_KYC`          | `0x754f499f9fdfbb089d12bdec817a6863d593d8a3ea7f546c00a5cafd20957bfc` |
+| `ROLE_ISSUER`       | `0x5eeaf5602c75bf26e73b5206d0bd6ee82f621166255e5fd73cc06bc7bd84a95f` |
+
+All ten transactions succeeded first time. Grants target the operator's **alias**, not its
+long-zero address — to a Solidity mapping they are unrelated keys, and the venue calls from the
+alias.
+
 ## Debris on MF-2046
 
 Five settlement attempts were abandoned during debugging on 2026-09-01 before the trade above

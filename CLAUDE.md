@@ -285,6 +285,37 @@ a wrong type.
 The venue has now issued `0.0.10331926` (MF-2051) and `0.0.10331928` (MF-2052) itself, at
 7,024,576 and 7,023,179 gas — inside the range measured from the factory's history.
 
+### Preparing a deployed security
+
+`deployBond` leaves an instrument with **no supply, an empty allowlist and no KYC**, and a
+transfer against it reverts without naming any of that. `facture-prep/x402-probe/prepare-security.mjs`
+walks the sequence, reading before each step so a re-run costs nothing:
+`grantRole` × 4 → `addToControlList` (seller and buyer) → `addIssuer` → `grantKyc` → `issue`.
+
+- **Role hashes come from `contracts/constants/roles.sol`**, never the README:
+  `ROLE_CONTROL_LIST` `0x6ed9a91e996c…`, `ROLE_SSI_MANAGER` `0x3120494a82…`, `ROLE_KYC`
+  `0x754f499f9f…`, `ROLE_ISSUER` `0x5eeaf5602c…`.
+- **`grantKyc` takes five arguments** — `(account, vcId, validFrom, validTo, issuer)` — and
+  reverts with `AccountIsNotIssuer` until `addIssuer` has run.
+- **Grants target the operator's ALIAS**, not its long-zero address. To a Solidity mapping they
+  are unrelated keys and the venue calls from the alias.
+- **A read straight after a write lags.** `totalSupply` answered `0` seconds after a successful
+  `issue` and the correct figure moments later; the relay trails consensus.
+
+### Open: a quote can name a bid that cannot hold the security
+
+The compliance gate runs when a trade is **armed**, not when a price is **quoted**. So the book
+can show a price from a mandate whose buyer is not on that security's control list, and the
+refusal — correct, legible, a 403 with a sentence — arrives only when someone tries to take it.
+Observed live: the tightest bid on MF-2051 was refused with _"Cordell Credit Partners is not
+permitted to hold this security by its control list."_
+
+Checking every mandate against every security's control list on every book render is an
+on-chain read per row, which is the cost this design avoids everywhere else. So this is a
+decision to take, not an oversight to patch: cache the per-(security, buyer) verdict, check only
+the chosen mandate at quote time and fall through, or accept that a quote is indicative until
+armed. **Do not quietly make quoting do N reads.**
+
 ### Resolved: the maturity payout rail
 
 **A debtor has no wallet, and that is load-bearing rather than missing.** Confirmation works
