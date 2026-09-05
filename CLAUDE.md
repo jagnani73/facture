@@ -302,19 +302,39 @@ walks the sequence, reading before each step so a re-run costs nothing:
 - **A read straight after a write lags.** `totalSupply` answered `0` seconds after a successful
   `issue` and the correct figure moments later; the relay trails consensus.
 
-### Open: a quote can name a bid that cannot hold the security
+### Resolved: a quote names a bid that can actually take it
 
-The compliance gate runs when a trade is **armed**, not when a price is **quoted**. So the book
-can show a price from a mandate whose buyer is not on that security's control list, and the
-refusal — correct, legible, a 403 with a sentence — arrives only when someone tries to take it.
-Observed live: the tightest bid on MF-2051 was refused with _"Cordell Credit Partners is not
-permitted to hold this security by its control list."_
+The compliance gate ran only when a trade was **armed**, so the book could quote a price from a
+mandate whose buyer that security bars. The refusal was correct and legible — a 403 with a
+sentence, not a revert — but it arrived after the seller had decided to sell. Observed live on
+MF-2051: the tightest bid was 925 bps from a buyer the instrument does not permit.
 
-Checking every mandate against every security's control list on every book render is an
-on-chain read per row, which is the cost this design avoids everywhere else. So this is a
-decision to take, not an oversight to patch: cache the per-(security, buyer) verdict, check only
-the chosen mandate at quote time and fall through, or accept that a quote is indicative until
-armed. **Do not quietly make quoting do N reads.**
+- **`priceOne` checks the winner, then falls through.** If the winning bid is barred it is
+  dropped and the next is priced, up to three passes. Screening every candidate would be an
+  on-chain read per bid, which is the cost this design avoids everywhere; screening the one bid
+  about to be quoted is normally exactly one read. Past the cap the last price stands and arming
+  is still the backstop — the old behaviour, not a new failure.
+- **`priceBook` checks nothing, deliberately.** It prices a whole book in one pass, so checking
+  per row is the same N+1 it exists to avoid, moved to the mirror node. A book price is
+  indicative; `priceOne` is what a seller acts on. **Do not make quoting do N reads.**
+- **An indeterminate answer must not move a price.** The gate refuses when it cannot READ the
+  instrument, which is right for settlement and wrong for pricing: a relay outage — or a demo
+  book whose fixtures point at securities that were never deployed — would drop the three
+  tightest bids on every invoice and quietly widen the curve. This was not hypothetical; it
+  repriced MF-2041 from 800 to 1850 bps on the first live run. `ComplianceDecision.determinate`
+  is the distinction, and `ComplianceCheck.unreadable` is where it comes from.
+- **`mandatesBarredByInstrument` is on the wire**, because "no bid" and "this instrument is not
+  ready for the buyers who wanted it" are different problems with different fixes.
+
+Verified live: MF-2041 (fixture security, unreadable) quotes 800 bps with nothing barred;
+MF-2052 (real security, empty allowlist) quotes nothing with three barred.
+
+### Backend tests are typechecked
+
+`tsconfig.json` covers `src` and `test` with `noEmit`; `tsconfig.build.json` is what emits.
+They were excluded before, and turning the check on immediately found four fakes that had
+drifted from the seams they stand in for. A fake that no longer matches its interface is a test
+passing for the wrong reason.
 
 ### Resolved: the maturity payout rail
 
