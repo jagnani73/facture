@@ -27,9 +27,10 @@ export default tseslint.config(
      * globals from a tsconfig the way `packages/contracts/scripts/*.ts` do — and
      * `no-undef` would flag every `process`, `console` and `fetch` in them.
      * Declared explicitly rather than by adding a `globals` dependency for six
-     * names, and scoped to `scripts/` so nothing in `packages/` inherits it.
+     * names, and scoped to any `scripts/` directory — the root one and the
+     * contracts package's — so nothing outside a script directory inherits it.
      */
-    files: ['scripts/**/*.mjs'],
+    files: ['**/scripts/**/*.mjs'],
     languageOptions: {
       globals: {
         console: 'readonly',

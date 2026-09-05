@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "clean": "hardhat clean",
     "deploy:hedera": "hardhat run scripts/deployHedera.ts --network hederaTestnet --build-profile production",
-    "deploy:arc": "hardhat run scripts/deployArc.ts --network arcTestnet --build-profile production"
+    "deploy:arc": "hardhat run scripts/deployArc.ts --network arcTestnet --build-profile production",
+    "verify": "node scripts/verify.mjs"
   },
   "dependencies": {
     "@openzeppelin/contracts": "5.6.1"

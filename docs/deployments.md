@@ -648,3 +648,44 @@ The verification that matters for anyone reading this later: **the x402 rail has
 hole and cannot reach it.** Every Arc defect was a pre-existing hole made reachable by
 removing the buyer's per-trade signature. That is the thing to check first when adding
 anything else to this rail.
+
+## Contract source is verified — 2026-09-03
+
+Hedera's Tokenization track asks for a "public GitHub repo with **verified contracts on
+HashScan**", and every contract read `match: null` on Sourcify before this. HashScan's badge is
+a Sourcify lookup, so publishing the source there is what lights it.
+
+`pnpm --filter @facture/contracts verify` does it, and is safe to re-run — it asks Sourcify
+first and sends nothing for a contract already verified.
+
+| contract             | chain   | result      |
+| -------------------- | ------- | ----------- |
+| `UniquenessRegistry` | 296     | match       |
+| `InvoiceRegistry`    | 296     | match       |
+| `MandateBook`        | 296     | exact match |
+| `DvpEscrow`          | 296     | exact match |
+| `AtsComplianceGate`  | 296     | match       |
+| `MandateVault`       | 5042002 | exact match |
+| `DvpEscrow`          | 5042002 | exact match |
+
+Confirmed in a browser rather than from the API alone: HashScan's contract page for
+`0.0.10319485` renders **`UniquenessRegistry` · VERIFIED · Partial Match**. Sourcify's `match`
+is HashScan's "partial" and `exact_match` is its "full"; the difference is whether the embedded
+metadata hash matches too, and the badge reads verified either way.
+
+**Sourcify indexes Arc testnet as well**, which was not expected — both Arc contracts verified
+against chain 5042002.
+
+Two things worth writing down because they cost time:
+
+- **`server-verify.hashscan.io` is retired.** It answers `308` to `https://sourcify.dev/server`
+  and drops the path, so every direct query against it returns a bare Express `Cannot GET /`
+  that looks like a broken endpoint rather than a redirect. HashScan migrated to the main
+  Sourcify instance; verify there.
+- **Hardhat 3 prefixes source names with `project/`.** Sourcify matches the contract identifier
+  against a key in the standard JSON input exactly, so `contracts/Foo.sol:Foo` matches nothing
+  and `project/contracts/Foo.sol:Foo` is the identifier to send.
+
+No `hardhat-verify` plugin was added. A new dependency in this workspace brings an unapproved
+build script that breaks `pnpm -r` until `allowBuilds` is edited by hand, and Sourcify's v2 API
+takes the solc standard JSON that `artifacts/build-info` already contains.
