@@ -589,6 +589,34 @@ found in two days, and the only one propping up a headline product claim.
 - **No submit key.** The property wanted is that the venue cannot alter what it already said,
   not that only the venue may speak.
 
+### Resolved: uniqueness is the chain's, not the database's
+
+`UniquenessRegistry` (`0x8eb9f00126bca50226e47b71a75f7b438e81d408`) is in the live path. It
+is checked before an invoice is listed and claimed after its instrument exists.
+
+**Of six deployed contracts this was the first ever called.** `MandateBook`,
+`InvoiceRegistry`, the Hedera `DvpEscrow` and `AtsComplianceGate` are still deployed and
+reached by nothing — `compliance.ts` reads the ATS security's own facets, not the gate — and
+there is no env var for any of their addresses, so the backend could not call them if it
+wanted to. That is the largest remaining gap between `packages/contracts` and the running
+product.
+
+- **The venue's hash is what gets claimed, never `computeHash`.** The contract's helper would
+  mint a second hash for the same receivable — one for the ISIN, another for the registry —
+  which is exactly the divergence that makes a uniqueness guarantee worthless. `sameReceivable`
+  in shared exists for this comparison and predates anything crossing the boundary.
+- **`writeContract` does not mean the transaction succeeded.** The first draft reported a
+  second claim on an already-bound receivable as a success, because viem returns once a
+  transaction is accepted and the revert happens later. The `deployBond` lesson again: the
+  call succeeded and the transaction failed. **Await the receipt and check `status` on every
+  Hedera write.**
+- **Two deliberate softnesses.** An unreachable registry answers `checked: false` and listing
+  proceeds on the database's index — `checked: false` is not `claimed: false`, and failing
+  closed would stop a business listing because a second protection blinked. A refused claim
+  after issuance cannot fail the issuance, for the same reason.
+- Proven against a rival claim, not just our own: a receivable with **no row in this
+  database** was claimed on chain and then refused at listing with 409.
+
 ## Cut list
 
 Ordered by what leaves the product most intact, not by which track is cheapest to lose. A prize is

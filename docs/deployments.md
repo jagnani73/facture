@@ -23,9 +23,11 @@ Wiring verified by `eth_call` against the book itself:
 - `complianceGate()` returns `0x9A2C848A…`, the gate above.
 - `cashLeg()` returns `(5042002, 0x217256d0…)` — the Arc chain id and vault, both immutables.
   The cross-chain link is recorded at construction and cannot be redirected.
-- `uniquenessRegistry()` is **not** exposed as a getter and reverts. That address is recorded
-  here from deployment rather than read back, and is the one line in this table that on-chain
-  state does not confirm.
+- `uniquenessRegistry()` is **not** exposed as a getter and reverts, so the book cannot be
+  asked which registry it points at. The address was confirmed a different way on 2026-09-03:
+  reading the contract at it returns 1,554 bytes matching the table, `owner()` is the
+  operator's alias, and it accepted a `claim` from that key. Every line in this table is now
+  confirmed by on-chain state.
 
 ### Superseded, still live
 
@@ -90,6 +92,51 @@ nobody can receive. Migration `0004` points it at the wallet that exists.
 this vault. **Five seeded mandates still quote against capital nobody posted** — the check
 guards the funding path and does not retroactively unfund anything, so that is stopped from
 growing rather than undone.
+
+## The uniqueness registry, in the live path — 2026-09-03
+
+`UniquenessRegistry` at `0x8eb9f00126bca50226e47b71a75f7b438e81d408` had been deployed since
+day one and called by nothing. It is now checked before an invoice is listed and claimed
+after its instrument exists.
+
+The address is also no longer the one line in this file that on-chain state does not confirm:
+reading it back gives **1,554 bytes**, matching the table above exactly, with
+`owner() = 0x2Da63Ac0…` — the operator's alias.
+
+|                    |                                                                                                           |
+| ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `setIssuer`        | `0x26c0065983e987fdbf55cf0d4b709f48afdd760ed429bc7a88091d43ce1cdbe3`, 47,777 gas                          |
+| first claim        | MF-2052's hash → its own instrument, `0x122633d75d4730e6f02c3dc7a8cf6ca2a2cb1ba96bb834ea238acda79be80845` |
+| rival claim (test) | `0xd57e1311a31458e8e38bfaaed4b69b3a8045ff725cbe3156527f83a6821ee945` → `0x…dEaD`                          |
+
+The contract does not make its deployer an issuer implicitly, so the `IssuerSet` log is a
+complete history of who has ever been able to write a permanent binding.
+
+### The proof that matters
+
+A unique index stops **this** venue listing a receivable twice. The interesting question is
+whether the same invoice can be financed here _and somewhere else_, and no database can
+answer it.
+
+So a receivable this venue has never listed — Petra Foods, `MF-9999`, $9,900 — was claimed on
+chain against `0x…dEaD`, standing in for a rival financier. Listing it then returned **409**.
+There is no row for that receivable anywhere in this database; nothing local could have
+refused it.
+
+### A bond issued by accident
+
+`0.0.10343726`, roughly 8 HBAR, and invoice `7d9ecd44-2a78-420e-bd9c-8c718caf0fc6`.
+
+Testing the duplicate check, an `MF-2052` was posted with `ap@petrafoods.example` rather than
+the seeded `payables@petrafoods.example`. `upsertDebtor` keys on email, so that created a
+**second Petra Foods Group** debtor, which made a different `debtorId`, which made a different
+uniqueness hash — correctly, because to this venue that is a different customer's invoice. It
+listed, issued, and cost real gas.
+
+Recorded rather than removed, for the same reason as the MF-2046 debris: a book whose job is
+to be checkable cannot have history quietly deleted from underneath it. The consequences to
+know about are that the demo book holds **29 invoices, two named MF-2052**, and two debtors
+called Petra Foods Group — the seeded one rated `B`, the accidental one `UNRATED`.
 
 ## Refusal receipts on HCS — 2026-09-03
 
