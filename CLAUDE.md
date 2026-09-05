@@ -540,11 +540,30 @@ sitting on the asset leg of every trade. Not for a hackathon.
   it and the venue requires one. Tolerable only because no screen renders it and the venue keeps
   the first name it was given. Correcting it needs a route that can change it, which does not
   exist.
-- **Open, and a real weakness:** the route has no authentication, which is why it refuses to
-  rebind a wallet address already on file. The Privy **app secret** is in
-  `packages/backend/.env` and nothing reads it. Verifying a Privy auth token server-side would
-  make the email a verified fact rather than a claim in a request body. That changes the route's
-  contract, so it is a decision rather than a cleanup.
+  **Closed: the identity is verified, not claimed.** `POST /v1/sellers` takes **no body**. The
+  email and wallet are read out of a Privy **identity token** presented as
+  `Authorization: Bearer`, verified in `services/privy.ts`. It used to read an email from a
+  request body and believe it, so anyone could have claimed any business.
+
+- **Identity token, never the access token.** The access token carries a DID and nothing
+  else, so it would force an API call for the email on every sign-in — `getUser(userId)` is
+  deprecated and rate-limited for that reason. The identity token carries the linked accounts
+  in its signed payload, so `getUser({ idToken })` verifies and reads locally. The two are
+  easy to confuse and the wrong one fails at the signature check, so the refusal names which
+  was expected. Privy's `privy-id-token` cookie cannot be used: app and venue are different
+  origins.
+- **Unset `PRIVY_APP_ID` / `PRIVY_APP_SECRET` disables the route** rather than relaxing it,
+  in the same shape as issuance with no ATS factory. Falling back to trusting the caller
+  would be reachable only where configuration was forgotten, which is the worst place for it.
+- **The rebind refusal is still needed.** A verified token proves who signed in, not that the
+  wallet now on that account is the one the business expects to be paid at — account
+  recovery, a second linked wallet or a compromised inbox all produce a valid token with a
+  different address. A token carrying no wallet says nothing about the one on file and must
+  not clear it.
+- **An empty email is guarded in two places on purpose.** `VerifiedSeller.email` is typed
+  `string`, so `''` satisfies the compiler while being the unique key the table is built on.
+  A test found the guard living only in the verifier, where any other verifier could bypass
+  it.
 
 ## Cut list
 
