@@ -23,10 +23,10 @@
 > What that does **not** mean: this is a hackathon build on Hedera and Arc testnets, with a
 > seeded demo book behind it. The cash leg has two rails — a funded mandate settles out of its
 > Arc escrow in USDC, an unfunded one over x402 on Hedera in HBAR under a declared scale — and
-> **both trades that have actually settled took the second one.** Real USDC is escrowed on Arc,
-> 5 of it behind one mandate, deposited by that buyer's own wallet; the payout path that spends
-> it is built and tested, and no live trade has taken it yet. Where a section describes
-> behaviour the build does not have yet, it says so in place rather than leaving you to find out.
+> **both have now carried live trades.** Real USDC is escrowed on Arc, deposited by that buyer's
+> own wallet, and a sale has been paid out of it and collected by the seller with their own key.
+> Where a section describes behaviour the build does not have yet, it says so in place rather
+> than leaving you to find out.
 
 Factoring is bond pricing done over the phone. A business that is owed money and needs it now calls
 a factor, the factor prices the paper privately, and the business takes 2&ndash;5% off the face value
@@ -182,11 +182,12 @@ instead. Both answers carry the rail and the reason, so nothing is inferred.
 The Hedera book's `cashLeg()` returns Arc's chain id and the vault address as immutables recorded at
 construction, so the cross-chain link cannot be redirected.
 
-**Real USDC is escrowed on Arc, and no sale has yet drawn on it.** `MandateVault` holds 5 USDC
-against one mandate, deposited by that buyer's own wallet, and the venue refuses to count a mandate
-as holding more than the vault does &mdash; `balanceOf` is a view, so checking costs nothing. The
-Arc payout path is built and tested end to end; what has not happened is a live trade taking it.
-Those are different statements, and only the second is a gap.
+**A sale has now been paid in USDC on Arc.** `MandateVault` held 5 USDC against one mandate,
+deposited by that buyer's own wallet; MF-2061 drew 0.014843 of it, the payout locked in
+`DvpEscrow`, and the seller claimed it with their own key &mdash; 0.5 &rarr; 0.512972 USDC, the
+difference being the gas they paid, because `claim` checks the caller and the venue cannot collect
+for them. The venue still refuses to count a mandate as holding more than the vault does;
+`balanceOf` is a view, so checking costs nothing.
 
 One consequence worth stating, because it surprised us: **the seller claims their own payout.**
 `DvpEscrow.claim` requires `msg.sender == beneficiary`, so a payout lands in an escrow lock rather
