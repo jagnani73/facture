@@ -18,6 +18,9 @@ function job(invoiceId: string): IssuanceJob {
 const deployed: DeployedSecurity = {
   securityId: '0.0.99999',
   evmAddress: '0x0000000000000000000000000000000000000001',
+  // The real adapter returns the ISIN it deployed with, and the sink writes it onto the
+  // invoice. A fake without one leaves that projection silently null.
+  isin: 'US0000000000',
   transactionId: '0.0.1@1700000000.000000000',
   gasUsed: 6_978_091,
 };

@@ -66,6 +66,15 @@ quoteRoutes.get('/invoices/:id/quote', async (c) => {
     mandatesConsidered: live.candidatesConsidered,
     /** "three mandates would take this" comes from here. */
     mandatesMatching: live.matchesAvailable,
+    /**
+     * Bids the instrument itself will not let their buyer hold.
+     *
+     * On the wire because the alternative is a seller reading "no bid" when the truth is
+     * "this instrument is not ready for the buyers who wanted it" — a different problem with
+     * a different fix, and the difference is the venue's to state rather than the seller's to
+     * guess. Not a refusal: the bid did not decline the paper, the paper declined the bid.
+     */
+    mandatesBarredByInstrument: live.excludedByCompliance,
     refusals: includeRefusals ? live.refusals.map(wireRefusalReceipt) : undefined,
     pricedAt: live.pricedAt,
   });

@@ -631,8 +631,9 @@ describe('POST /v1/trades/:id/unwind', () => {
 });
 
 describe('an armed trade nobody pays for', () => {
-  const past = (seconds: number): void =>
+  const past = (seconds: number): void => {
     vi.setSystemTime(new Date(Date.parse(MARKET_NOW_ISO) + seconds * 1000));
+  };
 
   async function arm(): Promise<{ tradeId: string; mandateId: string; proceeds: bigint }> {
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
@@ -747,6 +748,7 @@ describe('resuming issuance after a restart', () => {
         return Promise.resolve({
           securityId: '0.0.777777',
           evmAddress: `0x${'cd'.repeat(20)}` as const,
+          isin: 'US0000000000',
           transactionId: '0.0.5512@1756000400.000000001',
           gasUsed: 6_978_091,
         });
@@ -785,6 +787,7 @@ describe('resuming issuance after a restart', () => {
         return Promise.resolve({
           securityId: '0.0.777777',
           evmAddress: `0x${'cd'.repeat(20)}` as const,
+          isin: 'US0000000000',
           transactionId: '0.0.5512@1756000400.000000001',
           gasUsed: 6_978_091,
         });
@@ -841,6 +844,7 @@ describe('resuming issuance after a restart', () => {
         return Promise.resolve({
           securityId: '0.0.777777',
           evmAddress: `0x${'cd'.repeat(20)}` as const,
+          isin: 'US0000000000',
           transactionId: '0.0.5512@1756000400.000000001',
           gasUsed: 6_978_091,
         });
@@ -873,6 +877,7 @@ describe('the issuance sink', () => {
         Promise.resolve({
           securityId: '0.0.777777',
           evmAddress: `0x${'cd'.repeat(20)}` as const,
+          isin: 'US0000000000',
           transactionId: '0.0.5512@1756000400.000000001',
           gasUsed: 6_978_091,
         }),

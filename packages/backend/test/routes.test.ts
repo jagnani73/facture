@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
 import { settlementService } from '../src/services/settlement.js';
 import { X402_HEADERS } from '../src/services/x402.js';
-import { call, createHarness, createRefusingGate, type Harness } from './helpers.js';
+import { call, createHarness, createRefusingGate, type Harness, type JsonBody } from './helpers.js';
 
 let h: Harness;
 
@@ -107,18 +107,18 @@ describe('GET /v1/invoices', () => {
     const rows = res.body.invoices;
     expect(rows.length).toBeGreaterThan(10);
 
-    const mf2046 = rows.find((r) => r.invoiceNumber === 'MF-2046');
+    const mf2046 = rows.find((r: JsonBody) => r.invoiceNumber === 'MF-2046');
     expect(mf2046.quote.annualisedYieldBps).toBe(1850);
     expect(mf2046.debtor.rating).toBe('C');
 
-    const mf2047 = rows.find((r) => r.invoiceNumber === 'MF-2047');
+    const mf2047 = rows.find((r: JsonBody) => r.invoiceNumber === 'MF-2047');
     expect(mf2047.quote).toBeNull();
     expect(mf2047.mandatesMatching).toBe(0);
   });
 
   it('shows an unissued invoice as still being added', async () => {
     const res = await call(h.app, 'GET', `/v1/invoices?sellerId=${h.seeded.sellerId}&limit=200`);
-    const beingAdded = res.body.invoices.find((r) => r.invoiceNumber === 'MF-2051');
+    const beingAdded = res.body.invoices.find((r: JsonBody) => r.invoiceNumber === 'MF-2051');
 
     expect(beingAdded.issuance.state).toBe('queued');
     expect(beingAdded.securityId).toBeNull();
@@ -134,8 +134,8 @@ describe('GET /v1/invoices', () => {
       'GET',
       `/v1/invoices?sellerId=${h.seeded.sellerId}&limit=5&cursor=${encodeURIComponent(first.body.nextCursor)}`,
     );
-    const firstIds = new Set(first.body.invoices.map((r) => r.id));
-    expect(second.body.invoices.some((r) => firstIds.has(r.id))).toBe(false);
+    const firstIds = new Set(first.body.invoices.map((r: JsonBody) => r.id));
+    expect(second.body.invoices.some((r: JsonBody) => firstIds.has(r.id))).toBe(false);
   });
 });
 
@@ -161,7 +161,9 @@ describe('GET /v1/invoices/:id/quote', () => {
       'GET',
       `/v1/invoices/${h.seeded.invoiceIds['INV-2046']}/quote${asOf}`,
     );
-    const concentration = res.body.refusals.find((r) => r.code === 'DEBTOR_CONCENTRATION');
+    const concentration = res.body.refusals.find(
+      (r: JsonBody) => r.code === 'DEBTOR_CONCENTRATION',
+    );
 
     expect(typeof res.body.quote.faceValue).toBe('string');
     expect(concentration.detail.required).toBe('6029445');
@@ -362,7 +364,7 @@ describe('mandates', () => {
     expect(res.status).toBe(200);
     expect(BigInt(res.body.committed)).toBe(50_000_000n + 40_000_000n + 6_000_000n);
     expect(res.body.byDebtor.length).toBeGreaterThan(0);
-    expect(res.body.byBucket.map((b) => b.bucket)).toContain('A/60d');
+    expect(res.body.byBucket.map((b: JsonBody) => b.bucket)).toContain('A/60d');
     expect(res.body.utilisationBps).toBeGreaterThan(0);
   });
 
@@ -370,7 +372,7 @@ describe('mandates', () => {
     const id = h.seeded.mandateIds['MND-03'] ?? '';
     const res = await call(h.app, 'GET', `/v1/mandates/${id}/exposure`);
 
-    const petra = res.body.byDebtor.find((d) => d.debtorName === 'Petra Foods Group');
+    const petra = res.body.byDebtor.find((d: JsonBody) => d.debtorName === 'Petra Foods Group');
     expect(res.body.perDebtorLimit).toBe('4000000');
     expect(petra.committed).toBe('3496438');
     expect(petra.remaining).toBe('503562');
@@ -379,7 +381,7 @@ describe('mandates', () => {
   it('lists a buyer’s mandates with their capital broken out', async () => {
     const res = await call(h.app, 'GET', `/v1/mandates?buyerId=${buyerId()}`);
     expect(res.body.mandates).toHaveLength(3);
-    expect(res.body.mandates.every((m) => m.quoting)).toBe(true);
+    expect(res.body.mandates.every((m: JsonBody) => m.quoting)).toBe(true);
   });
 });
 
@@ -550,7 +552,7 @@ describe('trades and the proof view', () => {
     const res = await call(h.app, 'GET', `/v1/trades?buyerId=${h.seeded.buyerIds['BUY-CORDELL']}`);
     expect(res.status).toBe(200);
     expect(res.body.trades).toHaveLength(3);
-    expect(res.body.trades.every((t) => t.status === 'settled')).toBe(true);
+    expect(res.body.trades.every((t: JsonBody) => t.status === 'settled')).toBe(true);
   });
 
   it('requires a side', async () => {

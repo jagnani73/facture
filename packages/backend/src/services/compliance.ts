@@ -33,6 +33,14 @@ export interface ComplianceCheck {
   readonly name: string;
   readonly detail: string;
   readonly passed: boolean;
+  /**
+   * The instrument could not be asked, as opposed to having answered no.
+   *
+   * Absent means the answer is real. Present means the read threw — a relay outage, a
+   * security that is not there, a selector that has drifted — and the `false` beside it is a
+   * safety default rather than a fact about this buyer.
+   */
+  readonly unreadable?: boolean | undefined;
 }
 
 export interface ComplianceDecision {
@@ -41,6 +49,16 @@ export interface ComplianceDecision {
   readonly checks: readonly ComplianceCheck[];
   /** Set when refused: the first check that failed, in words. */
   readonly reason: string | null;
+  /**
+   * True when the instrument answered every question, either way.
+   *
+   * A refusal because a control list says no and a refusal because the control list could not
+   * be read are both `refused` — settlement must not move money on an unknown — but they are
+   * not the same fact, and a caller that is deciding something cheaper than a transfer needs
+   * to tell them apart. Pricing does: dropping a bid on an unreadable instrument would let a
+   * mirror-node blip silently widen every price on the book.
+   */
+  readonly determinate: boolean;
 }
 
 export interface ComplianceQuery {
@@ -113,6 +131,8 @@ const decide = (checks: readonly ComplianceCheck[], checkedAt: string): Complian
     checkedAt,
     checks,
     reason: failed ? failed.detail : null,
+    // Determinate only when nothing had to be guessed at. See the field's own note.
+    determinate: !checks.some((c) => c.unreadable === true),
   };
 };
 
@@ -144,6 +164,7 @@ export function createAtsComplianceGate(options: { logger?: Logger } = {}): Comp
               `COMPLIANCE_PROBE_FAILED: ${name} could not be read on this instrument ` +
               `(${message}). The trade is refused rather than assumed eligible.`,
             passed: false,
+            unreadable: true,
           };
         }
       };

@@ -31,9 +31,12 @@ import type {
   RefusalReceipt,
 } from '@facture/shared';
 import { bestQuote, matchCount, tenorDays } from '@facture/shared';
+import { accountIdToEvmAddress } from './ats.js';
+import { getComplianceGate } from './compliance.js';
 import { toDebtor, toInvoice, toMandate } from '../db/projections.js';
 import { getStore } from '../db/store.js';
 import { notFound } from '../errors.js';
+import { rootLogger } from '../logger.js';
 import type { RatingAssessment } from './rating.js';
 import { ratingService } from './rating.js';
 
@@ -52,6 +55,17 @@ export interface LiveQuote {
   candidatesConsidered: number;
   /** How many would actually take this paper — the "three mandates would take this" line. */
   matchesAvailable: number;
+  /**
+   * Bids dropped because the instrument itself will not let that buyer hold it.
+   *
+   * Not counted as refusals. A refusal is a bid declining paper on its own terms — rating,
+   * tenor, exposure — and the funder is owed a receipt for it. This is the instrument
+   * declining the *buyer*, which is not a statement about the invoice at all, and the
+   * vocabulary in `@facture/shared` has no code for it because the contracts do not either.
+   *
+   * Zero on the book screen, always: see `priceBook`.
+   */
+  excludedByCompliance: number;
   pricedAt: string;
 }
 
@@ -80,6 +94,18 @@ export interface QuoteEngineDeps {
   loadInvoices?(invoiceIds: readonly string[]): Promise<Invoice[]>;
   loadDebtors?(debtorIds: readonly string[]): Promise<Debtor[]>;
   ratingsFor?(debtorIds: readonly string[]): Promise<Map<string, RatingAssessment>>;
+
+  /**
+   * Can this mandate's buyer legally hold this instrument?
+   *
+   * A seam rather than a direct call to the compliance gate, because this is the one place
+   * the pricing path touches a chain and a fake has to be able to answer it without one.
+   * Absent means "do not ask" — a deployment with no gate prices exactly as it did before.
+   */
+  canHold?(input: {
+    invoice: Invoice;
+    mandate: Mandate;
+  }): Promise<{ allowed: boolean; reason: string | null }>;
 }
 
 export interface MandateCriteria {
@@ -130,7 +156,52 @@ export const defaultQuoteEngineDeps: QuoteEngineDeps = {
   },
 
   ratingsFor: (debtorIds) => ratingService.ratingsFor(debtorIds),
+
+  /**
+   * Reads the instrument's own `ControlList` and `Kyc` facets, through the same gate that
+   * decides at arm time — so a price and the trade it leads to cannot disagree about who is
+   * allowed to hold the paper.
+   *
+   * Answers `allowed` when there is nothing to ask: an invoice with no instrument yet has no
+   * control list, and a buyer with no Hedera account on file cannot be looked up. Neither is
+   * evidence of ineligibility, and refusing on "unknown" would drop every bid on an invoice
+   * that is merely still being issued.
+   */
+  async canHold({ invoice, mandate }) {
+    const instrument = invoice.instrumentAddress;
+    if (instrument === undefined) return { allowed: true, reason: null };
+
+    const buyer = await getStore().getBuyer(mandate.buyerId);
+    if (!buyer?.hederaAccountId) return { allowed: true, reason: null };
+
+    const decision = await getComplianceGate().check({
+      instrumentAddress: instrument,
+      buyerEvmAddress: accountIdToEvmAddress(buyer.hederaAccountId),
+      buyerName: buyer.name,
+    });
+
+    /*
+     * An indeterminate answer does not move a price.
+     *
+     * The gate refuses when it cannot read the instrument, which is right for settlement —
+     * money must not move on an unknown. It is wrong here: a relay outage, or a demo book
+     * whose fixtures point at securities that were never deployed, would drop the three
+     * tightest bids on every invoice and quietly widen the whole curve. Arming still refuses,
+     * so nothing settles against an instrument nobody can read; it just does not reprice.
+     */
+    if (!decision.determinate) return { allowed: true, reason: null };
+    return { allowed: decision.decision === 'allowed', reason: decision.reason };
+  },
 };
+
+/**
+ * How many times pricing will drop the winning bid and look again.
+ *
+ * Bounded because each pass costs an on-chain read. Three is generous: it takes a book where
+ * the three tightest bids are all barred from one instrument before a seller sees a price
+ * that is merely the best of what remains rather than the best that could hold it.
+ */
+const MAX_COMPLIANCE_FALLTHROUGH = 3;
 
 export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps) {
   return {
@@ -161,7 +232,45 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
         currency: invoice.currency,
       });
 
-      const result = bestQuote(invoice, mandates, debtor, { asOf });
+      /*
+       * Price, then check that the winner can actually hold this instrument, and drop it and
+       * look again if it cannot.
+       *
+       * The gate used to run only when a trade was armed, so the book could show a price from
+       * a bid whose buyer that security bars — a 403 with a good sentence, arriving after the
+       * seller had already decided to sell. Observed live: MF-2051 quoted 925 bps from a buyer
+       * that instrument does not permit.
+       *
+       * Only the WINNER is checked, and only up to {@link MAX_COMPLIANCE_FALLTHROUGH} times.
+       * Screening every candidate first would be an on-chain read per bid, which is the cost
+       * this whole design avoids; screening the one bid about to be quoted is normally exactly
+       * one read, and it is the only bid whose eligibility the answer depends on.
+       *
+       * If the cap is exhausted the last price stands and the arm-time gate is still the
+       * backstop — a seller can then still meet a 403, which is the old behaviour rather than a
+       * new failure. Quoting `null` instead would hide a bid that a fourth pass might have
+       * found, and this path is meant to improve the common case without inventing a worse one.
+       */
+      let pool = mandates;
+      let excludedByCompliance = 0;
+      let result = bestQuote(invoice, pool, debtor, { asOf });
+
+      for (let pass = 0; pass < MAX_COMPLIANCE_FALLTHROUGH; pass += 1) {
+        const winner = result.mandate;
+        if (result.quote === null || winner === null || deps.canHold === undefined) break;
+
+        const verdict = await deps.canHold({ invoice, mandate: winner });
+        if (verdict.allowed) break;
+
+        rootLogger.info('bid cannot hold this instrument, looking again', {
+          invoiceId,
+          mandateId: winner.id,
+          reason: verdict.reason,
+        });
+        excludedByCompliance += 1;
+        pool = pool.filter((candidate) => candidate.id !== winner.id);
+        result = bestQuote(invoice, pool, debtor, { asOf });
+      }
 
       return {
         invoiceId,
@@ -172,6 +281,7 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
         tenorDays: result.tenorDays,
         candidatesConsidered: mandates.length,
         matchesAvailable: matchCount(result),
+        excludedByCompliance,
         pricedAt: result.asOf,
       };
     },
@@ -254,6 +364,13 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
           invoiceId: invoice.id,
           quote: result.quote,
           refusals: result.refusals,
+          /*
+           * Always zero here, deliberately. This method prices a whole book in one pass, so
+           * checking the winning bid per row would be an on-chain read per row — the same N+1
+           * it exists to avoid, moved from the database to the mirror node. A book price is
+           * indicative; `priceOne` is the one a seller acts on, and that one is checked.
+           */
+          excludedByCompliance: 0,
           rating: debtor.rating,
           tenorDays: result.tenorDays,
           candidatesConsidered: mandates.length,

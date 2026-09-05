@@ -170,6 +170,9 @@ function createRecordingAts(): RecordingAtsAdapter {
       return Promise.resolve({
         securityId: `0.0.${900_000 + job.invoiceId.length}`,
         evmAddress: `0x${'ab'.repeat(20)}`,
+        // The job's own ISIN, as the real adapter returns — the sink writes it onto the
+        // invoice, and a fake that omitted it would leave the projection silently null.
+        isin: job.isin,
         transactionId: `0.0.5512@1756000000.${job.invoiceId.slice(0, 9)}`,
         gasUsed: 6_978_091,
       });
@@ -212,6 +215,9 @@ export function createAllowingGate(): ComplianceGate {
     check(): Promise<ComplianceDecision> {
       return Promise.resolve({
         decision: 'allowed',
+        // The instrument answered. A fake that left this unset would read as "could not be
+        // asked", and pricing deliberately does not drop a bid on an unknown.
+        determinate: true,
         checkedAt: '2026-09-01T09:32:00.000Z',
         checks: [
           { name: 'Control list', detail: 'Permitted to hold this security.', passed: true },
@@ -229,6 +235,9 @@ export function createRefusingGate(reason: string): ComplianceGate {
     check(): Promise<ComplianceDecision> {
       return Promise.resolve({
         decision: 'refused',
+        // Refused because the instrument said no, not because it could not be read — those
+        // are different facts and only the first one may move a price.
+        determinate: true,
         checkedAt: '2026-09-01T09:32:00.000Z',
         checks: [{ name: 'KYC status', detail: reason, passed: false }],
         reason,
@@ -247,7 +256,7 @@ export function stubFacilitator(options: { settleFails?: string } = {}): {
   const calls: string[] = [];
   const original = globalThis.fetch;
 
-  globalThis.fetch = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+  globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0]): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     calls.push(url);
 
