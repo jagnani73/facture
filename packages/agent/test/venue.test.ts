@@ -14,33 +14,62 @@
 import { describe, expect, it } from 'vitest';
 import { createVenueClient, VenueError } from '../src/venue.js';
 
-type Route = { status?: number; body: unknown };
+type Route = { status?: number; body: unknown; headers?: Record<string, string> };
+
+/** What the client actually sent. The x402 half of this lives in a header, so it is recorded. */
+type Sent = { path: string; headers: Record<string, string> };
 
 /** A fetch that answers from a path→response table and records what it was asked. */
 function stubFetch(routes: Record<string, Route>) {
   const calls: string[] = [];
-  const fetchImpl: typeof globalThis.fetch = async (input) => {
+  const sent: Sent[] = [];
+  const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
     const key = `${url.pathname}${url.search}`;
     calls.push(key);
+    sent.push({
+      path: key,
+      headers: Object.fromEntries(
+        Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [
+          k.toLowerCase(),
+          v,
+        ]),
+      ),
+    });
     const route = routes[key] ?? routes[url.pathname];
     if (route === undefined) {
       return new Response(JSON.stringify({ error: { message: 'not stubbed' } }), { status: 404 });
     }
     return new Response(JSON.stringify(route.body), {
       status: route.status ?? 200,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(route.headers ?? {}) },
     });
   };
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, sent };
 }
 
 const client = (routes: Record<string, Route>) => {
-  const { fetchImpl, calls } = stubFetch(routes);
+  const { fetchImpl, calls, sent } = stubFetch(routes);
   return {
     venue: createVenueClient({ baseUrl: 'http://venue.test', fetch: fetchImpl }),
     calls,
+    sent,
   };
+};
+
+const b64 = (value: unknown): string =>
+  Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
+const unb64 = (value: string): unknown => JSON.parse(Buffer.from(value, 'base64').toString('utf8'));
+
+/** One well-formed v2 requirement, as the venue and the facilitator actually shape it. */
+const REQUIREMENTS = {
+  scheme: 'exact',
+  network: 'hedera:testnet',
+  asset: '0.0.0',
+  amount: '3918',
+  payTo: '0.0.10311549',
+  maxTimeoutSeconds: 120,
+  extra: { feePayer: '0.0.7162784' },
 };
 
 const MANDATE = {
@@ -279,12 +308,88 @@ describe('quote', () => {
 
 describe('armTrade', () => {
   it('treats 402 as the success case — it is the x402 challenge, not a failure', async () => {
-    const challenge = { x402Version: 2, accepts: [{ scheme: 'exact', network: 'hedera-testnet' }] };
-    const { venue } = client({ '/v1/trades': { status: 402, body: challenge } });
+    const challenge = { x402Version: 2, accepts: [REQUIREMENTS] };
+    const { venue } = client({
+      '/v1/trades': {
+        status: 402,
+        body: { rail: { chosen: 'x402', reason: 'This bid holds no capital on Arc.' } },
+        headers: { 'payment-required': b64(challenge) },
+      },
+    });
 
     const armed = await venue.armTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1' });
     expect(armed.status).toBe(402);
     expect(armed.challenge).toEqual(challenge);
+    expect(armed.challengeError).toBeNull();
+    // The rail comes from the venue's own words, not from the status code it was inferred by.
+    expect(armed.rail?.chosen).toBe('x402');
+  });
+
+  /*
+   * **The challenge is read from the header, not the body.**
+   *
+   * The venue duplicates `accepts` into its JSON for convenience, and this used to read that
+   * copy — which made the agent a client of Facture's response shape rather than of x402.
+   * The header is where the protocol puts it and what any other client would read, so a body
+   * carrying a challenge while the header carries none is nothing to sign.
+   */
+  it('ignores a challenge that is only in the body, because the protocol is in the header', async () => {
+    const { venue } = client({
+      '/v1/trades': { status: 402, body: { x402Version: 2, accepts: [REQUIREMENTS] } },
+    });
+
+    const armed = await venue.armTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1' });
+    expect(armed.challenge).toBeNull();
+    expect(armed.challengeError).toMatch(/payment-required/);
+    // Named explicitly, because the v1 spelling is the first thing anyone reaches for.
+    expect(armed.challengeError).toMatch(/X-PAYMENT/);
+  });
+
+  /*
+   * CAIP-2, with a colon. The hyphenated spelling is accepted by every type in the stack and
+   * fails at the facilitator's kind lookup — **after** the ATS hold has been placed. Refusing
+   * it at the parse is what moves that failure to before the seller's paper is committed.
+   */
+  it('refuses a challenge whose network is not CAIP-2, rather than passing it on', async () => {
+    const { venue } = client({
+      '/v1/trades': {
+        status: 402,
+        body: {},
+        headers: {
+          'payment-required': b64({
+            x402Version: 2,
+            accepts: [{ ...REQUIREMENTS, network: 'hedera-testnet' }],
+          }),
+        },
+      },
+    });
+
+    const armed = await venue.armTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1' });
+    expect(armed.challenge).toBeNull();
+    expect(armed.challengeError).toMatch(/CAIP-2/);
+  });
+
+  it('carries both legs off a 200, where arming was the settlement', async () => {
+    const { venue } = client({
+      '/v1/trades': {
+        status: 200,
+        body: {
+          rail: { chosen: 'arc-vault', reason: 'The buyer escrowed this capital on Arc.' },
+          cashLeg: { chain: 'arc', rail: 'arc-vault', state: 'settled', transaction: '0xabc' },
+          assetLeg: { state: 'executed', transactionId: '0.0.1@1.2', unitsMinor: '4000000' },
+          settledAt: '2026-09-03T00:00:00.000Z',
+        },
+      },
+    });
+
+    const armed = await venue.armTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1' });
+    expect(armed.status).toBe(200);
+    // Nothing to sign, and nothing pretending otherwise.
+    expect(armed.challenge).toBeNull();
+    expect(armed.challengeError).toBeNull();
+    expect(armed.cashLeg?.rail).toBe('arc-vault');
+    expect(armed.assetLeg?.transactionId).toBe('0.0.1@1.2');
+    expect(armed.settledAt).toBe('2026-09-03T00:00:00.000Z');
   });
 
   it('surfaces the venue’s own error code so the loop can tell a race from an outage', async () => {
@@ -300,6 +405,112 @@ describe('armTrade', () => {
       status: 409,
       code: 'quote_expired',
     });
+  });
+});
+
+describe('settleTrade', () => {
+  const PAYMENT = {
+    x402Version: 2,
+    accepted: REQUIREMENTS as never,
+    payload: { transaction: 'CgUIARIBAA==' },
+  };
+
+  const SETTLED = {
+    '/v1/trades': {
+      body: {
+        trade: { id: 'trade-1' },
+        cashLeg: {
+          chain: 'hedera',
+          rail: 'x402',
+          state: 'settled',
+          transaction: '0.0.7162784@1788268815.161410978',
+          settledAmountMinor: '3918',
+        },
+        assetLeg: {
+          state: 'executed',
+          transactionId: '0.0.10311549@1788268822.126538150',
+          unitsMinor: '4000000',
+        },
+        settledAt: '2026-09-03T00:00:00.000Z',
+      },
+    },
+  };
+
+  /*
+   * The header name is the whole test. `@x402/*` v2 uses `payment-signature`; the older
+   * `X-PAYMENT` spelling is not an alias, and a venue reading v2 sees a request with no
+   * signature at all — which it answers by arming a *second* trade rather than by failing.
+   */
+  it('presents the payload as base64 JSON in payment-signature', async () => {
+    const { venue, sent } = client(SETTLED);
+
+    await venue.settleTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1', payment: PAYMENT });
+
+    const header = sent.at(-1)?.headers['payment-signature'];
+    expect(header).toBeDefined();
+    expect(unb64(header as string)).toEqual(PAYMENT);
+    expect(sent.at(-1)?.headers['x-payment']).toBeUndefined();
+  });
+
+  /*
+   * Both halves send the same body, deliberately. One route serves the exchange so a client
+   * cannot pay against a challenge it never received; sending different terms on the second
+   * call is answered as a trade that does not exist, not filled at the new ones.
+   */
+  it('repeats the same terms, so the second half cannot re-price the first', async () => {
+    const { venue, sent } = client(SETTLED);
+
+    await venue.armTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1', maxSlippageBps: 25 });
+    await venue.settleTrade({
+      invoiceId: 'invoice-1',
+      quoteId: 'quote-1',
+      maxSlippageBps: 25,
+      payment: PAYMENT,
+    });
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0]?.path).toBe('/v1/trades');
+    expect(sent[1]?.path).toBe('/v1/trades');
+  });
+
+  it('reads both legs back, so the cash transaction is checkable off this database', async () => {
+    const { venue } = client(SETTLED);
+
+    const settled = await venue.settleTrade({
+      invoiceId: 'invoice-1',
+      quoteId: 'quote-1',
+      payment: PAYMENT,
+    });
+
+    expect(settled.tradeId).toBe('trade-1');
+    expect(settled.cashLeg?.rail).toBe('x402');
+    expect(settled.cashLeg?.transaction).toBe('0.0.7162784@1788268815.161410978');
+    expect(settled.cashLeg?.settledAmountMinor).toBe('3918');
+    expect(settled.assetLeg?.transactionId).toBe('0.0.10311549@1788268822.126538150');
+    expect(settled.settledAt).toBe('2026-09-03T00:00:00.000Z');
+  });
+
+  /*
+   * A rejected payment must throw rather than resolve. The caller treats a resolved
+   * `settleTrade` as "the cash moved", so a 409 read as success would report a settled trade
+   * with a null transaction — the exact shape of a claim nobody can check.
+   */
+  it('throws on a refused payment rather than reporting a settlement with no transaction', async () => {
+    const { venue } = client({
+      '/v1/trades': {
+        status: 409,
+        body: {
+          error: {
+            code: 'conflict',
+            message: 'This trade settles out of the buyer’s escrowed capital on Arc.',
+          },
+        },
+      },
+    });
+
+    await expect(
+      venue.settleTrade({ invoiceId: 'i', quoteId: 'q', payment: PAYMENT }),
+    ).rejects.toMatchObject({ name: 'VenueError', status: 409, code: 'conflict' });
   });
 });
 

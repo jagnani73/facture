@@ -22,7 +22,7 @@ const csv = (value: string): string[] =>
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
 
-export const envSchema = z.object({
+const baseEnvSchema = z.object({
   LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
 
   // ── Circle ────────────────────────────────────────────────────────────────────────
@@ -70,6 +70,27 @@ export const envSchema = z.object({
   AGENT_WALLET_ID: z.string().min(1, 'is required — the Circle wallet backing these mandates'),
   AGENT_WALLET_SET_ID: z.string().min(1).optional(),
 
+  // ── Hedera — the x402 cash leg ────────────────────────────────────────────────────
+  /**
+   * The buyer's Hedera account and key, for signing x402 payments.
+   *
+   * **Optional, and its absence disables a rail rather than relaxing one.** With no key the
+   * agent trades only against mandates whose capital is escrowed on Arc — a coherent desk,
+   * just one that cannot take an unfunded bid. Falling back to arming those anyway would
+   * reserve a seller's paper against a payment nothing here could make.
+   *
+   * The key must be **ECDSA**. An ED25519 account holds HBAR perfectly well and cannot
+   * produce a signature the facilitator will accept, and the failure surfaces late as an
+   * opaque `signature_invalid` rather than as anything naming the curve.
+   */
+  AGENT_HEDERA_ACCOUNT_ID: z
+    .string()
+    .regex(/^\d+\.\d+\.\d+$/, 'must be a Hedera account id like 0.0.1234, not an EVM address')
+    .optional(),
+  AGENT_HEDERA_PRIVATE_KEY: z.string().min(1, 'must not be empty when set').optional(),
+  /** CAIP-2, with a colon. The facilitator matches this string exactly; a hyphen matches nothing. */
+  AGENT_HEDERA_NETWORK: z.enum(['hedera:testnet', 'hedera:mainnet']).default('hedera:testnet'),
+
   // ── The loop ──────────────────────────────────────────────────────────────────────
   AGENT_POLL_INTERVAL_MS: z.coerce.number().int().min(1_000).default(15_000),
   AGENT_MAX_SLIPPAGE_BPS: z.coerce.number().int().min(0).max(500).default(0),
@@ -88,6 +109,25 @@ export const envSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
 });
+
+/**
+ * The schema, plus the one rule that spans two variables.
+ *
+ * An account id with no key, or a key with no account id, is a half-configured rail — and
+ * half a rail behaves exactly like no rail while looking exactly like a working one in a
+ * `.env`. It is refused by name rather than ignored, because the symptom otherwise is the
+ * agent quietly refusing every unescrowed bid and nothing saying why.
+ */
+export const envSchema = baseEnvSchema.refine(
+  (env) =>
+    (env.AGENT_HEDERA_ACCOUNT_ID === undefined) === (env.AGENT_HEDERA_PRIVATE_KEY === undefined),
+  {
+    path: ['AGENT_HEDERA_PRIVATE_KEY'],
+    message:
+      'must be set together with AGENT_HEDERA_ACCOUNT_ID — set both to enable the x402 cash ' +
+      'leg on Hedera, or neither to trade only against mandates escrowed on Arc',
+  },
+);
 
 export type Env = z.infer<typeof envSchema>;
 
@@ -109,8 +149,15 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   throw new Error(`Invalid environment:\n${lines.join('\n')}`);
 }
 
-/** Every value in `env` that must never be logged. Fed to the logger's redactor at boot. */
-export const secretsOf = (env: Env): readonly string[] => [
-  env.CIRCLE_API_KEY,
-  env.CIRCLE_ENTITY_SECRET,
-];
+/**
+ * Every value in `env` that must never be logged. Fed to the logger's redactor at boot.
+ *
+ * The Hedera key belongs here for a reason the Circle credentials do not have: it is the one
+ * secret that appears in a *stack trace*. `PrivateKey.fromStringECDSA` throws on a malformed
+ * key, and an SDK that echoed what it was given would put a spendable key on stderr on the
+ * one code path guaranteed to run when the configuration is wrong.
+ */
+export const secretsOf = (env: Env): readonly string[] =>
+  [env.CIRCLE_API_KEY, env.CIRCLE_ENTITY_SECRET, env.AGENT_HEDERA_PRIVATE_KEY].filter(
+    (value): value is string => typeof value === 'string' && value.length > 0,
+  );

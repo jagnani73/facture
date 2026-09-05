@@ -30,21 +30,24 @@ import {
   type Currency,
   type MinorUnits,
 } from '@facture/shared';
+import { CashLegError, type CashLegSigner } from './cash.js';
 import type { Logger } from './logger.js';
 import {
-  checkMandateEscrowed,
+  checkCashLegPayable,
   decide,
   explainAgentRefusal,
   unallocated,
   withAllocation,
   type AgentRefusal,
+  type ExpectedRail,
   type InvoiceCandidate,
   type MandateAcceptance,
   type MandateAllocations,
   type MandateTerms,
+  type X402Readiness,
 } from './mandate.js';
 import { USDC_DECIMALS, type WalletClient } from './wallet.js';
-import { VenueError, type BookRow, type VenueClient } from './venue.js';
+import { VenueError, type ArmedTrade, type BookRow, type VenueClient } from './venue.js';
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
  * Scale conversion
@@ -98,17 +101,64 @@ export interface AgentDeps {
   readonly venue: VenueClient;
   readonly wallet: WalletClient;
   readonly logger: Logger;
+  /**
+   * The buyer's Hedera key, for the x402 cash leg.
+   *
+   * **Optional, and its absence is a capability rather than a misconfiguration.** Without
+   * it the agent trades only against mandates whose capital is escrowed on Arc, which is a
+   * coherent way to run a desk — it just cannot take an unfunded bid, because the venue
+   * settles those by a payment nobody here could sign.
+   */
+  readonly cash?: CashLegSigner | null | undefined;
   /** Injectable clock, so a tick is reproducible in a test. */
   readonly now?: (() => Date) | undefined;
+}
+
+/** Both legs, done, as the venue reported them. Every field is checkable on a block explorer. */
+export interface TradeSettlement {
+  /** `arc-vault` or `x402`, from the venue rather than inferred from which branch ran. */
+  readonly rail: string;
+  readonly chain: string;
+  /** The cash moving. An Arc transaction hash, or a Hedera transaction id. */
+  readonly cashTransaction: string | null;
+  readonly assetTransaction: string | null;
+  /** What was paid, in the settlement asset's smallest unit, as the payer signed it. */
+  readonly settledAmountMinor: string | null;
+  readonly settledAt: string | null;
+}
+
+/**
+ * What one `act` call did, and what it spent doing it.
+ *
+ * `spentTinybars` is separate from the report because it feeds the tick's running budget
+ * rather than the summary: the balance is read once per pass and the mirror node lags a
+ * signature by seconds, so what the pass has already promised has to be tracked locally or
+ * two invoices will both be told the same tinybar is free.
+ */
+interface ActOutcome {
+  readonly taken: TakenInvoice;
+  /** Zero unless the x402 rail actually signed. The Arc rail spends nothing this key holds. */
+  readonly spentTinybars: bigint;
 }
 
 /** One invoice the agent decided to take, and what it did about it. */
 export interface TakenInvoice {
   readonly acceptance: MandateAcceptance;
   readonly quoteId: string | null;
-  /** `null` in dry run, or when arming was skipped. */
+  /**
+   * The venue's answer to arming. `200` means it settled out of the buyer's Arc escrow on
+   * the spot; `402` means it issued a challenge. `null` in dry run, or when arming was
+   * skipped.
+   */
   readonly armedStatus: number | null;
   readonly skippedReason: string | null;
+  /** Which rail the venue chose, in its own words. `null` when nothing was armed. */
+  readonly rail: string | null;
+  /**
+   * Set once the cash has actually moved. `null` for a trade that was armed but not
+   * settled — which is a real and different outcome, not a missing value.
+   */
+  readonly settlement: TradeSettlement | null;
 }
 
 /** One invoice the agent will not take, with the reason named and written out. */
@@ -130,6 +180,13 @@ export interface TickReport {
   readonly walletUsdc: bigint | null;
   /** The same balance in invoice minor units, which is what the caps are measured in. */
   readonly spendableMinor: MinorUnits;
+  /**
+   * What the x402 payer could do this tick.
+   *
+   * Reported even when no trade took that rail, because "the agent took nothing" and "the
+   * agent could not have paid for anything" look identical in a tick summary otherwise.
+   */
+  readonly x402: X402Readiness;
   readonly committedThisTick: MinorUnits;
   readonly taken: readonly TakenInvoice[];
   readonly refused: readonly RefusedInvoice[];
@@ -150,6 +207,7 @@ export interface MarketMaker {
 
 export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketMaker {
   const { venue, wallet, logger } = deps;
+  const cash = deps.cash ?? null;
   const now = deps.now ?? (() => new Date());
   const dryRun = config.dryRun ?? true;
   const maxSlippageBps = config.maxSlippageBps ?? 0;
@@ -204,6 +262,30 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
     }
 
     const spendableMinor = usdcToInvoiceMinor(walletUsdc ?? 0n, SETTLEMENT_CURRENCY);
+
+    /*
+     * The x402 payer, read once per tick for the same reason as the wallet: within one pass
+     * the running budget below is what keeps two payments off the same tinybar, and
+     * re-reading mid-pass would let the mirror node's lag *undo* that budget rather than
+     * tighten it.
+     *
+     * This proves only that an account exists and is not empty. Whether it covers any
+     * particular trade is checked against that trade's own challenge, which names the amount
+     * in this same unit — so no price is converted here and this agent still holds no copy of
+     * the venue's ppm scale.
+     */
+    const x402: X402Readiness = {
+      configured: cash !== null,
+      balanceTinybars: cash === null ? null : await cash.balanceTinybars(),
+    };
+    if (cash !== null && x402.balanceTinybars === null) {
+      logger.warn('the x402 payer’s balance could not be read; the Hedera rail is unavailable', {
+        payerAccountId: cash.payerAccountId,
+        network: cash.network,
+      });
+    }
+    /* Tinybars promised by signatures already made this tick. See the budget note above. */
+    let spentTinybars = 0n;
 
     const rows = await venue.book(config.sellerIds);
     const quotableRows = rows.filter((row) => row.quotable);
@@ -270,24 +352,25 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
        * The pre-flight. Everything above is book-keeping the venue also does; this is the
        * part only the agent can do — decide whether a trade it arms can actually finish.
        *
-       * It used to compare the Circle wallet's balance against the invoice price, and that
-       * was wrong twice over. The wallet pays for **neither** rail: an escrowed mandate
-       * settles out of the Arc vault, and an unescrowed one gets an x402 challenge on
-       * Hedera that this wallet has no key to sign. And it compared at par against a venue
-       * that settles at a ppm scale, so it refused everything by a factor of a million and
-       * the agent took nothing at all.
+       * It asks about **both** rails, and that is the change that put this agent on the
+       * Hedera one. While it asked only about the vault, every mandate it would arm was
+       * escrowed — and an escrowed mandate settles on Arc — so the x402 branch below was
+       * unreachable by construction rather than by choice, and nothing errored to say so.
        *
-       * What replaces it asks the only question that decides whether arming is honest: is
-       * this bid's capital posted where the venue will draw it from. No amount is compared,
-       * because `backed` is measured against the mandate's whole committed capital and
-       * `decide` has already checked this trade fits inside that.
+       * No price is compared against either rail. For Arc that is because `backed` is
+       * measured against the mandate's whole committed capital and `decide` has already
+       * checked this trade fits inside it. For Hedera it is because the amount is named by
+       * the challenge, which does not exist yet. Converting one here would put a second copy
+       * of the venue's ppm scale in this package, which is the defect this pre-flight was
+       * rewritten once already to remove.
        */
-      const escrowed = checkMandateEscrowed({
+      const payable = checkCashLegPayable({
         mandateId: best.mandateId,
         vault: vaultById.get(best.mandateId) ?? null,
+        x402,
       });
-      if (!escrowed.ok) {
-        record(refused, row.invoiceId, best.mandateId, escrowed.error);
+      if (!payable.ok) {
+        record(refused, row.invoiceId, best.mandateId, payable.error);
         continue;
       }
 
@@ -307,6 +390,8 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
         proceeds: best.proceeds,
         discount: best.discount,
         annualisedYieldBps: best.annualisedYieldBps,
+        /* A prediction, not the decision — the venue re-reads the vault when the trade is armed. */
+        expectedRail: payable.value,
         /*
          * What this tick has committed, not what is left. There is no per-tick purse any
          * more: the pot a trade settles from is the mandate's escrowed capital, and the
@@ -318,7 +403,12 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
       });
 
       try {
-        taken.push(await act(best, row));
+        const outcome = await act(best, row, payable.value, {
+          balanceTinybars: x402.balanceTinybars,
+          alreadySpent: spentTinybars,
+        });
+        spentTinybars += outcome.spentTinybars;
+        taken.push(outcome.taken);
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         errors.push(`${row.invoiceId}: ${message}`);
@@ -354,6 +444,7 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
       quotableRows: quotableRows.length,
       walletUsdc,
       spendableMinor,
+      x402,
       committedThisTick,
       taken,
       refused,
@@ -362,25 +453,36 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
   }
 
   /**
-   * Take the price and arm the trade.
+   * Take the price, arm the trade, and — where the venue asks for one — sign and settle the
+   * cash leg.
    *
    * The quote is re-fetched rather than reused from the book row, because a trade is
    * executed against a `quoteId` and the venue mints that id only on the quote route. It is
    * also the venue's own answer, so a disagreement between it and the agent's arithmetic
    * shows up here rather than as a surprise fill.
    */
-  async function act(acceptance: MandateAcceptance, row: BookRow): Promise<TakenInvoice> {
-    const base: Omit<TakenInvoice, 'quoteId' | 'armedStatus' | 'skippedReason'> = { acceptance };
+  async function act(
+    acceptance: MandateAcceptance,
+    row: BookRow,
+    expectedRail: ExpectedRail,
+    budget: { readonly balanceTinybars: bigint | null; readonly alreadySpent: bigint },
+  ): Promise<ActOutcome> {
+    const base: Omit<TakenInvoice, 'quoteId' | 'armedStatus' | 'skippedReason'> = {
+      acceptance,
+      rail: null,
+      settlement: null,
+    };
+    const stop = (taken: TakenInvoice): ActOutcome => ({ taken, spentTinybars: 0n });
 
     if (!row.issued) {
       // Issuance is paced, so an invoice is quotable before its ATS bond exists. Arming
       // one would be refused as `issuance_pending`; the mandate still wants it next tick.
-      return { ...base, quoteId: null, armedStatus: null, skippedReason: 'issuance_pending' };
+      return stop({ ...base, quoteId: null, armedStatus: null, skippedReason: 'issuance_pending' });
     }
 
     const live = await venue.quote(acceptance.invoiceId);
     if (live.quoteId === null || live.proceeds === null) {
-      return { ...base, quoteId: null, armedStatus: null, skippedReason: 'no_live_quote' };
+      return stop({ ...base, quoteId: null, armedStatus: null, skippedReason: 'no_live_quote' });
     }
 
     if (live.mandateId !== acceptance.mandateId) {
@@ -389,24 +491,24 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
        * ordinary outcome on a competitive book rather than a fault. Arming anyway would
        * fill against a bid this agent does not operate.
        */
-      return {
+      return stop({
         ...base,
         quoteId: live.quoteId,
         armedStatus: null,
         skippedReason: `matched_elsewhere:${live.mandateId ?? 'none'}`,
-      };
+      });
     }
 
     const tolerance = (acceptance.proceeds * BigInt(maxSlippageBps)) / 10_000n;
     if (live.proceeds > acceptance.proceeds + tolerance) {
       // The venue wants more for the paper than this mandate priced. Outside tolerance the
       // mandate simply does not take it at that number.
-      return {
+      return stop({
         ...base,
         quoteId: live.quoteId,
         armedStatus: null,
         skippedReason: `outside_tolerance:${live.proceeds}`,
-      };
+      });
     }
 
     if (dryRun) {
@@ -415,8 +517,9 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
         mandateId: acceptance.mandateId,
         quoteId: live.quoteId,
         proceeds: live.proceeds,
+        expectedRail,
       });
-      return { ...base, quoteId: live.quoteId, armedStatus: null, skippedReason: 'dry_run' };
+      return stop({ ...base, quoteId: live.quoteId, armedStatus: null, skippedReason: 'dry_run' });
     }
 
     /*
@@ -434,18 +537,126 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
      * the N+1 the venue's own pricing path exists to avoid.
      */
 
-    const armed = await venue.armTrade({
+    const trade = {
       invoiceId: acceptance.invoiceId,
       quoteId: live.quoteId,
       maxSlippageBps,
-    });
-    logger.info('trade armed; cash leg awaits its x402 signature', {
+    };
+    const armed = await venue.armTrade(trade);
+    const armedBase = {
+      ...base,
+      quoteId: live.quoteId,
+      armedStatus: armed.status,
+      rail: armed.rail?.chosen ?? null,
+    };
+
+    /*
+     * Not a 402, so the venue settled it out of the buyer's escrow on Arc and there is
+     * nothing to sign. Reported as what it is: the old log line said the cash leg awaited an
+     * x402 signature on every arm, which on this branch described a signature nobody was
+     * waiting for against money that had already moved.
+     */
+    if (armed.status !== 402) {
+      logger.info('trade settled out of escrowed capital; no signature was needed', {
+        invoiceId: acceptance.invoiceId,
+        mandateId: acceptance.mandateId,
+        quoteId: live.quoteId,
+        rail: armed.rail?.chosen ?? null,
+        reason: armed.rail?.reason ?? null,
+      });
+      return stop({ ...armedBase, skippedReason: null, settlement: settlementFrom(armed) });
+    }
+
+    if (armed.challenge === null) {
+      // Armed, and unpayable. The seller's paper is held until the venue reclaims the
+      // expired challenge, which it does lazily on almost every request — see
+      // `reclaimExpired`. Nothing here can shorten that, and pretending to have settled
+      // would be worse than reporting it.
+      logger.error('the venue issued a challenge this agent cannot read', {
+        invoiceId: acceptance.invoiceId,
+        quoteId: live.quoteId,
+        detail: armed.challengeError,
+      });
+      return stop({ ...armedBase, skippedReason: 'unreadable_challenge' });
+    }
+
+    if (cash === null) {
+      // Unreachable through the pre-flight, which refuses an unbacked mandate when no key
+      // exists. Kept because the venue re-decides the rail and could route to x402 a bid the
+      // vault backed a moment ago, and arriving here with no key must not throw.
+      return stop({ ...armedBase, skippedReason: 'no_x402_signer' });
+    }
+
+    let signed;
+    try {
+      signed = await cash.sign(armed.challenge);
+    } catch (cause) {
+      if (cause instanceof CashLegError) {
+        logger.error('the cash leg was not signed', {
+          invoiceId: acceptance.invoiceId,
+          kind: cause.kind,
+          detail: cause.message,
+        });
+        return stop({ ...armedBase, skippedReason: `unsigned:${cause.kind}` });
+      }
+      throw cause;
+    }
+
+    /*
+     * The only amount comparison this agent makes, and it is made here because here is the
+     * only place the amount is stated in the payer's own unit. The challenge names tinybars;
+     * so does the balance. Nothing is converted, so there is no scale to get wrong.
+     *
+     * `alreadySpent` is what earlier signatures in this same tick promised. The balance was
+     * read once at the top and the mirror node lags a signature by seconds, so two invoices
+     * in one pass would otherwise both be told the same tinybar is free.
+     */
+    const available = (budget.balanceTinybars ?? 0n) - budget.alreadySpent;
+    if (available < signed.amount) {
+      logger.error('the x402 payer cannot cover this trade; not settling', {
+        invoiceId: acceptance.invoiceId,
+        payerAccountId: cash.payerAccountId,
+        requiredTinybars: signed.amount,
+        availableTinybars: available,
+      });
+      return stop({ ...armedBase, skippedReason: `x402_balance_short:${signed.amount}` });
+    }
+
+    const settled = await venue.settleTrade({ ...trade, payment: signed.payload });
+    logger.info('trade settled; the agent signed and paid the cash leg', {
       invoiceId: acceptance.invoiceId,
       mandateId: acceptance.mandateId,
       quoteId: live.quoteId,
-      status: armed.status,
+      rail: settled.cashLeg?.rail ?? armed.rail?.chosen ?? null,
+      payerAccountId: cash.payerAccountId,
+      paidTinybars: signed.amount,
+      feePayer: signed.feePayer,
+      cashTransaction: settled.cashLeg?.transaction ?? null,
+      assetTransaction: settled.assetLeg?.transactionId ?? null,
     });
-    return { ...base, quoteId: live.quoteId, armedStatus: armed.status, skippedReason: null };
+
+    return {
+      taken: {
+        ...armedBase,
+        skippedReason: null,
+        rail: settled.cashLeg?.rail ?? armedBase.rail,
+        settlement: {
+          rail: settled.cashLeg?.rail ?? 'x402',
+          chain: settled.cashLeg?.chain ?? cash.network,
+          cashTransaction: settled.cashLeg?.transaction ?? null,
+          assetTransaction: settled.assetLeg?.transactionId ?? null,
+          settledAmountMinor: settled.cashLeg?.settledAmountMinor ?? signed.amount.toString(10),
+          settledAt: settled.settledAt,
+        },
+      },
+      /*
+       * Counted against the tick's budget only once the venue has answered. A settle that
+       * threw left the transaction in an unknown state — it may yet reach consensus — but
+       * the trade is over either way, and the next tick re-reads the balance from the mirror
+       * node, which is the authority.
+       */
+      spentTinybars: signed.amount,
+    };
   }
 
   async function run(intervalMs: number): Promise<void> {
@@ -519,6 +730,25 @@ export function pickBest(
 
     return a.mandateId < b.mandateId ? -1 : a.mandateId > b.mandateId ? 1 : 0;
   })[0] as MandateAcceptance;
+}
+
+/**
+ * The Arc rail's settlement, read off the venue's own 200.
+ *
+ * `null` when that body carried no cash leg. A 200 with nothing to show for it is a venue
+ * that settled and did not say how, and building a receipt out of the branch that ran rather
+ * than out of what the venue reported is how a log ends up naming a rail nobody checked.
+ */
+function settlementFrom(armed: ArmedTrade): TradeSettlement | null {
+  if (armed.cashLeg === null) return null;
+  return {
+    rail: armed.cashLeg.rail,
+    chain: armed.cashLeg.chain,
+    cashTransaction: armed.cashLeg.transaction,
+    assetTransaction: armed.assetLeg?.transactionId ?? null,
+    settledAmountMinor: armed.cashLeg.settledAmountMinor,
+    settledAt: armed.settledAt,
+  };
 }
 
 function record(

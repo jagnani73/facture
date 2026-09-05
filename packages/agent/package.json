@@ -11,6 +11,9 @@
   "dependencies": {
     "@circle-fin/developer-controlled-wallets": "^10.8.0",
     "@facture/shared": "workspace:*",
+    "@hiero-ledger/sdk": "2.85.0",
+    "@x402/core": "2.24.0",
+    "@x402/hedera": "2.24.0",
     "viem": "^2.55.1",
     "zod": "^3.25.76"
   },

@@ -33,7 +33,7 @@
  * The README's claim is that a standing bid is firm because the capital behind it is
  * committed rather than merely permitted, and a mandate matches only up to its unallocated
  * balance. That is what {@link decide} enforces, and the agent additionally proves the
- * capital exists on-chain before committing — see `checkMandateEscrowed` and `agent.ts`. An
+ * capital exists on-chain before committing — see `checkCashLegPayable` and `agent.ts`. An
  * agent that simulated a balance it did not hold would be fake liquidity, which is the one
  * thing the product cannot survive.
  *
@@ -190,23 +190,30 @@ export function toSharedMandate(
 /**
  * The agent's own refusal, on top of shared's union.
  *
- * `MANDATE_NOT_ESCROWED` is not a venue refusal and deliberately is not in shared's
- * `RefusalCode` — the venue does not refuse this at all. It reroutes: a mandate whose
- * capital is not posted on Arc gets an x402 challenge on Hedera instead, which is a
- * perfectly good answer for a buyer who can sign one. **This agent cannot.** Its Circle
- * wallet is an Arc EVM wallet with no Hedera account and no way to produce a native
- * `TransferTransaction`, so arming such a trade would place a hold and reserve capital for
- * a payment nobody in this system will ever make, and the venue would sweep it back when
- * the challenge expired.
+ * `CASH_LEG_UNPAYABLE` is not a venue refusal and deliberately is not in shared's
+ * `RefusalCode` — the venue never refuses for this reason. It has two rails and always has
+ * one to offer. This is the *agent* saying it cannot pay on either of them, which is a fact
+ * about this process rather than about the invoice, the mandate, or the paper.
  *
- * So this is the agent declining to arm something it knows it cannot finish, and the
- * reason is a fact about the agent rather than about the invoice.
+ * ## It has been wrong twice, in two different ways, and both are worth keeping
  *
- * **It replaced `WALLET_BALANCE_SHORT`, which was checking the wrong pot.** That refusal
- * compared the agent's Circle wallet balance against the invoice price, and the wallet pays
- * for neither rail: the Arc rail draws on the vault, and the x402 rail needs a Hedera key
- * this wallet does not have. It was also comparing at par against a venue that settles at a
- * ppm scale, so it refused everything by a factor of a million.
+ * It began as `WALLET_BALANCE_SHORT`, comparing the Circle wallet's balance against the
+ * invoice price. That checked the wrong pot — the wallet settles neither rail — and it
+ * compared at par against a venue that settles at a ppm scale, so it refused everything by a
+ * factor of a million.
+ *
+ * It then became `MANDATE_NOT_ESCROWED`, which fixed the pot but hardcoded a premise that
+ * has since stopped being true: *"a mandate whose capital is not posted on Arc gets an x402
+ * challenge on Hedera instead, which is a perfectly good answer for a buyer who can sign
+ * one. **This agent cannot.**"* It can now — `cash.ts` holds the buyer's Hedera key. That
+ * one sentence was the only thing making an unescrowed bid unreachable, and while it stood,
+ * a gate written to keep the agent honest was also what kept it off the x402 rail entirely:
+ * every mandate it would arm was backed, and a backed mandate settles on Arc, so no
+ * challenge could ever arrive.
+ *
+ * The lesson is the same one this repo keeps relearning. A guard that encodes a capability
+ * as a permanent fact outlives the capability changing, and it fails silently — nothing
+ * errored, the agent simply never took the other path.
  */
 /**
  * The venue's reading of the Arc vault behind one mandate. USDC minor units, 6dp.
@@ -225,25 +232,41 @@ export interface VaultBacking {
   readonly backed: boolean;
 }
 
-export interface MandateNotEscrowedRefusal {
-  readonly code: 'MANDATE_NOT_ESCROWED';
-  readonly mandateId: string;
+/**
+ * Whether this process can sign an x402 cash leg, and what it found when it asked.
+ *
+ * Three states, not two, for the same reason `VaultBacking` has three: "no key configured",
+ * "a key whose account is empty" and "a key whose account could not be read" are different
+ * problems with different fixes, and collapsing them produces a refusal nobody can act on.
+ */
+export interface X402Readiness {
+  /** A Hedera signer exists on this process. False means the rail is simply not fitted. */
+  readonly configured: boolean;
   /**
-   * What the vault holds, in USDC minor units, when the venue could read it.
+   * The payer's balance in tinybars, or `null` when the mirror node could not be read.
    *
-   * Null covers two different situations and the sentence below tells them apart: the venue
-   * has no vault to ask, or it has one and could not reach it. Neither is "zero".
+   * Read once per tick and compared against zero, never against a price. What it proves is
+   * only that the account exists and is not empty; whether it covers *this* trade is checked
+   * against the challenge, which names the amount in this same unit.
    */
-  readonly depositedUsdcMinor: bigint | null;
-  /** What the vault would have to hold to back this mandate. USDC minor units. */
-  readonly requiredUsdcMinor: bigint;
-  /** False when the venue holds no vault at all, so nothing was asked. */
-  readonly checked: boolean;
+  readonly balanceTinybars: bigint | null;
 }
 
-export type AgentRefusal = Refusal | MandateNotEscrowedRefusal;
+/** Which rail the agent expects to settle on. The venue decides for real; see `checkCashLegPayable`. */
+export type ExpectedRail = 'arc-vault' | 'x402-hedera';
 
-export type AgentRefusalCode = RefusalCode | 'MANDATE_NOT_ESCROWED';
+export interface CashLegUnpayableRefusal {
+  readonly code: 'CASH_LEG_UNPAYABLE';
+  readonly mandateId: string;
+  /** The Arc rail's answer. `null` when the venue runs no vault at all, which is not "unbacked". */
+  readonly vault: VaultBacking | null;
+  /** The Hedera rail's answer, from this process rather than from the venue. */
+  readonly x402: X402Readiness;
+}
+
+export type AgentRefusal = Refusal | CashLegUnpayableRefusal;
+
+export type AgentRefusalCode = RefusalCode | 'CASH_LEG_UNPAYABLE';
 
 /**
  * Every refusal this agent can itself produce.
@@ -263,11 +286,11 @@ export const AGENT_EMITTED_REFUSAL_CODES = [
   'EXPOSURE_EXHAUSTED',
   'DEBTOR_CONCENTRATION',
   'INVOICE_NOT_CONFIRMED',
-  'MANDATE_NOT_ESCROWED',
+  'CASH_LEG_UNPAYABLE',
 ] as const satisfies readonly AgentRefusalCode[];
 
-export const isMandateNotEscrowed = (r: AgentRefusal): r is MandateNotEscrowedRefusal =>
-  r.code === 'MANDATE_NOT_ESCROWED';
+export const isCashLegUnpayable = (r: AgentRefusal): r is CashLegUnpayableRefusal =>
+  r.code === 'CASH_LEG_UNPAYABLE';
 
 /**
  * One sentence, addressed to the party being refused, naming both sides of the comparison
@@ -275,7 +298,7 @@ export const isMandateNotEscrowed = (r: AgentRefusal): r is MandateNotEscrowedRe
  * produce identical wording for identical refusals.
  */
 export function explainAgentRefusal(r: AgentRefusal): string {
-  if (!isMandateNotEscrowed(r)) return explainRefusal(r);
+  if (!isCashLegUnpayable(r)) return explainRefusal(r);
 
   /*
    * USDC minor units, deliberately rendered raw rather than through `formatMinorUnits`.
@@ -288,23 +311,29 @@ export function explainAgentRefusal(r: AgentRefusal): string {
    */
   const usdc = (amount: bigint): string => `${amount.toString(10)} USDC minor units`;
 
-  if (!r.checked) {
-    return (
-      `This venue does not escrow mandate capital on Arc, so a trade against mandate ` +
-      `${r.mandateId} would settle by a payment this agent cannot sign. Not armed.`
-    );
-  }
-  if (r.depositedUsdcMinor === null) {
-    return (
-      `The Arc vault could not be read for mandate ${r.mandateId}, so whether this bid is ` +
-      'backed is unknown rather than false. Not armed, because arming a trade that cannot ' +
-      'settle costs the seller a hold.'
-    );
-  }
+  /*
+   * Both halves, always. The refusal means *neither* rail could pay, so naming only the one
+   * the reader happens to be thinking about is how someone funds the vault to fix a problem
+   * that was a missing Hedera key. The Arc clause comes first because it is the venue's
+   * reading and the cheaper thing to correct.
+   */
+  const arc =
+    r.vault === null
+      ? 'this venue escrows no mandate capital on Arc'
+      : r.vault.depositedUsdcMinor === null
+        ? 'the Arc vault could not be read, so its backing is unknown rather than absent'
+        : `mandate ${r.mandateId} holds ${usdc(r.vault.depositedUsdcMinor)} on Arc against ` +
+          `the ${usdc(r.vault.requiredUsdcMinor)} its committed capital needs`;
+
+  const hedera = !r.x402.configured
+    ? 'no Hedera key is configured on this agent, so it cannot sign an x402 payment'
+    : r.x402.balanceTinybars === null
+      ? 'the x402 payer’s balance could not be read, so whether it can pay is unknown'
+      : 'the x402 payer holds no HBAR';
+
   return (
-    `Mandate ${r.mandateId} holds ${usdc(r.depositedUsdcMinor)} on Arc against the ` +
-    `${usdc(r.requiredUsdcMinor)} its committed capital needs. A bid that is not escrowed ` +
-    'settles by a payment this agent cannot sign, so it is not armed.'
+    `Not armed: ${arc}, and ${hedera}. With neither rail able to carry the cash leg, ` +
+    'arming would hold the seller’s paper against a payment that never arrives.'
   );
 }
 
@@ -317,7 +346,7 @@ export function explainAgentRefusal(r: AgentRefusal): string {
  */
 type OnChainSpelling<C extends AgentRefusalCode> = C extends 'INELIGIBLE_JURISDICTION'
   ? 'CONTROL_LIST_BLOCKED'
-  : C extends 'CURRENCY_MISMATCH' | 'MANDATE_NOT_ESCROWED'
+  : C extends 'CURRENCY_MISMATCH' | 'CASH_LEG_UNPAYABLE'
     ? null
     : C;
 
@@ -342,9 +371,9 @@ type OnChainSpelling<C extends AgentRefusalCode> = C extends 'INELIGIBLE_JURISDI
  *   `INELIGIBLE_JURISDICTION` is absent from {@link AGENT_EMITTED_REFUSAL_CODES} precisely
  *   because only a diamond the agent has not called could decide it.
  * - `CURRENCY_MISMATCH` is `null` because the on-chain book does not model currency.
- * - `MANDATE_NOT_ESCROWED` is `null` because the venue does not refuse this at all — it
- *   reroutes to x402 — so there is no on-chain refusal for it to be the same as. It is this
- *   agent declining to arm what it cannot finish, which is a fact about the agent.
+ * - `CASH_LEG_UNPAYABLE` is `null` because the venue does not refuse this at all — it always
+ *   has a rail to offer — so there is no on-chain refusal for it to be the same as. It is
+ *   this agent declining to arm what it cannot finish, which is a fact about the agent.
  */
 export const ON_CHAIN_REASON_CODE: { readonly [C in AgentRefusalCode]: OnChainSpelling<C> } = {
   RATING_BELOW_MANDATE: 'RATING_BELOW_MANDATE',
@@ -356,7 +385,7 @@ export const ON_CHAIN_REASON_CODE: { readonly [C in AgentRefusalCode]: OnChainSp
   NOT_KYC_VERIFIED: 'NOT_KYC_VERIFIED',
   INELIGIBLE_JURISDICTION: 'CONTROL_LIST_BLOCKED',
   CURRENCY_MISMATCH: null,
-  MANDATE_NOT_ESCROWED: null,
+  CASH_LEG_UNPAYABLE: null,
 };
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
@@ -506,41 +535,59 @@ export function decide(
 }
 
 /**
- * The second half of the pre-flight: will this bid's capital actually settle the trade?
+ * The second half of the pre-flight: is there a rail this agent can actually pay on?
  *
  * {@link decide} answers a question about the mandate's *books* — is there headroom. This
- * answers a question about the chain: is that headroom backed by capital posted on Arc.
- * They are different questions and both have to pass.
+ * answers a question about money: whether the cash leg of the trade it is about to arm can
+ * be settled by anyone in this process. They are different questions and both have to pass.
  *
- * **No amount is compared here, and that is the point.** The venue sets `backed` by
- * measuring the vault against the mandate's WHOLE committed capital, so a backed mandate
- * covers anything that fits in the headroom `decide` has already checked. Comparing a
- * per-trade price would mean converting it into USDC at the venue's ppm scale — a second
- * copy of a number only the venue should own, and the two would drift. This agent
- * deliberately knows nothing about that scale.
+ * ## Two rails, and either one is enough
  *
- * An unreadable vault refuses. Elsewhere in this system an indeterminate answer is treated
- * as "do not act on it" rather than "assume the worst", and that is what this is: the cost
- * of not arming is a missed fill, and the cost of arming wrongly is a seller's position
- * held for a payment that never comes.
+ * - **Escrowed on Arc.** The venue draws the payment out of `MandateVault` and nothing here
+ *   signs anything. `backed` is the venue's own reading, measured against the mandate's
+ *   WHOLE committed capital.
+ * - **x402 on Hedera.** The venue issues a challenge and this process signs it with the
+ *   buyer's Hedera key. That needs a key to exist and an account behind it with something in
+ *   it — see `cash.ts` for why no other key the agent holds can produce that signature.
+ *
+ * **No price is compared against either.** For the vault that is because `backed` already
+ * covers everything the headroom allows. For x402 it is because the amount is named by the
+ * challenge, in the settlement asset's own unit, and that check belongs at the moment of
+ * signing rather than here — converting a price into tinybars would mean a second copy of
+ * the venue's ppm scale, which is the defect this whole pre-flight was rewritten to remove.
+ * So this returns *which rail it expects*, and the exact arithmetic happens where the venue
+ * has already done the conversion.
+ *
+ * ## What the expected rail is and is not
+ *
+ * It is a prediction, not a decision. `chooseRail` on the venue re-reads the vault on every
+ * `POST /v1/trades` and is the authority; a stale reading here costs a wasted arm at worst.
+ * The prediction is still worth making, because refusing to arm what nothing can pay for is
+ * the difference between a missed fill and a seller's paper held against a payment that
+ * never comes.
+ *
+ * An unreadable answer refuses on the x402 side and falls through on the Arc side, and the
+ * asymmetry is deliberate: an unreadable vault is a case the venue itself already handles by
+ * routing to x402, whereas an unreadable payer balance is this process failing to establish
+ * that it can pay at all.
  */
-export function checkMandateEscrowed(input: {
+export function checkCashLegPayable(input: {
   readonly mandateId: string;
   readonly vault: VaultBacking | null;
-}): Result<true, MandateNotEscrowedRefusal> {
-  const refusal = (over: Partial<MandateNotEscrowedRefusal> = {}): MandateNotEscrowedRefusal => ({
-    code: 'MANDATE_NOT_ESCROWED',
-    mandateId: input.mandateId,
-    depositedUsdcMinor: input.vault?.depositedUsdcMinor ?? null,
-    requiredUsdcMinor: input.vault?.requiredUsdcMinor ?? 0n,
-    checked: input.vault?.checked ?? false,
-    ...over,
-  });
+  readonly x402: X402Readiness;
+}): Result<ExpectedRail, CashLegUnpayableRefusal> {
+  // Escrowed capital settles without a signature. Checked first because it is the rail the
+  // venue prefers, and because it costs this process nothing at all.
+  if (input.vault?.backed === true) return ok('arc-vault');
 
-  // The venue said nothing about a vault: it has none, so nothing here can settle on Arc.
-  if (input.vault === null) return err(refusal({ checked: false }));
-  if (!input.vault.backed) return err(refusal());
-  return ok(true);
+  if (input.x402.configured && (input.x402.balanceTinybars ?? 0n) > 0n) return ok('x402-hedera');
+
+  return err({
+    code: 'CASH_LEG_UNPAYABLE',
+    mandateId: input.mandateId,
+    vault: input.vault,
+    x402: input.x402,
+  });
 }
 
 /**

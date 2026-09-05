@@ -62,20 +62,21 @@ describe('the on-chain refusal vocabulary', () => {
     expect(translated).toEqual(['INELIGIBLE_JURISDICTION -> CONTROL_LIST_BLOCKED']);
   });
 
-  it('leaves exactly the currency and escrow refusals without an on-chain equivalent', () => {
+  it('leaves exactly the currency and cash-leg refusals without an on-chain equivalent', () => {
     const unmodelled = Object.entries(ON_CHAIN_REASON_CODE)
       .filter(([, onChain]) => onChain === null)
       .map(([code]) => code)
       .sort();
 
     /*
-     * `MANDATE_NOT_ESCROWED` replaced `WALLET_BALANCE_SHORT`, and it is `null` here for a
-     * sharper reason than its predecessor was. The venue does not refuse an unescrowed bid
-     * at all — it reroutes to x402 — so there is no on-chain refusal for this to be the same
-     * as. It is the agent declining to arm what it cannot finish, which is a fact about the
-     * agent rather than about the trade.
+     * `CASH_LEG_UNPAYABLE` is the third name for this refusal, after `WALLET_BALANCE_SHORT`
+     * and `MANDATE_NOT_ESCROWED`, and it is `null` here for a sharper reason than either.
+     * The venue never refuses a trade for this: it holds two rails and always has one to
+     * offer. So there is no on-chain refusal for this to be the same as — it is the agent
+     * declining to arm what *it* cannot finish, which is a fact about this process rather
+     * than about the trade, the mandate or the paper.
      */
-    expect(unmodelled).toEqual(['CURRENCY_MISMATCH', 'MANDATE_NOT_ESCROWED']);
+    expect(unmodelled).toEqual(['CASH_LEG_UNPAYABLE', 'CURRENCY_MISMATCH']);
   });
 
   it('spells every other refusal the same on both sides', () => {

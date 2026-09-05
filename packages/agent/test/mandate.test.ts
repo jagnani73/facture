@@ -23,13 +23,13 @@ import {
   AGENT_EMITTED_REFUSAL_CODES,
   assertWellFormed,
   availableFor,
-  checkMandateEscrowed,
+  checkCashLegPayable,
   debtorHeadroom,
   decide,
   explainAgentRefusal,
   exposureTo,
   isQuoting,
-  isMandateNotEscrowed,
+  isCashLegUnpayable,
   NO_ALLOCATIONS,
   toSharedMandate,
   unallocated,
@@ -37,6 +37,7 @@ import {
   type InvoiceCandidate,
   type MandateAllocations,
   type MandateTerms,
+  type X402Readiness,
 } from '../src/mandate.js';
 
 /** $200,000 committed, $50,000 per customer, A or better, 90 days, 12.5% annualised. */
@@ -183,9 +184,9 @@ describe('decide — every refusal is reachable and named', () => {
   it('covers every refusal `decide` is capable of producing', () => {
     const produced = new Set(cases.map((c) => c.code));
     const decidable = AGENT_EMITTED_REFUSAL_CODES.filter(
-      // `decide` sees neither the invoice's status nor the wallet; those two are refused
-      // by the agent loop, and are covered in agent.test.ts.
-      (code) => code !== 'INVOICE_NOT_CONFIRMED' && code !== 'MANDATE_NOT_ESCROWED',
+      // `decide` sees neither the invoice's status nor either settlement rail; those two
+      // are refused by the agent loop, and are covered in agent.test.ts.
+      (code) => code !== 'INVOICE_NOT_CONFIRMED' && code !== 'CASH_LEG_UNPAYABLE',
     );
     expect([...produced].sort()).toEqual([...decidable].sort());
   });
@@ -295,13 +296,17 @@ describe('money stays in bigint', () => {
   });
 });
 
-describe('checkMandateEscrowed', () => {
+describe('checkCashLegPayable', () => {
   const BACKED = {
     checked: true,
     depositedUsdcMinor: 5_000_000n,
     requiredUsdcMinor: 50_000n,
     backed: true,
   };
+  const UNBACKED = { ...BACKED, depositedUsdcMinor: 1_000n, backed: false };
+
+  const NO_SIGNER: X402Readiness = { configured: false, balanceTinybars: null };
+  const FUNDED_SIGNER: X402Readiness = { configured: true, balanceTinybars: 4_827_974_750n };
 
   /*
    * No amount is passed in, and that is the design rather than an omission. The venue sets
@@ -310,65 +315,160 @@ describe('checkMandateEscrowed', () => {
    * per-trade price here would mean this package holding its own copy of the venue's ppm
    * scale — and two copies of that number drifting apart is the defect this replaced.
    */
-  it('passes a bid whose capital is posted, without comparing an amount', () => {
-    const result = checkMandateEscrowed({ mandateId: 'mandate-a', vault: BACKED });
+  it('takes the Arc rail when the bid is escrowed, without comparing an amount', () => {
+    const result = checkCashLegPayable({
+      mandateId: 'mandate-a',
+      vault: BACKED,
+      x402: NO_SIGNER,
+    });
     expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('arc-vault');
   });
 
-  it('refuses a bid that is short, naming both figures in the unit it read them in', () => {
-    const result = checkMandateEscrowed({
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════
+   * THE TEST THIS FUNCTION WAS REWRITTEN FOR
+   * ═══════════════════════════════════════════════════════════════════════════════════
+   *
+   * Its predecessor refused this case outright, on the reasoning that an unescrowed bid
+   * settles by an x402 payment the agent could not sign. That was true and it is not any
+   * more — `cash.ts` holds the buyer's Hedera key.
+   *
+   * The consequence of the old answer was not a missed trade, it was a dead branch. Every
+   * mandate that passed the old gate was escrowed, and the venue settles an escrowed
+   * mandate out of the vault, so the agent could never receive an x402 challenge at all.
+   * Nothing errored; it simply never happened. This test is what makes that reachable, and
+   * what would fail if the premise were quietly reinstated.
+   */
+  it('takes the Hedera rail when the bid is not escrowed but a funded key can pay', () => {
+    const result = checkCashLegPayable({
       mandateId: 'mandate-a',
-      vault: { ...BACKED, depositedUsdcMinor: 1_000n, backed: false },
+      vault: UNBACKED,
+      x402: FUNDED_SIGNER,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('x402-hedera');
+  });
+
+  it('prefers Arc when both rails could carry it, because it costs this agent nothing', () => {
+    const result = checkCashLegPayable({
+      mandateId: 'mandate-a',
+      vault: BACKED,
+      x402: FUNDED_SIGNER,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('arc-vault');
+  });
+
+  it('refuses only when neither rail can carry the cash leg', () => {
+    const result = checkCashLegPayable({
+      mandateId: 'mandate-a',
+      vault: UNBACKED,
+      x402: NO_SIGNER,
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
 
-    expect(result.error.code).toBe('MANDATE_NOT_ESCROWED');
-    expect(isMandateNotEscrowed(result.error)).toBe(true);
+    expect(result.error.code).toBe('CASH_LEG_UNPAYABLE');
+    expect(isCashLegUnpayable(result.error)).toBe(true);
+  });
 
+  /*
+   * Both halves in one sentence, always. The refusal means neither rail could pay, so a
+   * sentence naming only the vault sends the reader off to deposit USDC to fix what was a
+   * missing Hedera key.
+   */
+  it('names both rails in the refusal, so nobody funds the wrong one', () => {
+    const result = checkCashLegPayable({
+      mandateId: 'mandate-a',
+      vault: UNBACKED,
+      x402: NO_SIGNER,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+
+    const sentence = explainAgentRefusal(result.error);
     /*
      * USDC minor units, rendered raw. The refusal sentence for the code this replaced went
      * through `formatMinorUnits` at the invoice currency's two decimals — put six-decimal
      * USDC through that and 0.05 USDC reads as $500.00. Naming both sides of a comparison
      * wrongly, in the sentence explaining a units bug, would be a poor joke.
      */
-    const sentence = explainAgentRefusal(result.error);
     expect(sentence).toContain('1000 USDC minor units');
     expect(sentence).toContain('50000 USDC minor units');
     expect(sentence).not.toContain('$');
+    expect(sentence).toMatch(/no Hedera key is configured/i);
   });
 
-  /* Three distinguishable answers, because "we could not ask" is not "the answer is no". */
-  it('says an unreadable vault is unknown rather than unbacked', () => {
-    const result = checkMandateEscrowed({
+  /*
+   * The asymmetry between the two rails' indeterminate answers, which is deliberate.
+   *
+   * An unreadable vault is a case the venue itself handles by routing to x402 — so falling
+   * through to the other rail agrees with what the venue is about to decide. An unreadable
+   * payer balance is this process failing to establish that it can pay at all, and there is
+   * nobody else to fall through to.
+   */
+  it('treats an unreadable vault as a reason to try the other rail, not as a refusal', () => {
+    const result = checkCashLegPayable({
       mandateId: 'mandate-a',
       vault: { ...BACKED, depositedUsdcMinor: null, backed: false },
+      x402: FUNDED_SIGNER,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('x402-hedera');
+  });
+
+  it('refuses an unreadable payer balance rather than assuming it can pay', () => {
+    const result = checkCashLegPayable({
+      mandateId: 'mandate-a',
+      vault: UNBACKED,
+      x402: { configured: true, balanceTinybars: null },
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(explainAgentRefusal(result.error)).toMatch(/could not be read/i);
+    expect(explainAgentRefusal(result.error)).toMatch(/balance could not be read/i);
+  });
+
+  it('refuses an empty payer, and says so rather than reporting it as absent', () => {
+    const result = checkCashLegPayable({
+      mandateId: 'mandate-a',
+      vault: UNBACKED,
+      x402: { configured: true, balanceTinybars: 0n },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(explainAgentRefusal(result.error)).toMatch(/holds no HBAR/i);
   });
 
   it('says a venue with no vault escrows nothing, rather than reporting a zero balance', () => {
-    const result = checkMandateEscrowed({ mandateId: 'mandate-a', vault: null });
+    const result = checkCashLegPayable({
+      mandateId: 'mandate-a',
+      vault: null,
+      x402: NO_SIGNER,
+    });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.checked).toBe(false);
-    expect(explainAgentRefusal(result.error)).toMatch(/does not escrow mandate capital/i);
+    expect(result.error.vault).toBeNull();
+    expect(explainAgentRefusal(result.error)).toMatch(/escrows no mandate capital/i);
   });
 
-  it('is a distinct code from EXPOSURE_EXHAUSTED — books and chain are different questions', () => {
-    // The mandate's books say there is room; the capital behind it is not posted.
+  it('is a distinct code from EXPOSURE_EXHAUSTED — books and money are different questions', () => {
+    // The mandate's books say there is room; nothing can pay for it.
     const bookOutcome = decide(terms(), NO_ALLOCATIONS, candidate());
     expect(bookOutcome.ok).toBe(true);
 
-    const chainOutcome = checkMandateEscrowed({
+    const moneyOutcome = checkCashLegPayable({
       mandateId: 'mandate-a',
       vault: { ...BACKED, depositedUsdcMinor: 0n, backed: false },
+      x402: NO_SIGNER,
     });
-    expect(chainOutcome.ok).toBe(false);
-    if (chainOutcome.ok) return;
-    expect(chainOutcome.error.code).not.toBe('EXPOSURE_EXHAUSTED');
+    expect(moneyOutcome.ok).toBe(false);
+    if (moneyOutcome.ok) return;
+    expect(moneyOutcome.error.code).not.toBe('EXPOSURE_EXHAUSTED');
   });
 });
 

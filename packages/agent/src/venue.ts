@@ -36,6 +36,7 @@ import {
   type Rating,
 } from '@facture/shared';
 import { z } from 'zod';
+import { paymentChallengeSchema, type PaymentChallenge, type PaymentPayload } from './cash.js';
 import type { MandateAllocations, MandateTerms, VaultBacking } from './mandate.js';
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
@@ -142,6 +143,36 @@ const liveQuoteSchema = z.object({
   pricedAt: z.string().optional(),
 });
 
+const railSchema = z.object({ chosen: z.string().min(1), reason: z.string() });
+
+const cashLegSchema = z.object({
+  chain: z.string(),
+  rail: z.string(),
+  state: z.string(),
+  transaction: z.string().nullable().optional(),
+  settledAmountMinor: z.string().nullable().optional(),
+  explorerUrl: z.string().nullable().optional(),
+});
+
+const assetLegSchema = z.object({
+  state: z.string(),
+  transactionId: z.string().nullable().optional(),
+  unitsMinor: z.string().nullable().optional(),
+  explorerUrl: z.string().nullable().optional(),
+});
+
+/**
+ * The armed-trade body. Every field is optional because the two rails return different
+ * shapes from one route, and the status code — not the body — is what says which.
+ */
+const armedBodySchema = z.object({
+  trade: z.object({ id: z.string() }).partial().optional(),
+  rail: railSchema.optional(),
+  cashLeg: cashLegSchema.optional(),
+  assetLeg: assetLegSchema.optional(),
+  settledAt: z.string().optional(),
+});
+
 /* ───────────────────────────────────────────────────────────────────────────────────── *
  * What this module hands back
  * ───────────────────────────────────────────────────────────────────────────────────── */
@@ -202,14 +233,82 @@ export interface LiveQuote {
   readonly expiresAt: string | null;
 }
 
-/** What `POST /v1/trades` returns before the cash leg is signed. */
+/**
+ * Which rail the venue chose for a trade, in its own words.
+ *
+ * Read rather than inferred from the status code. Both are honest signals and they cannot
+ * disagree, but a reader of a log should not have to know that 200 means Arc — the venue
+ * publishes the reason as a sentence and throwing it away is how a build ends up demoing the
+ * rail it did not mean to.
+ */
+export interface RailChoice {
+  readonly chosen: string;
+  readonly reason: string;
+}
+
+/**
+ * What `POST /v1/trades` returns for the first half of the exchange.
+ *
+ * **Two outcomes, and the status is which.** `200` means the buyer's capital was escrowed on
+ * Arc and the trade is *already settled* — there was nothing to sign, because a funded
+ * mandate agreed in advance to anything meeting its terms. `402` means the cash leg is
+ * pay-as-you-go on Hedera and the challenge is waiting.
+ */
 export interface ArmedTrade {
   readonly invoiceId: string;
   readonly quoteId: string;
-  /** HTTP status. `402` is the success case: the x402 challenge is waiting to be signed. */
+  /** `200` (settled out of escrow on Arc) or `402` (an x402 challenge to sign on Hedera). */
   readonly status: number;
-  /** The x402 challenge, verbatim. Signing it is the settlement package's job, not this one's. */
-  readonly challenge: unknown;
+  readonly rail: RailChoice | null;
+  /**
+   * The x402 challenge, parsed from the `payment-required` header. `null` on a 200.
+   *
+   * **From the header, not the body.** The venue duplicates `accepts` into the JSON for
+   * convenience, and reading that copy would make this a client of Facture's response shape
+   * rather than of x402. The header is where the protocol puts it, and it is what any other
+   * x402 client would read.
+   */
+  readonly challenge: PaymentChallenge | null;
+  /** Set when the venue answered 402 without a readable challenge. Nothing can be signed. */
+  readonly challengeError: string | null;
+  /**
+   * Both legs, present only on the 200 — where arming *was* the settlement.
+   *
+   * On a 402 these are null because nothing has moved: the asset leg is held rather than
+   * transferred and the cash leg does not exist until the payer signs. Carrying the held
+   * asset leg here would report a hold as a transfer, which is the one thing a receipt of
+   * this shape must never do.
+   */
+  readonly cashLeg: CashLegReceipt | null;
+  readonly assetLeg: AssetLegReceipt | null;
+  readonly settledAt: string | null;
+}
+
+/** What the second half returns: both legs, done. */
+export interface SettledTrade {
+  readonly invoiceId: string;
+  readonly tradeId: string | null;
+  readonly settledAt: string | null;
+  readonly cashLeg: CashLegReceipt | null;
+  readonly assetLeg: AssetLegReceipt | null;
+}
+
+export interface CashLegReceipt {
+  readonly chain: string;
+  readonly rail: string;
+  readonly state: string;
+  /** The transaction the facilitator submitted. This is the money moving, on chain. */
+  readonly transaction: string | null;
+  /** What was actually paid, in the settlement asset's smallest unit, as the payer signed it. */
+  readonly settledAmountMinor: string | null;
+  readonly explorerUrl: string | null;
+}
+
+export interface AssetLegReceipt {
+  readonly state: string;
+  readonly transactionId: string | null;
+  readonly unitsMinor: string | null;
+  readonly explorerUrl: string | null;
 }
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
@@ -254,15 +353,43 @@ export interface VenueClient {
   /** The live price, and the quote id a trade is executed against. */
   quote(invoiceId: string): Promise<LiveQuote>;
   /**
-   * Arm a trade. Returns the x402 challenge; **does not** settle, because signing the cash
-   * leg is the settlement package's job. Nothing here broadcasts a transaction.
+   * Arm a trade — the first half of the exchange.
+   *
+   * Comes back either already settled out of the buyer's Arc escrow (200) or carrying an
+   * x402 challenge to sign (402). Nothing here signs anything: the key lives in `cash.ts`
+   * and the decision to use it lives in `agent.ts`.
    */
   armTrade(input: {
     readonly invoiceId: string;
     readonly quoteId: string;
     readonly maxSlippageBps?: number | undefined;
   }): Promise<ArmedTrade>;
+  /**
+   * The second half: repeat the same request with the signed payload, and the venue settles
+   * both legs against each other.
+   *
+   * **The same body, deliberately.** One route serves both halves so that a client cannot
+   * execute a payment against a challenge it never received, and sending different terms
+   * here would be answered as a trade that does not exist rather than filled at the new
+   * ones.
+   */
+  settleTrade(input: {
+    readonly invoiceId: string;
+    readonly quoteId: string;
+    readonly maxSlippageBps?: number | undefined;
+    readonly payment: PaymentPayload;
+  }): Promise<SettledTrade>;
 }
+
+/**
+ * x402 v2 header names. Lowercase because `Headers` is case-insensitive on lookup and this
+ * is the spelling the shipped `@x402/*` v2 packages use — there is no `X-PAYMENT` at v2, and
+ * a v1 spelling fails as a missing signature rather than as a bad one.
+ */
+const X402_HEADERS = {
+  required: 'payment-required',
+  signature: 'payment-signature',
+} as const;
 
 export function createVenueClient(config: VenueClientConfig): VenueClient {
   const base = config.baseUrl.replace(/\/+$/, '');
@@ -272,7 +399,7 @@ export function createVenueClient(config: VenueClientConfig): VenueClient {
   async function request(
     path: string,
     init: RequestInit = {},
-  ): Promise<{ status: number; body: unknown }> {
+  ): Promise<{ status: number; body: unknown; headers: Headers }> {
     const url = `${base}${path}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -296,7 +423,7 @@ export function createVenueClient(config: VenueClientConfig): VenueClient {
           );
         }
       }
-      return { status: response.status, body };
+      return { status: response.status, body, headers: response.headers };
     } catch (cause) {
       if (cause instanceof VenueError) throw cause;
       const reason = cause instanceof Error ? cause.message : String(cause);
@@ -361,15 +488,7 @@ export function createVenueClient(config: VenueClientConfig): VenueClient {
     },
 
     async armTrade(input) {
-      const { status, body } = await request('/v1/trades', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          invoiceId: input.invoiceId,
-          quoteId: input.quoteId,
-          maxSlippageBps: input.maxSlippageBps ?? 0,
-        }),
-      });
+      const { status, body, headers } = await request('/v1/trades', tradeRequest(input));
 
       /*
        * 402 is the success case, not a failure. The first half of the x402 exchange arms
@@ -379,10 +498,144 @@ export function createVenueClient(config: VenueClientConfig): VenueClient {
       if (status !== 402 && (status < 200 || status >= 300)) {
         throw errorFrom(status, body, '/v1/trades');
       }
-      return { invoiceId: input.invoiceId, quoteId: input.quoteId, status, challenge: body };
+
+      const parsed = armedBodySchema.safeParse(body);
+      const rail = parsed.success ? (parsed.data.rail ?? null) : null;
+
+      if (status !== 402) {
+        return {
+          invoiceId: input.invoiceId,
+          quoteId: input.quoteId,
+          status,
+          rail,
+          challenge: null,
+          challengeError: null,
+          cashLeg: parsed.success ? toCashLeg(parsed.data.cashLeg) : null,
+          assetLeg: parsed.success ? toAssetLeg(parsed.data.assetLeg) : null,
+          settledAt: parsed.success ? (parsed.data.settledAt ?? null) : null,
+        };
+      }
+
+      const decoded = decodeChallenge(headers.get(X402_HEADERS.required));
+      return {
+        invoiceId: input.invoiceId,
+        quoteId: input.quoteId,
+        status,
+        rail,
+        challenge: decoded.challenge,
+        challengeError: decoded.error,
+        cashLeg: null,
+        assetLeg: null,
+        settledAt: null,
+      };
+    },
+
+    async settleTrade(input) {
+      const { status, body } = await request('/v1/trades', {
+        ...tradeRequest(input),
+        headers: {
+          'content-type': 'application/json',
+          [X402_HEADERS.signature]: encodeBase64Json(input.payment),
+        },
+      });
+      if (status < 200 || status >= 300) throw errorFrom(status, body, '/v1/trades');
+
+      const parsed = parse(armedBodySchema, body, '/v1/trades');
+      return {
+        invoiceId: input.invoiceId,
+        tradeId: parsed.trade?.id ?? null,
+        settledAt: parsed.settledAt ?? null,
+        cashLeg: toCashLeg(parsed.cashLeg),
+        assetLeg: toAssetLeg(parsed.assetLeg),
+      };
     },
   };
+
+  function tradeRequest(input: {
+    readonly invoiceId: string;
+    readonly quoteId: string;
+    readonly maxSlippageBps?: number | undefined;
+  }): RequestInit {
+    return {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        invoiceId: input.invoiceId,
+        quoteId: input.quoteId,
+        maxSlippageBps: input.maxSlippageBps ?? 0,
+      }),
+    };
+  }
 }
+
+/* ───────────────────────────────────────────────────────────────────────────────────── *
+ * The x402 envelope
+ * ───────────────────────────────────────────────────────────────────────────────────── */
+
+/** x402 v2 carries its payloads base64-encoded in the header, not as JSON in the body. */
+const encodeBase64Json = (value: unknown): string =>
+  Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
+
+/**
+ * Read the challenge out of `payment-required`.
+ *
+ * **Never throws.** A 402 whose challenge cannot be read is a real answer — the trade is
+ * armed, the seller's paper is held, and the agent needs to report that it cannot pay rather
+ * than lose the fact in an exception on the transport. The error is carried back as a
+ * sentence so the caller can log which of the three things went wrong.
+ */
+function decodeChallenge(header: string | null): {
+  challenge: PaymentChallenge | null;
+  error: string | null;
+} {
+  if (header === null || header.length === 0) {
+    return {
+      challenge: null,
+      error:
+        `the venue answered 402 with no ${X402_HEADERS.required} header, so there is nothing ` +
+        'to sign. At x402 v2 the challenge is in that header; there is no X-PAYMENT.',
+    };
+  }
+
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+  } catch {
+    return { challenge: null, error: `${X402_HEADERS.required} is not base64-encoded JSON` };
+  }
+
+  const parsed = paymentChallengeSchema.safeParse(decoded);
+  if (!parsed.success) {
+    const detail = parsed.error.issues
+      .slice(0, 3)
+      .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+      .join('; ');
+    return { challenge: null, error: `${X402_HEADERS.required} is not a v2 challenge — ${detail}` };
+  }
+  return { challenge: parsed.data, error: null };
+}
+
+const toCashLeg = (row: z.infer<typeof cashLegSchema> | undefined): CashLegReceipt | null =>
+  row === undefined
+    ? null
+    : {
+        chain: row.chain,
+        rail: row.rail,
+        state: row.state,
+        transaction: row.transaction ?? null,
+        settledAmountMinor: row.settledAmountMinor ?? null,
+        explorerUrl: row.explorerUrl ?? null,
+      };
+
+const toAssetLeg = (row: z.infer<typeof assetLegSchema> | undefined): AssetLegReceipt | null =>
+  row === undefined
+    ? null
+    : {
+        state: row.state,
+        transactionId: row.transactionId ?? null,
+        unitsMinor: row.unitsMinor ?? null,
+        explorerUrl: row.explorerUrl ?? null,
+      };
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
  * Mapping

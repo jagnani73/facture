@@ -22,6 +22,12 @@ import {
   type AgentConfig,
 } from '../src/agent.js';
 import { createLogger, type Logger } from '../src/logger.js';
+import {
+  CashLegError,
+  type CashLegSigner,
+  type PaymentChallenge,
+  type PaymentPayload,
+} from '../src/cash.js';
 import type { MandateAcceptance, MandateAllocations, MandateTerms } from '../src/mandate.js';
 import type { ArmedTrade, BookRow, LiveQuote, VenueClient, VenueMandate } from '../src/venue.js';
 import type {
@@ -94,10 +100,34 @@ const row = (over: Partial<BookRow> = {}): BookRow => ({
   ...over,
 });
 
+/**
+ * A challenge shaped like the venue's own, down to the facilitator's fee payer.
+ *
+ * The amounts are the settlement asset's smallest unit — tinybars, at the venue's ppm
+ * scale — deliberately *not* equal to the invoice's proceeds in cents. A fixture where the
+ * two matched would let a bug that compared the wrong one pass.
+ */
+const CHALLENGE: PaymentChallenge = {
+  x402Version: 2,
+  accepts: [
+    {
+      scheme: 'exact',
+      network: 'hedera:testnet',
+      asset: '0.0.0',
+      amount: '3918',
+      payTo: '0.0.10311549',
+      maxTimeoutSeconds: 120,
+      extra: { feePayer: '0.0.7162784' },
+    },
+  ],
+};
+
 /* ── fakes ───────────────────────────────────────────────────────────────────────────── */
 
 interface FakeVenue extends VenueClient {
   readonly armed: ArmedTrade[];
+  /** Every payload the agent actually presented. Empty means nothing was ever paid. */
+  readonly settles: { invoiceId: string; payment: PaymentPayload }[];
   readonly quoteCalls: string[];
 }
 
@@ -106,11 +136,21 @@ function fakeVenue(options: {
   book?: readonly BookRow[];
   quote?: (invoiceId: string) => LiveQuote;
   armThrows?: Error;
+  /**
+   * The venue's answer to arming. Defaults to `402` — the x402 rail — because that is the
+   * branch with something to sign. Pass `200` for a mandate it settles out of Arc escrow.
+   */
+  armStatus?: number;
+  /** `null` reproduces a 402 whose `payment-required` header could not be read. */
+  challenge?: PaymentChallenge | null;
+  settleThrows?: Error;
 }): FakeVenue {
   const armed: ArmedTrade[] = [];
+  const settles: { invoiceId: string; payment: PaymentPayload }[] = [];
   const quoteCalls: string[] = [];
   return {
     armed,
+    settles,
     quoteCalls,
     async mandates() {
       return options.mandates ?? [mandate()];
@@ -136,14 +176,103 @@ function fakeVenue(options: {
     },
     async armTrade(input) {
       if (options.armThrows) throw options.armThrows;
+      const status = options.armStatus ?? 402;
+      const challenge =
+        status === 402 ? (options.challenge === undefined ? CHALLENGE : options.challenge) : null;
       const record: ArmedTrade = {
         invoiceId: input.invoiceId,
         quoteId: input.quoteId,
-        status: 402,
-        challenge: { x402Version: 2 },
+        status,
+        rail:
+          status === 402
+            ? { chosen: 'x402', reason: 'This bid holds no capital on Arc.' }
+            : { chosen: 'arc-vault', reason: 'The buyer escrowed this capital on Arc.' },
+        challenge,
+        challengeError: status === 402 && challenge === null ? 'no payment-required header' : null,
+        // Both legs only on the 200, where arming *was* the settlement. See `ArmedTrade`.
+        cashLeg:
+          status === 402
+            ? null
+            : {
+                chain: 'arc',
+                rail: 'arc-vault',
+                state: 'settled',
+                transaction: '0x96c5c8625dde0c10b5469aa05cab572ac33c01504f391bae551b285091094318',
+                settledAmountMinor: '3918',
+                explorerUrl: null,
+              },
+        assetLeg:
+          status === 402
+            ? null
+            : {
+                state: 'executed',
+                transactionId: '0.0.10311549@1788439835.810844400',
+                unitsMinor: '4000000',
+                explorerUrl: null,
+              },
+        settledAt: status === 402 ? null : '2026-09-03T00:00:00.000Z',
       };
       armed.push(record);
       return record;
+    },
+    async settleTrade(input) {
+      if (options.settleThrows) throw options.settleThrows;
+      settles.push({ invoiceId: input.invoiceId, payment: input.payment });
+      return {
+        invoiceId: input.invoiceId,
+        tradeId: 'trade-1',
+        settledAt: '2026-09-03T00:00:00.000Z',
+        cashLeg: {
+          chain: 'hedera',
+          rail: 'x402',
+          state: 'settled',
+          transaction: '0.0.7162784@1788268815.161410978',
+          settledAmountMinor: '3918',
+          explorerUrl: null,
+        },
+        assetLeg: {
+          state: 'executed',
+          transactionId: '0.0.10311549@1788268822.126538150',
+          unitsMinor: '4000000',
+          explorerUrl: null,
+        },
+      };
+    },
+  };
+}
+
+interface FakeCash extends CashLegSigner {
+  /** Every challenge this key was asked to sign. */
+  readonly signCalls: PaymentChallenge[];
+  readonly balanceReads: number[];
+}
+
+/** The buyer's Hedera key, without a ledger behind it. Holds ~48 HBAR by default. */
+function fakeCash(options: { balanceTinybars?: bigint | null; signThrows?: Error } = {}): FakeCash {
+  const signCalls: PaymentChallenge[] = [];
+  const balanceReads: number[] = [];
+  return {
+    payerAccountId: '0.0.10314099',
+    network: 'hedera:testnet',
+    signCalls,
+    balanceReads,
+    async balanceTinybars() {
+      balanceReads.push(balanceReads.length + 1);
+      return options.balanceTinybars === undefined ? 4_827_974_750n : options.balanceTinybars;
+    },
+    async sign(challenge) {
+      if (options.signThrows) throw options.signThrows;
+      signCalls.push(challenge);
+      const accepted = challenge.accepts[0];
+      if (accepted === undefined) throw new Error('fixture has no requirements');
+      return {
+        payload: { x402Version: challenge.x402Version, accepted, payload: { transaction: 'CgUI' } },
+        amount: BigInt(accepted.amount),
+        asset: accepted.asset,
+        network: accepted.network,
+        payTo: accepted.payTo,
+        feePayer: '0.0.7162784',
+      };
     },
   };
 }
@@ -298,7 +427,7 @@ describe('the balance is read from the chain, not remembered', () => {
     }).tick();
 
     expect(report.taken).toHaveLength(0);
-    expect(report.refused.map((r) => r.refusal.code)).toContain('MANDATE_NOT_ESCROWED');
+    expect(report.refused.map((r) => r.refusal.code)).toContain('CASH_LEG_UNPAYABLE');
     // Both sides of the comparison, in the unit they were actually read in.
     expect(report.refused[0]?.humanReason).toMatch(/1000 USDC minor units/);
     expect(report.refused[0]?.humanReason).toMatch(/50000 USDC minor units/);
@@ -331,7 +460,7 @@ describe('the balance is read from the chain, not remembered', () => {
     }).tick();
 
     expect(report.taken).toHaveLength(0);
-    expect(report.refused[0]?.humanReason).toMatch(/does not escrow mandate capital/i);
+    expect(report.refused[0]?.humanReason).toMatch(/escrows no mandate capital/i);
   });
 
   it('stops rather than pricing against a scale it does not understand', async () => {
@@ -584,6 +713,298 @@ describe('failure handling', () => {
     expect(report.errors).toHaveLength(1);
     expect(report.errors[0]).toContain('venue exploded');
     expect(report.committedThisTick).toBe(PROCEEDS);
+  });
+});
+
+/**
+ * Which rail carried the cash, and whether the agent actually paid.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ * WHY THIS BLOCK EXISTS AT ALL
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ *
+ * The agent could not reach the x402 rail. Not because it stopped at the challenge — the
+ * challenge never arrived. Its pre-flight refused any mandate that was not escrowed on Arc,
+ * and the venue settles an escrowed mandate out of the vault, so every trade it was willing
+ * to arm came back 200 and no signature was ever needed. A whole branch, complete with a log
+ * line describing the signature it was waiting for, that nothing could execute.
+ *
+ * Nothing errored. No test failed. That is what makes it worth a block of its own: the tests
+ * below fail if either half of that is reinstated — the gate closing over unescrowed bids, or
+ * the settle step being dropped once a challenge is in hand.
+ */
+describe('the two cash rails', () => {
+  /** A bid with capital in the vault, and one without. The second is the interesting case. */
+  const BACKED_BID = [mandate()];
+  const UNBACKED_BID = [{ ...mandate(), vault: UNBACKED }];
+
+  it('signs and settles an unescrowed bid over x402, which it could not previously reach', async () => {
+    const venue = fakeVenue({ mandates: UNBACKED_BID, armStatus: 402 });
+    const cash = fakeCash();
+
+    const report = await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    expect(report.refused).toHaveLength(0);
+    expect(report.taken).toHaveLength(1);
+
+    // Armed, then paid. Both halves, against one venue route.
+    expect(venue.armed).toHaveLength(1);
+    expect(venue.settles).toHaveLength(1);
+    expect(cash.signCalls).toHaveLength(1);
+
+    const taken = report.taken[0];
+    expect(taken?.armedStatus).toBe(402);
+    expect(taken?.settlement?.rail).toBe('x402');
+    expect(taken?.settlement?.chain).toBe('hedera');
+    expect(taken?.settlement?.cashTransaction).toBe('0.0.7162784@1788268815.161410978');
+    expect(taken?.settlement?.assetTransaction).toBe('0.0.10311549@1788268822.126538150');
+  });
+
+  /*
+   * The payload is the canonical v2 `PaymentPayload` — `{ x402Version, accepted, payload }`.
+   * `accepted` is not redundancy: the facilitator checks the signed transfer against the
+   * requirements the resource server hands it, and a payload that did not say which option it
+   * took could not be matched to the right one.
+   */
+  it('presents the requirements it signed, not just the signature', async () => {
+    const venue = fakeVenue({ mandates: UNBACKED_BID });
+    const cash = fakeCash();
+
+    await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    const payment = venue.settles[0]?.payment;
+    expect(payment?.x402Version).toBe(2);
+    expect(payment?.accepted.network).toBe('hedera:testnet');
+    expect(payment?.accepted.extra['feePayer']).toBe('0.0.7162784');
+    expect(payment?.payload).toHaveProperty('transaction');
+  });
+
+  /*
+   * The other rail, and the reason there is no second consent on it: the buyer escrowed the
+   * capital and wrote the terms, so an invoice meeting those terms is a trade they already
+   * agreed to. Asking them to sign again would make a standing bid not standing.
+   */
+  it('settles a backed bid out of escrow, signing nothing at all', async () => {
+    const venue = fakeVenue({ mandates: BACKED_BID, armStatus: 200 });
+    const cash = fakeCash();
+
+    const report = await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    expect(report.taken).toHaveLength(1);
+    expect(venue.settles).toHaveLength(0);
+    expect(cash.signCalls).toHaveLength(0);
+
+    const taken = report.taken[0];
+    expect(taken?.armedStatus).toBe(200);
+    expect(taken?.settlement?.rail).toBe('arc-vault');
+    expect(taken?.settlement?.chain).toBe('arc');
+  });
+
+  /*
+   * The rail is read from the venue's own answer rather than inferred from which branch ran.
+   * `chooseRail` re-reads the vault on every arm and is the authority, so a bid this process
+   * predicted would take Arc can legitimately come back as a challenge — and the receipt has
+   * to say what happened, not what was expected.
+   */
+  it('reports the rail the venue chose, not the one the pre-flight predicted', async () => {
+    // Backed, so the pre-flight expects Arc — and the venue answers 402 anyway.
+    const venue = fakeVenue({ mandates: BACKED_BID, armStatus: 402 });
+    const cash = fakeCash();
+
+    const report = await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    expect(report.taken[0]?.settlement?.rail).toBe('x402');
+    expect(venue.settles).toHaveLength(1);
+  });
+
+  it('does not sign when the venue offers a challenge it cannot read', async () => {
+    const venue = fakeVenue({ mandates: UNBACKED_BID, challenge: null });
+    const cash = fakeCash();
+
+    const report = await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    expect(report.taken[0]?.skippedReason).toBe('unreadable_challenge');
+    expect(report.taken[0]?.settlement).toBeNull();
+    expect(cash.signCalls).toHaveLength(0);
+    expect(venue.settles).toHaveLength(0);
+  });
+
+  /*
+   * A challenge for a chain or asset this key cannot pay is reported, never guessed at. The
+   * agent has already armed by this point, so the honest outcome is a named skip and a held
+   * position the venue reclaims — not a payload built on an assumption.
+   */
+  it('reports an unsupported challenge rather than signing something else', async () => {
+    const venue = fakeVenue({ mandates: UNBACKED_BID });
+    const cash = fakeCash({
+      signThrows: new CashLegError('this payer settles native HBAR', 'unsupported'),
+    });
+
+    const report = await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    expect(report.taken[0]?.skippedReason).toBe('unsigned:unsupported');
+    expect(venue.settles).toHaveLength(0);
+    // Not an error: an unpayable challenge is an outcome of this configuration, not a fault.
+    expect(report.errors).toHaveLength(0);
+  });
+
+  it('refuses an unescrowed bid outright when it holds no key, rather than arming it', async () => {
+    const venue = fakeVenue({ mandates: UNBACKED_BID });
+
+    const report = await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      // No `cash`. The rail is not fitted.
+    }).tick();
+
+    expect(report.taken).toHaveLength(0);
+    expect(venue.armed).toHaveLength(0);
+    expect(report.refused.map((r) => r.refusal.code)).toContain('CASH_LEG_UNPAYABLE');
+  });
+
+  /*
+   * ═══════════════════════════════════════════════════════════════════════════════════
+   * THE ONE AMOUNT COMPARISON THIS AGENT MAKES
+   * ═══════════════════════════════════════════════════════════════════════════════════
+   *
+   * Tinybars against tinybars, both named by the challenge and the mirror node in the same
+   * unit. Nothing is converted, so there is no scale to get wrong — which is the whole
+   * reason the check lives here and not in the pre-flight, where a price would have to be
+   * converted and the venue's ppm scale copied into this package.
+   *
+   * The balance is read once per tick and the mirror node lags a signature by seconds, so
+   * what earlier signatures in the same pass promised has to be tracked locally.
+   */
+  it('will not promise the same tinybar to two invoices in one pass', async () => {
+    const venue = fakeVenue({
+      mandates: UNBACKED_BID,
+      book: [
+        row({ invoiceId: 'invoice-1', debtorId: 'debtor-1' }),
+        row({ invoiceId: 'invoice-2', debtorId: 'debtor-2' }),
+      ],
+      quote: (invoiceId) => ({
+        invoiceId,
+        quoteId: `quote-${invoiceId}`,
+        mandateId: 'mandate-a',
+        proceeds: PROCEEDS,
+        discount: 82_192n,
+        annualisedYieldBps: 1250,
+        tenorDays: 60,
+        rating: 'A',
+        expiresAt: '2026-09-01T00:05:00.000Z',
+      }),
+    });
+    // The challenge asks 3,918 tinybars; this covers one payment and not two.
+    const cash = fakeCash({ balanceTinybars: 5_000n });
+
+    const report = await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    // Both were armed — the mandate has headroom for both — and only one was paid for.
+    expect(venue.armed).toHaveLength(2);
+    expect(venue.settles).toHaveLength(1);
+
+    const short = report.taken.find((t) => t.skippedReason?.startsWith('x402_balance_short'));
+    expect(short?.skippedReason).toBe('x402_balance_short:3918');
+    expect(short?.settlement).toBeNull();
+  });
+
+  it('reads the payer once a tick, not once an invoice', async () => {
+    const venue = fakeVenue({
+      mandates: UNBACKED_BID,
+      book: [
+        row({ invoiceId: 'invoice-1', debtorId: 'debtor-1' }),
+        row({ invoiceId: 'invoice-2', debtorId: 'debtor-2' }),
+      ],
+    });
+    const cash = fakeCash();
+
+    await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    expect(cash.balanceReads).toHaveLength(1);
+  });
+
+  /*
+   * A dry run reads and reports. It must not sign, because a signature is the money moving —
+   * there is no dry version of it, and the venue's 402 is issued against a real hold.
+   */
+  it('signs nothing in a dry run, and does not arm to find out', async () => {
+    const venue = fakeVenue({ mandates: UNBACKED_BID });
+    const cash = fakeCash();
+
+    const report = await createMarketMaker(config(), {
+      venue,
+      wallet: fakeWallet(null),
+      logger,
+      cash,
+    }).tick();
+
+    expect(report.taken[0]?.skippedReason).toBe('dry_run');
+    expect(venue.armed).toHaveLength(0);
+    expect(venue.settles).toHaveLength(0);
+    expect(cash.signCalls).toHaveLength(0);
+  });
+
+  /*
+   * Reported even when no trade took that rail. "The agent took nothing" and "the agent
+   * could not have paid for anything" are different facts and look identical in a tick
+   * summary otherwise.
+   */
+  it('reports what the payer could do, whether or not it did anything', async () => {
+    const withKey = await createMarketMaker(config(), {
+      venue: fakeVenue({ mandates: UNBACKED_BID }),
+      wallet: fakeWallet(null),
+      logger,
+      cash: fakeCash(),
+    }).tick();
+    expect(withKey.x402).toEqual({ configured: true, balanceTinybars: 4_827_974_750n });
+
+    const withoutKey = await createMarketMaker(config(), {
+      venue: fakeVenue({ mandates: UNBACKED_BID }),
+      wallet: fakeWallet(null),
+      logger,
+    }).tick();
+    expect(withoutKey.x402).toEqual({ configured: false, balanceTinybars: null });
   });
 });
 
