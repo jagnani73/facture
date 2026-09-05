@@ -322,14 +322,20 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
    * disagree with the contract, and a reader trusting the wrong one would be checking the
    * wrong ledger for their money. Cached because an immutable cannot change.
    */
-  let escrowAddressPromise: Promise<`0x${string}`> | undefined;
+  let escrowAddress: `0x${string}` | undefined;
   const paymentEscrow = async (): Promise<`0x${string}`> => {
-    escrowAddressPromise ??= reader.readContract({
+    /*
+     * The VALUE is cached, not the promise. `??=` over a promise caches a rejection exactly
+     * as durably as a success, so a single RPC blip on the first call would make every later
+     * read of every lock answer "unreadable" for the life of the process — an immutable that
+     * can never be re-read because it failed once.
+     */
+    escrowAddress ??= (await reader.readContract({
       address,
       abi: VAULT_ABI,
       functionName: 'paymentEscrow',
-    }) as Promise<`0x${string}`>;
-    return escrowAddressPromise;
+    })) as `0x${string}`;
+    return escrowAddress;
   };
 
   /**
@@ -366,7 +372,33 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
       maxPriorityFeePerGas: 0n,
     });
 
-    const receipt = await reader.waitForTransactionReceipt({ hash });
+    /*
+     * A TIMEOUT IS NOT A REVERT, and conflating them is how money goes missing.
+     *
+     * viem gives up waiting after its own default and throws — but the transaction is still
+     * live in the mempool and may mine seconds later. Reporting that as "nothing was written"
+     * would be a specific, false claim: on `executePayout` it means the venue tells the
+     * caller the trade failed, releases the capital, and then the payout lands, putting USDC
+     * in a lock nobody recorded and nobody can find.
+     *
+     * So the two are distinguished, and the timeout case names the transaction and says the
+     * outcome is unknown rather than negative. It is deliberately NOT retried here: a second
+     * `executePayout` for the same match would revert on the first one's success, and a
+     * second `registerMatch` reverts unconditionally.
+     */
+    let receipt;
+    try {
+      receipt = await reader.waitForTransactionReceipt({ hash });
+    } catch (err) {
+      log.error(`${functionName} receipt not seen on Arc`, { ...context, hash, err });
+      throw upstreamUnavailable(
+        'Arc',
+        `Arc did not confirm ${functionName} in time. The transaction is ${hash} and it may ` +
+          'still succeed, so its outcome is unknown rather than failed — check it before ' +
+          'assuming nothing moved.',
+      );
+    }
+
     if (receipt.status !== 'success') {
       /*
        * Deliberately not decoded into a specific custom error. Reverts reaching here belong

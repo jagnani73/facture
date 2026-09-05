@@ -237,6 +237,20 @@ async function prepareTrade(
    */
   const committed = live.quote.proceeds;
   const abandon = async (err: unknown): Promise<never> => {
+    /*
+     * Not every failure is a failure to compensate.
+     *
+     * `internal_error` is the code both rails reserve for "the money moved and the paper did
+     * not". Releasing the mandate's capacity there would hand the buyer back capital that has
+     * already left — on Arc it is sitting in an escrow lock, on Hedera it is spent — and the
+     * bid would go straight back to quoting against it. The signed half of the x402 exchange
+     * already makes this carve-out; the arming half did not, and the Arc rail reaches this
+     * state from here rather than from there.
+     *
+     * The trade keeps its allocation and the status the settlement service gave it, so a
+     * half-settled trade stays visible as one rather than reading as an ordinary failure.
+     */
+    if (isAppError(err) && err.code === 'internal_error') throw err;
     await store.release(mandate.id, committed);
     await store.updateTrade(trade.id, { status: 'failed' });
     throw err;
@@ -327,6 +341,23 @@ async function executeTrade(
   const trade = await store.getTradeForInvoice(body.invoiceId);
   if (!trade || trade.quoteId !== body.quoteId) {
     throw notFound(`An armed trade for invoice ${body.invoiceId}`);
+  }
+  /*
+   * A signature is meaningless against a trade the vault is already paying for.
+   *
+   * An Arc trade sits in `awaiting_payment` for the whole of its settlement, and after a
+   * crash it can stay there. Without this guard a client could present an x402 payload for
+   * that trade and the venue would build a fresh HEDERA challenge, take a second payment for
+   * the same receivable, and overwrite the row's rail — burying the Arc escrow lock under a
+   * receipt claiming x402. Two payments, one invoice, and a row contradicting itself about
+   * which chain took the money.
+   */
+  if (trade.cashRail === 'arc-vault') {
+    throw conflict(
+      'conflict',
+      'This trade settles out of the buyer’s escrowed capital on Arc, so there is nothing ' +
+        'to sign. A payment signature against it would be a second payment for one receivable.',
+    );
   }
   if (trade.status !== 'awaiting_payment') {
     throw conflict(

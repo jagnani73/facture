@@ -115,6 +115,22 @@ export interface TradeProof {
       beneficiary: string | null;
       amountMinor: string | null;
       claimableUntil: string | null;
+      /**
+       * The preimage that releases the lock.
+       *
+       * **This is not a credential, and publishing it costs nothing.** `DvpEscrow.claim`
+       * requires `msg.sender == beneficiary` as well as the preimage, so the secret alone
+       * moves no money — the contract's own note says the hashlock "does not keep anyone
+       * out" and that the protection is the beneficiary binding. `claim` then writes the
+       * preimage to storage in the clear anyway, because that log is the cross-chain channel.
+       *
+       * It is here because it was previously returned exactly once, in the body of the
+       * `POST /v1/trades` response. A dropped connection at that moment left money locked
+       * that nobody could ever claim: the lock times out, the capital goes back to the
+       * buyer, and `payout.executed` stays true forever, so that match can never be paid.
+       * A single delivery of the only key is not a delivery mechanism.
+       */
+      secret: string | null;
       explorerUrl: string | null;
     } | null;
   };
@@ -224,6 +240,7 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
             beneficiary: null,
             amountMinor: null,
             claimableUntil: null,
+            secret: trade.arcSecret,
             explorerUrl: link(trade.cashTransaction, explorer.arcTx),
           };
           try {
@@ -235,6 +252,7 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
               beneficiary: lock.beneficiary,
               amountMinor: money(lock.amount),
               claimableUntil: new Date(lock.timeout * 1000).toISOString(),
+              secret: trade.arcSecret,
               explorerUrl: base.explorerUrl,
             };
           } catch {

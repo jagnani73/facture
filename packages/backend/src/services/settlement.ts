@@ -319,6 +319,21 @@ export const ARC_NETWORK = 'arc:testnet';
 export const ARC_SCHEME = 'vault-payout';
 
 /**
+ * How long the asset leg stays held on the Arc rail.
+ *
+ * Deliberately NOT `CHALLENGE_WINDOW_SECONDS`. That 180 seconds is sized for a human or an
+ * agent to sign a challenge, and this rail issues no challenge — what has to fit inside the
+ * window instead is two Arc writes and two receipt waits, back to back. Two ordinary
+ * hundred-second inclusions would outlive a 180-second hold, and the hold expiring mid-flight
+ * is the *cause* of the worst failure this path has: the cash is already locked and the paper
+ * can no longer be delivered.
+ *
+ * Twelve minutes, which is longer than viem's own 180-second receipt timeout applied twice
+ * with room to spare, and still far inside the escrow's 24-hour payment lock.
+ */
+export const VAULT_HOLD_WINDOW_SECONDS = 720;
+
+/**
  * The preimage a seller needs to take their money.
  *
  * 32 bytes from the platform CSPRNG, because `DvpEscrow` hashes exactly `bytes32` and
@@ -552,7 +567,7 @@ export const settlementService: SettlementService = {
       toEvmAddress: accountIdToEvmAddress(intent.buyerHederaAccountId),
       escrowEvmAddress: operatorEvmAddress(getConfig().env.HEDERA_OPERATOR_KEY),
       units: position,
-      expiresAt: new Date(Date.now() + CHALLENGE_WINDOW_SECONDS * 1000),
+      expiresAt: new Date(Date.now() + VAULT_HOLD_WINDOW_SECONDS * 1000),
     });
 
     await store.updateTrade(intent.tradeId, {
@@ -565,7 +580,12 @@ export const settlementService: SettlementService = {
       cashNetwork: ARC_NETWORK,
       cashScheme: ARC_SCHEME,
       cashAsset: getConfig().chain.arc.usdcAddress,
-      cashAmountMinor: priceUsdcMinor,
+      /*
+       * `cashAmountMinor` is deliberately NOT written here. Its own column note defines it as
+       * what actually moved, and at this point nothing has: a trade that fails at
+       * `registerMatch` would otherwise report a settled amount beside a null transaction.
+       * It is written after the payout, where the claim becomes true.
+       */
     });
 
     /*
@@ -615,7 +635,26 @@ export const settlementService: SettlementService = {
       arcLockId: payout.lockId,
       cashTransaction: payout.transactionHash,
       cashPayer: intent.buyerArcAddress,
+      cashAmountMinor: priceUsdcMinor,
     });
+
+    /*
+     * The receivable stops being for sale HERE, before delivery, and that ordering is a fix
+     * rather than a detail.
+     *
+     * The buyer's capital has irreversibly left the vault. If the invoice stayed quotable and
+     * the delivery below then failed, the hold would expire, the seller could take a fresh
+     * quote, and a second trade would draw a second payout from the same funded mandate —
+     * because this rail's whole premise is that no second consent is needed. The buyer would
+     * have paid twice for one receivable, silently. On the x402 rail the same hole exists and
+     * cannot be reached, since a second sale needs a second signature.
+     *
+     * So the invoice is marked sold at the moment it is paid for, not at the moment it is
+     * delivered. A failed delivery after this is a half-settled trade to reconcile, which is
+     * what it is; it is not an invoice to sell again.
+     */
+    await store.updateInvoice(intent.invoiceId, { status: 'sold' });
+    await store.setQuoteStatus(intent.quoteId, 'accepted');
 
     const cashLeg: CashLegReceipt = {
       chain: 'arc',
@@ -684,8 +723,6 @@ export const settlementService: SettlementService = {
       assetConsensusAt: assetLeg.consensusAt === null ? null : new Date(assetLeg.consensusAt),
       settledAt,
     });
-    await store.setQuoteStatus(intent.quoteId, 'accepted');
-    await store.updateInvoice(intent.invoiceId, { status: 'sold' });
 
     rootLogger.info('trade settled out of the Arc vault', {
       tradeId: intent.tradeId,
@@ -888,6 +925,14 @@ export const settlementService: SettlementService = {
     } catch (err) {
       await store.updateTrade(trade.id, {
         status: 'failed',
+        /*
+         * The rail and the amount belong on this row too, not only on the success path.
+         * This is the one trade where a reader most needs to know which rail took the
+         * money, and leaving them null makes a half-settled trade claim no rail has run
+         * while a real cash transaction sits beside it.
+         */
+        cashRail: 'x402',
+        cashAmountMinor: BigInt(input.requirements.amount),
         cashTransaction: cashLeg.transaction,
         cashPayer: cashLeg.payer,
       });
@@ -954,6 +999,27 @@ export const settlementService: SettlementService = {
     }
     if (trade.status === 'settled') {
       throw conflict('conflict', 'A settled trade cannot be unwound; it is a new sale.');
+    }
+
+    /*
+     * A trade whose cash has already moved cannot be unwound, whatever its status says.
+     *
+     * On the x402 rail `awaiting_payment` always means nothing has moved, so status alone was
+     * a sufficient guard. On the Arc rail it does not: a trade sits in `awaiting_payment` for
+     * the whole of its settlement, including after `executePayout` has put the buyer's USDC
+     * in the escrow. Unwinding there would release the hold and hand the mandate its capital
+     * back while that capital is on chain and gone — a DvP break, and a double release once
+     * the caller's own compensation runs too.
+     *
+     * `reclaimExpired` sweeps `awaiting_payment` on almost every request, so this is not a
+     * race that needs an unlucky client: any concurrent read of the book could trigger it.
+     */
+    if (trade.cashTransaction !== null || trade.arcLockId !== null) {
+      throw conflict(
+        'conflict',
+        `Trade ${trade.id} has already moved money on its cash leg, so it cannot be unwound. ` +
+          'It is reconciled rather than released.',
+      );
     }
 
     let transactionId = trade.assetTxId;

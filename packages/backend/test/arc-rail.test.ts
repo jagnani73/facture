@@ -248,6 +248,107 @@ describe('when a vault settlement goes wrong', () => {
   });
 
   /*
+   * THE ONE THAT LOSES MONEY TWICE.
+   *
+   * The buyer's capital has irreversibly left the vault by the time delivery is attempted,
+   * and this rail's whole premise is that no second consent is needed. So if a failed
+   * delivery left the invoice quotable, the hold would expire, the seller could take a fresh
+   * quote, and a second trade would draw a SECOND payout from the same funded mandate —
+   * one receivable, paid for twice, silently. The x402 rail has the same hole and cannot
+   * reach it, because a second sale there needs a second signature.
+   */
+  it('takes the receivable off the market the moment the cash leaves the vault', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+    h.ats.failExecute = true;
+
+    const { invoiceId, armed } = await arm();
+
+    expect(armed.status).toBe(500);
+    // Paid for, so not for sale — even though the paper never moved.
+    expect((await h.store.getInvoice(invoiceId))?.status).toBe('sold');
+  });
+
+  /*
+   * The other half of the same defect. `internal_error` is the code both rails reserve for
+   * "the money moved and the paper did not"; giving the mandate its capacity back there
+   * would let the bid quote against capital sitting in an escrow lock.
+   */
+  it('keeps the capital committed when the cash moved and the paper did not', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+
+    const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
+    // The mandate is named on the quote itself, not at the top of the response. Reading the
+    // wrong path here silently compares an absent mandate with itself and passes.
+    const mandateId = quote.body.quote.mandateId as string;
+    const before = (await h.store.getMandate(mandateId))?.allocatedMinor ?? 0n;
+
+    h.ats.failExecute = true;
+    const armed = await call(h.app, 'POST', '/v1/trades', {
+      body: { invoiceId, quoteId: quote.body.quoteId },
+    });
+
+    expect(armed.status).toBe(500);
+    const after = (await h.store.getMandate(mandateId))?.allocatedMinor ?? 0n;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  /*
+   * `reclaimExpired` sweeps `awaiting_payment` on nearly every request, and an Arc trade sits
+   * in that state for the whole of its settlement — including after the USDC is in escrow.
+   * Unwinding one would release the hold and refund capital that is on chain and gone.
+   */
+  it('refuses to unwind a trade whose cash leg already moved', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+    h.ats.failExecute = true;
+
+    const { invoiceId, armed } = await arm();
+    expect(armed.status).toBe(500);
+
+    // A 500 body is a problem document, so the trade is found through the store instead.
+    const stored = await h.store.getTradeForInvoice(invoiceId);
+    const tradeId = stored?.id ?? '';
+    expect(stored?.arcLockId).toBe('0xlock');
+
+    const unwound = await call(h.app, 'POST', `/v1/trades/${tradeId}/unwind`, { body: {} });
+    expect(unwound.status).toBe(409);
+    expect(unwound.body.detail).toContain('already moved money');
+  });
+
+  /*
+   * An Arc trade stuck in `awaiting_payment` after a crash must not accept an x402 payload.
+   * The venue would build a fresh Hedera challenge and take a second payment for the same
+   * receivable, then overwrite the row's rail and bury the escrow lock under it.
+   */
+  it('refuses an x402 signature against a trade the vault is paying for', async () => {
+    const { escrow } = vault();
+    h = await createHarness({ arc: escrow });
+
+    const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
+    const armed = await call(h.app, 'POST', '/v1/trades', {
+      body: { invoiceId, quoteId: quote.body.quoteId },
+    });
+    expect(armed.status).toBe(200);
+
+    // Force the row back to the state a crash mid-settlement would leave it in.
+    await h.store.updateTrade(armed.body.trade.id, { status: 'awaiting_payment' });
+
+    const signed = await call(h.app, 'POST', '/v1/trades', {
+      body: { invoiceId, quoteId: quote.body.quoteId },
+      headers: {
+        'PAYMENT-SIGNATURE': Buffer.from(JSON.stringify({ signature: '0x' })).toString('base64'),
+      },
+    });
+
+    expect(signed.status).toBe(409);
+    expect(signed.body.detail).toContain('nothing to sign');
+  });
+
+  /*
    * `registerMatch` cannot be called twice — it reverts even from the attester with identical
    * arguments — so a retry has to read the binding rather than re-send it.
    */
@@ -306,7 +407,9 @@ describe('when a vault settlement goes wrong', () => {
 
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
-    const mandateId = quote.body.mandateId as string;
+    // The mandate is named on the quote itself, not at the top of the response. Reading the
+    // wrong path here silently compares an absent mandate with itself and passes.
+    const mandateId = quote.body.quote.mandateId as string;
     const before = (await h.store.getMandate(mandateId))?.allocatedMinor;
 
     const armed = await call(h.app, 'POST', '/v1/trades', {
