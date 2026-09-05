@@ -1332,6 +1332,60 @@ export function readConfirmationPrompt(raw: unknown, path = 'confirmation'): Con
 }
 
 /* -------------------------------------------------------------------------- */
+/* Sellers — `POST /v1/sellers`, `GET /v1/sellers/:id`                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A seller as the venue records them.
+ *
+ * The two wallet fields are nullable and their nulls mean different things, which is why
+ * they are read separately rather than collapsed into one "wallet" shape. `arcAddress` is an
+ * ordinary EVM address and works the moment it exists. `hederaAccountId` is a `0.0.x`, and a
+ * wallet made from an email address does not have one: the address it was issued is an
+ * *alias*, and Hedera creates the account behind it on first funding. A seller holding a
+ * perfectly good address with no account id is the normal state, not a broken record.
+ */
+export interface SellerRecord {
+  id: string;
+  name: string;
+  email: string;
+  hederaAccountId: string | null;
+  arcAddress: string | null;
+}
+
+/**
+ * The sign-in result. `created` distinguishes a new business from a returning one — the
+ * venue answers 201 and 200 respectively, and the screen says different things.
+ */
+export interface SellerSignIn {
+  seller: SellerRecord;
+  created: boolean;
+}
+
+export function readSeller(raw: unknown, path = 'seller'): SellerRecord {
+  const body = readObject(raw, path);
+  return {
+    id: readString(field(body, 'id'), `${path}.id`),
+    name: readString(field(body, 'name'), `${path}.name`),
+    email: readString(field(body, 'email'), `${path}.email`),
+    hederaAccountId: readOptionalString(field(body, 'hederaAccountId'), `${path}.hederaAccountId`),
+    arcAddress: readOptionalString(field(body, 'arcAddress'), `${path}.arcAddress`),
+  };
+}
+
+export function readSellerSignIn(raw: unknown, path = 'signIn'): SellerSignIn {
+  const body = readObject(raw, path);
+  return {
+    seller: readSeller(field(body, 'seller'), `${path}.seller`),
+    /*
+     * Absent means returning rather than new. A missing flag defaulting to `true` would
+     * greet an existing business as a first-time one on every sign-in.
+     */
+    created: field(body, 'created') === true,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Health — `GET /health`                                                      */
 /* -------------------------------------------------------------------------- */
 

@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { isDemoBook } from '@/lib/data';
 import { proofExample, proofExampleLabel } from '@/lib/links';
 import { MarketTicker } from './market-ticker';
+import { SignIn } from './sign-in';
 import { SiteNav } from './site-nav';
 import { ThemeToggle } from './theme-toggle';
 
@@ -34,6 +35,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="flex items-center gap-4">
             <SiteNav />
             <span aria-hidden className="h-4 w-px bg-rule" />
+            <SignIn />
             <ThemeToggle />
           </div>
         </div>

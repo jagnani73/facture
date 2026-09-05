@@ -1,10 +1,18 @@
 packages:
   - packages/*
 
+# Native or postinstall builds, decided rather than left to a prompt. The three `false`
+# entries arrived with @privy-io/react-auth and none of them is reachable here: bufferutil
+# and utf-8-validate are optional speedups for `ws` that it works fine without, and
+# @reown/appkit is the WalletConnect modal, which email-only login never mounts. Declining
+# to run a postinstall script we do not need is the cheaper side of the trade.
 allowBuilds:
+  '@reown/appkit': false
   better-sqlite3: true
+  bufferutil: false
   esbuild: true
   keccak: true
   protobufjs: true
   secp256k1: true
   sharp: true
+  utf-8-validate: false

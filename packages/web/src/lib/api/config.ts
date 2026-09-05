@@ -24,6 +24,7 @@ const RAW_SOURCE = process.env.NEXT_PUBLIC_FACTURE_DATA_SOURCE;
 const RAW_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 const RAW_SELLER_ID = process.env.NEXT_PUBLIC_SELLER_ID;
 const RAW_BUYER_ID = process.env.NEXT_PUBLIC_BUYER_ID;
+const RAW_PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
 /** The backend's own default in `packages/backend/src/env.ts` is port 8787. */
 const DEFAULT_BASE_URL = 'http://localhost:8787';
@@ -61,3 +62,17 @@ export const usingApi = (): boolean => DATA_SOURCE === 'api';
  */
 export const SELLER_ID: string = RAW_SELLER_ID?.trim() ?? '';
 export const BUYER_ID: string = RAW_BUYER_ID?.trim() ?? '';
+
+/**
+ * Privy's app id, which identifies this app to Privy and authorises nothing.
+ *
+ * It is public by design and belongs in the client bundle. The app *secret* is a server
+ * credential, is not read here, and must never appear in a `NEXT_PUBLIC_` variable — the
+ * prefix is precisely an instruction to inline the value into JavaScript anyone can read.
+ *
+ * Unset is a supported state, not a misconfiguration: sign-in disappears and the configured
+ * seller keeps rendering, which is how the demo book and `pnpm dev` with nothing set behave.
+ */
+export const PRIVY_APP_ID: string = RAW_PRIVY_APP_ID?.trim() ?? '';
+
+export const signInAvailable = (): boolean => PRIVY_APP_ID !== '' && usingApi();

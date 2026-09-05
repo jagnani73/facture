@@ -20,6 +20,7 @@ import type {
   InvoiceRow,
   LiveQuoteResponse,
   Page,
+  SellerSignIn,
   TradeChallenge,
   TradeProofResponse,
   TradeRecord,
@@ -36,6 +37,7 @@ import {
   readMandate,
   readObject,
   readPage,
+  readSellerSignIn,
   readTrade,
   readTradeChallenge,
   readTradeProof,
@@ -209,6 +211,39 @@ export const api = {
       { what: 'the service status', signal },
       (raw) => readHealth(raw),
       API_BASE_URL,
+    );
+  },
+
+  /* --- Seller: signing in ----------------------------------------------- */
+
+  /**
+   * `POST /v1/sellers` — sign in by email, and record the wallet made from it.
+   *
+   * Idempotent on email at the venue, which is what makes this the *sign-in* call and not
+   * just a sign-up call: a returning business gets its existing id back rather than a second
+   * empty book. That is also why nothing caches the id locally — this is cheap to ask again
+   * and always current, and a cached id would be a staler second answer.
+   *
+   * The venue refuses to rebind a wallet address that is already on file, so a 409 here is
+   * a real answer about this business rather than a transport failure.
+   */
+  signInSeller(
+    input: { name: string; email: string; arcAddress?: string | undefined },
+    signal?: AbortSignal,
+  ): Promise<SellerSignIn> {
+    return request(
+      '/sellers',
+      {
+        method: 'POST',
+        what: 'signing in',
+        signal,
+        body: {
+          name: input.name,
+          email: input.email,
+          ...(input.arcAddress ? { arcAddress: input.arcAddress } : {}),
+        },
+      },
+      (raw) => readSellerSignIn(raw),
     );
   },
 
