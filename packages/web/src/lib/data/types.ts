@@ -13,7 +13,7 @@
  * swapping back a one-line change in `src/lib/api/config.ts`.
  */
 
-import type { MandateRecord } from '@/lib/api/contract';
+import type { CashLegLock, CashRail, MandateRecord } from '@/lib/api/contract';
 import type {
   ChainKey,
   Debtor,
@@ -355,13 +355,19 @@ export interface ProofRecord {
      * transaction id, on the one page whose entire job is being checkable elsewhere.
      */
     chain: ChainKey;
+    /** Which rail carried it. Null on a trade whose cash leg has not run. */
+    rail: CashRail | null;
     from: string | null;
     to: string | null;
     asset: string | null;
     scheme: string | null;
     network: string | null;
     transaction: string | null;
+    /** Settlement-asset minor units. Render with `formatUsdc`, never `formatMoney`. */
+    settledAmountMinor: MinorUnits | null;
     explorerUrl: string | null;
+    /** Arc only: where a payout is sitting, and whether the seller has taken it. */
+    lock: CashLegLock | null;
   };
   /**
    * Maturity: the third receipt, and the one that makes a resale legitimate.

@@ -16,7 +16,7 @@ import type { MinorUnits, Rating } from '@/lib/domain';
 import { api } from '@/lib/api/client';
 import { DATA_SOURCE, usingApi } from '@/lib/api/config';
 import { buyerId, sellerId } from '@/lib/api/identity';
-import type { TradeChallenge } from '@/lib/api/contract';
+import type { CashRail, TradeChallenge, TradeRecord } from '@/lib/api/contract';
 import {
   describeFailure,
   halfSettledTradeId,
@@ -25,7 +25,7 @@ import {
   isHalfSettled,
   splitDetail,
 } from '@/lib/api/problem';
-import { SETTLEMENT_STATE_SENTENCE } from '@/lib/settlement';
+import { SETTLED_FROM_ESCROW_SENTENCE, SETTLEMENT_STATE_SENTENCE } from '@/lib/settlement';
 import { apiConfirmation, apiMarket, apiProof } from './api-source';
 import { fixtureConfirmation, fixtureMarket, fixtureProof } from './fixture-source';
 import type { ConfirmationRecord, Market, ProofCheck, ProofRecord } from './types';
@@ -288,7 +288,27 @@ export async function writeAndFundMandate(
  * - **`failed`** — everything else, in words.
  */
 export type SaleOutcome =
-  | { ok: true; state: 'settled'; note: string }
+  | {
+      ok: true;
+      state: 'settled';
+      note: string;
+      /**
+       * The trade that settled, so the screen can link to its proof.
+       *
+       * This used to be dropped on the floor. A settled sale is the one ending whose whole
+       * point is that it can be checked, and the panel had nothing to link to — while the
+       * *half-settled* panel, the ending nobody wants, did.
+       */
+      trade: TradeRecord | null;
+      /**
+       * Which rail carried the cash, when the venue said.
+       *
+       * Null on a settlement whose response did not name one. It is not defaulted to x402:
+       * the whole sentence shown to the seller turns on this, and asserting the wrong rail
+       * would describe a payment protocol that never ran.
+       */
+      rail: CashRail | null;
+    }
   | { ok: true; state: 'awaiting_payment'; note: string; challenge: TradeChallenge }
   | {
       ok: false;
@@ -324,6 +344,9 @@ export async function sellInvoice(invoiceId: string, quoteId: string | null): Pr
       ok: true,
       state: 'settled',
       note: `${DEMO_NOTE} In the live market the money is with you before this message finishes rendering, and your customer still pays on the due date.`,
+      // The demo book has no trade behind it and no rail carried it. Both stay null.
+      trade: null,
+      rail: null,
     };
   }
 
@@ -346,10 +369,22 @@ export async function sellInvoice(invoiceId: string, quoteId: string | null): Pr
         challenge: result.challenge,
       };
     }
+    /*
+     * A 200 means both legs are already done. That happens on the Arc rail: the buyer
+     * escrowed the capital before this invoice existed, so there was nothing for them to
+     * sign and no challenge to issue.
+     *
+     * The rail decides the sentence. Telling a seller their sale "settled against one x402
+     * challenge" when no challenge existed is a confident description of the wrong
+     * mechanism, on the screen where they are deciding whether to trust the venue.
+     */
+    const rail = result.trade.cashRail ?? null;
     return {
       ok: true,
       state: 'settled',
-      note: SETTLEMENT_STATE_SENTENCE.settled,
+      note: rail === 'arc-vault' ? SETTLED_FROM_ESCROW_SENTENCE : SETTLEMENT_STATE_SENTENCE.settled,
+      trade: result.trade,
+      rail,
     };
   } catch (error) {
     /*

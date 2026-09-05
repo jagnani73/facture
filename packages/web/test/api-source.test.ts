@@ -71,12 +71,15 @@ const proof = (over: Partial<TradeProofResponse> = {}): TradeProofResponse => ({
   },
   cashLeg: {
     chain: 'hedera-testnet',
+    rail: 'x402',
     scheme: 'exact',
     network: 'hedera:testnet',
     asset: '0.0.0',
     transaction: null,
     payer: '0.0.10314099',
+    settledAmountMinor: null,
     explorerUrl: null,
+    lock: null,
   },
   maturity: null,
   refusals: [],
@@ -260,16 +263,105 @@ describe('apiProof', () => {
       proof({
         cashLeg: {
           chain: 'arc-testnet',
+          rail: 'x402',
           scheme: 'exact',
           network: 'arc:testnet',
           asset: '0xusdc',
           transaction: null,
           payer: null,
+          settledAmountMinor: null,
           explorerUrl: null,
+          lock: null,
         },
       }),
     );
     expect((await apiProof(TRADE_ID)).cashLeg.chain).toBe('arc-testnet');
+  });
+
+  /*
+   * The block used to read "x402 delivery versus payment" for every trade, hardcoded — and
+   * it vanished entirely when scheme and network were both null, which is the exact shape a
+   * vault payout has. So the rail that most needed explaining got no explanation at all.
+   */
+  it('names the rail that actually settled, rather than asserting x402', async () => {
+    answer(
+      proof({
+        cashLeg: {
+          chain: 'arc-testnet',
+          rail: 'arc-vault',
+          scheme: 'vault-payout',
+          network: 'arc:testnet',
+          asset: '0xusdc',
+          transaction: '0xpayout',
+          payer: '0xbuyer',
+          settledAmountMinor: 50_000n,
+          explorerUrl: null,
+          lock: null,
+        },
+      }),
+    );
+
+    const record = await apiProof(TRADE_ID);
+    expect(record.cashLeg.rail).toBe('arc-vault');
+    expect(record.settlement?.protocol).toBe('Escrowed capital, delivery versus payment');
+    expect(record.settlement?.note).toContain('nothing to sign');
+  });
+
+  /* A rail with no x402 scheme or network still has something to say about itself. */
+  it('keeps the settlement block for a vault payout that named no scheme', async () => {
+    answer(
+      proof({
+        cashLeg: {
+          chain: 'arc-testnet',
+          rail: 'arc-vault',
+          scheme: null,
+          network: null,
+          asset: null,
+          transaction: null,
+          payer: null,
+          settledAmountMinor: null,
+          explorerUrl: null,
+          lock: null,
+        },
+      }),
+    );
+    expect((await apiProof(TRADE_ID)).settlement).not.toBeNull();
+  });
+
+  /*
+   * The payee, on the rail that names one. A vault payout binds the seller's address on
+   * chain before delivery, so the escrow knows exactly who the money is for — and the proof
+   * view's `To` row has been hardcoded null since it was written.
+   */
+  it('takes the cash-leg payee from the escrow lock', async () => {
+    answer(
+      proof({
+        cashLeg: {
+          chain: 'arc-testnet',
+          rail: 'arc-vault',
+          scheme: 'vault-payout',
+          network: 'arc:testnet',
+          asset: '0xusdc',
+          transaction: '0xpayout',
+          payer: '0xbuyer',
+          settledAmountMinor: 50_000n,
+          explorerUrl: null,
+          lock: {
+            lockId: '0xlock',
+            status: 'locked',
+            beneficiary: '0xseller',
+            amountMinor: 50_000n,
+            claimableUntil: '2026-09-04T10:00:00.000Z',
+            explorerUrl: null,
+          },
+        },
+      }),
+    );
+
+    const record = await apiProof(TRADE_ID);
+    expect(record.cashLeg.to).toBe('0xseller');
+    expect(record.cashLeg.lock?.status).toBe('locked');
+    expect(record.cashLeg.settledAmountMinor).toBe(50_000n);
   });
 
   /** A settlement block with nothing in it would claim the legs were bound when they were not. */
@@ -278,12 +370,15 @@ describe('apiProof', () => {
       proof({
         cashLeg: {
           chain: 'arc-testnet',
+          rail: null,
           scheme: null,
           network: null,
           asset: null,
           transaction: null,
           payer: null,
+          settledAmountMinor: null,
           explorerUrl: null,
+          lock: null,
         },
       }),
     );

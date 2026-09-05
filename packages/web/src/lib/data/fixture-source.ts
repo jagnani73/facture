@@ -152,13 +152,21 @@ export function fixtureProof(tradeId: string): ProofRecord | null {
     cashLeg: {
       // The demo book's cash leg is USDC on Arc, which is what its trades say.
       chain: CASH_CHAIN,
+      /*
+       * Null, like everything else this book cannot honestly claim. These trades never
+       * happened, so no rail carried them and no escrow holds anyone's money — inventing a
+       * rail here would put a specific, checkable-looking claim on fiction.
+       */
+      rail: null,
       from: proof.cashLeg.from,
       to: proof.cashLeg.to,
       asset: proof.cashLeg.asset,
       scheme: null,
       network: null,
       transaction: trade.cashLeg.reference ?? null,
+      settledAmountMinor: null,
       explorerUrl: null,
+      lock: null,
     },
     /*
      * Null, and deliberately not invented. The fixture book carries no matured receivable

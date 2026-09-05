@@ -332,6 +332,27 @@ export function readDebtor(raw: unknown, path = 'customer'): Debtor {
  * put through the same conversion the cash leg settles at. Without it a reader has the
  * vault's balance and no way to know whether it is enough.
  */
+/** Which rail settled the cash leg. Stated by the venue, never inferred here. */
+export const CASH_RAILS = ['x402', 'arc-vault'] as const;
+export type CashRail = (typeof CASH_RAILS)[number];
+
+/**
+ * The Arc escrow lock behind a vault payout.
+ *
+ * `status` is deliberately a plain string rather than an enum. It carries the escrow's own
+ * lifecycle (`locked` / `claimed` / `refunded`) plus two words the venue uses when it could
+ * not get an answer — `unknown` and `unreadable` — and collapsing "we could not ask" into
+ * "not claimed" would accuse a paid seller of being unpaid.
+ */
+export interface CashLegLock {
+  lockId: string;
+  status: string;
+  beneficiary: string | null;
+  amountMinor: MinorUnits | null;
+  claimableUntil: string | null;
+  explorerUrl: string | null;
+}
+
 export interface MandateEscrow {
   checked: boolean;
   depositedUsdcMinor: MinorUnits | null;
@@ -349,6 +370,40 @@ export type MandateRecord = Mandate & {
   escrow?: MandateEscrow;
   operator?: 'agent' | 'desk';
 };
+
+/**
+ * The rail, or null.
+ *
+ * Unlike `readChainKey`, an unrecognised value is **not** quietly folded into a default. A
+ * rail this build does not know about is a rail whose receipt it cannot describe, and
+ * guessing would put a confident wrong sentence on the one screen that exists to be checked.
+ */
+export function readCashRail(value: unknown, path: string): CashRail | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') return unreadable(path, 'is not a string');
+  const found = CASH_RAILS.find((rail) => rail === value);
+  if (found === undefined) return unreadable(path, `is not one of ${CASH_RAILS.join(', ')}`);
+  return found;
+}
+
+/** The Arc escrow lock, when there is one. Absent is not an error — x402 has no lock. */
+export function readCashLegLock(value: unknown, path: string): CashLegLock | null {
+  if (value === undefined || value === null) return null;
+  const body = readObject(value, path);
+  return {
+    lockId: readString(field(body, 'lockId'), `${path}.lockId`),
+    /*
+     * Required, and deliberately not defaulted to `locked`. The whole reason this block
+     * exists is to say whether the seller has been paid; a missing status defaulted to
+     * "still locked" would answer that question wrongly and confidently.
+     */
+    status: readString(field(body, 'status'), `${path}.status`),
+    beneficiary: readOptionalString(field(body, 'beneficiary'), `${path}.beneficiary`),
+    amountMinor: readOptionalMoney(field(body, 'amountMinor'), `${path}.amountMinor`),
+    claimableUntil: readOptionalString(field(body, 'claimableUntil'), `${path}.claimableUntil`),
+    explorerUrl: readOptionalString(field(body, 'explorerUrl'), `${path}.explorerUrl`),
+  };
+}
 
 export function readMandateEscrow(raw: unknown, path: string): MandateEscrow | undefined {
   if (raw === undefined || raw === null) return undefined;
@@ -755,6 +810,15 @@ export type TradeStatus = (typeof TRADE_STATUSES)[number];
  */
 export interface TradeRecord extends Trade {
   readonly status?: TradeStatus | undefined;
+  /**
+   * Which rail carried the cash leg, when the venue said.
+   *
+   * It sits here rather than on `cashLeg` because `SettlementLeg` belongs to
+   * `@facture/shared`, which is frozen — the same reason `status` is here. Undefined means
+   * the venue did not say, which is not the same as x402: the sentence a seller is shown
+   * after a sale turns on this, and defaulting would name a protocol that never ran.
+   */
+  readonly cashRail?: CashRail | undefined;
 }
 
 /**
@@ -832,6 +896,16 @@ export function readTrade(raw: unknown, path = 'trade'): TradeRecord {
       cashLeg === undefined
         ? PENDING_LEG('arc-testnet')
         : readLeg(cashLeg, `${path}.cashLeg`, 'arc-testnet'),
+    // Lifted off the cash leg because the shared `SettlementLeg` has nowhere to put it.
+    ...(cashLeg === undefined
+      ? {}
+      : {
+          cashRail:
+            readCashRail(
+              field(readObject(cashLeg, `${path}.cashLeg`), 'rail'),
+              `${path}.cashLeg.rail`,
+            ) ?? undefined,
+        }),
     // The wire calls it `createdAt`: a trade is created at the moment it is matched, and
     // there is no earlier moment for it to have been executed at.
     executedAt: readString(field(body, 'executedAt', 'createdAt'), `${path}.executedAt`),
@@ -1087,12 +1161,40 @@ export interface TradeProofResponse {
      * be a dead link on the one screen whose whole job is being checkable.
      */
     chain: ChainKey;
+    /**
+     * Which rail carried the cash, as the venue recorded it — not reconstructed here.
+     *
+     * `x402` is a payment the buyer signed for this trade. `arc-vault` draws on USDC they
+     * escrowed before the invoice existed. `null` means no rail has run, which is a third
+     * state: the venue used to infer this from the network string and answer "Arc" for a
+     * trade that had not settled at all.
+     */
+    rail: CashRail | null;
     scheme: string | null;
     network: string | null;
     asset: string | null;
     transaction: string | null;
     payer: string | null;
+    /**
+     * What moved, in the SETTLEMENT ASSET's minor units — tinybars or USDC at 6 decimals.
+     *
+     * Not the invoice currency. `pricing.proceeds` is US cents, and the two differ by the
+     * venue's ppm scale, so rendering this one with `formatMoney` reports 0.059331 USDC as
+     * $59,331.78 — the same confusion `MandateEscrow` above documents. Use `formatUsdc`.
+     *
+     * Null on trades that settled before the venue recorded it, which is honest: it does not
+     * know, rather than a zero that looks like a price.
+     */
+    settledAmountMinor: MinorUnits | null;
     explorerUrl: string | null;
+    /**
+     * Arc only. Where a payout is sitting and whether the seller has taken it.
+     *
+     * A vault payout puts the money in an escrow claimable by the seller alone, for a day —
+     * it does not put it in their wallet. A cash leg reported as settled with a `locked`
+     * lock is a payment that has not reached anyone yet, and the screen has to say so.
+     */
+    lock: CashLegLock | null;
   };
   /**
    * Maturity: the third receipt, `null` until the receivable has matured.
@@ -1264,12 +1366,18 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
         `${path}.cashLeg.chain`,
         'arc-testnet',
       ),
+      rail: readCashRail(field(cashLeg, 'rail'), `${path}.cashLeg.rail`),
       scheme: readOptionalString(field(cashLeg, 'scheme'), `${path}.cashLeg.scheme`),
       network: readOptionalString(field(cashLeg, 'network'), `${path}.cashLeg.network`),
       asset: readOptionalString(field(cashLeg, 'asset'), `${path}.cashLeg.asset`),
       transaction: readOptionalString(field(cashLeg, 'transaction'), `${path}.cashLeg.transaction`),
       payer: readOptionalString(field(cashLeg, 'payer'), `${path}.cashLeg.payer`),
+      settledAmountMinor: readOptionalMoney(
+        field(cashLeg, 'settledAmountMinor'),
+        `${path}.cashLeg.settledAmountMinor`,
+      ),
       explorerUrl: readOptionalString(field(cashLeg, 'explorerUrl'), `${path}.cashLeg.explorerUrl`),
+      lock: readCashLegLock(field(cashLeg, 'lock'), `${path}.cashLeg.lock`),
     },
     /*
      * Absent rather than empty when the receivable has not matured. A present-but-blank

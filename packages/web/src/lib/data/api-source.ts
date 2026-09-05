@@ -361,16 +361,25 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
       explorerUrl: proof.assetLeg.explorerUrl,
     },
     cashLeg: {
-      // Read off the venue's own `network`, not assumed. This deployment settles in HBAR,
-      // so the cash leg is on Hedera and the explorer link has to be HashScan.
+      // Read off the venue's own `network`, not assumed. An x402 trade settles in HBAR on
+      // Hedera and needs a HashScan link; a vault payout is USDC on Arc and needs ArcScan.
       chain: proof.cashLeg.chain,
+      rail: proof.cashLeg.rail,
       from: proof.cashLeg.payer,
-      to: null,
+      /*
+       * The payee, at last, and only on the rail that names one. A vault payout binds the
+       * seller's address on chain before delivery, so the escrow lock knows exactly who the
+       * money is for. x402 pays whoever the challenge said, and the venue does not publish
+       * that, so it stays null rather than being guessed at.
+       */
+      to: proof.cashLeg.lock?.beneficiary ?? null,
       asset: proof.cashLeg.asset,
       scheme: proof.cashLeg.scheme,
       network: proof.cashLeg.network,
       transaction: proof.cashLeg.transaction,
+      settledAmountMinor: proof.cashLeg.settledAmountMinor,
       explorerUrl: proof.cashLeg.explorerUrl,
+      lock: proof.cashLeg.lock,
     },
     // Passed straight through. The venue decides whether a receivable has matured and
     // whether anyone has been paid; this source does not get a vote on either.
@@ -383,16 +392,30 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
      * the facilitator and the nonce are left null because they are not published.
      */
     settlement:
-      proof.cashLeg.scheme === null && proof.cashLeg.network === null
+      proof.cashLeg.rail === null && proof.cashLeg.scheme === null && proof.cashLeg.network === null
         ? null
         : {
-            protocol: 'x402 delivery versus payment',
+            /*
+             * Named from the rail the venue recorded, not asserted.
+             *
+             * This block used to read `x402 delivery versus payment` for every trade,
+             * hardcoded — and it disappeared entirely when the scheme and network were both
+             * null, which is exactly the shape a vault payout has. So the rail that most
+             * needed explaining was the one that got no explanation at all.
+             */
+            protocol:
+              proof.cashLeg.rail === 'arc-vault'
+                ? 'Escrowed capital, delivery versus payment'
+                : 'x402 delivery versus payment',
             scheme: proof.cashLeg.scheme,
             network: proof.cashLeg.network,
             facilitator: null,
             challengeNonce: null,
             boundAt: null,
-            note: 'Both legs are bound to one x402 challenge. Neither settles unless both do, and nothing is wrapped or bridged.',
+            note:
+              proof.cashLeg.rail === 'arc-vault'
+                ? 'The buyer escrowed this capital on Arc before the invoice existed, so there was nothing to sign. The payout is locked for the seller against the same hash the paper moved under; neither leg settles unless both do, and nothing is wrapped or bridged.'
+                : 'Both legs are bound to one x402 challenge. Neither settles unless both do, and nothing is wrapped or bridged.',
           },
     /*
      * One row per mandate per reason, counted.

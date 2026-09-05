@@ -4,8 +4,16 @@ import Link from 'next/link';
 import type { ReactNode } from 'react';
 
 import type { SettlementLegState } from '@/lib/domain';
-import { ASSET_CHAIN, CHAINS, REGULATIONS, explorerTxUrl } from '@/lib/domain';
-import { elide, formatDate, formatDateTime, formatMoney, formatRate } from '@/lib/format';
+import { ASSET_CHAIN, CASH_CHAIN, CHAINS, REGULATIONS, explorerTxUrl } from '@/lib/domain';
+import {
+  elide,
+  formatDate,
+  formatDateTime,
+  formatMoney,
+  formatRate,
+  formatUsdc,
+} from '@/lib/format';
+import type { CashRail } from '@/lib/api/contract';
 import type { ProofRecord } from '@/lib/data';
 import { useProof } from '@/lib/data/hooks';
 import {
@@ -62,6 +70,18 @@ export function ProofView({ tradeId }: { tradeId: string }) {
 
   return <Proof record={proof.data} />;
 }
+
+/**
+ * How each rail is named on the page.
+ *
+ * Spelled out rather than printed raw, because `arc-vault` is an identifier and this is the
+ * screen a funder reads to understand what happened. The distinction the words carry is the
+ * whole point: one rail took a signature for this trade, the other did not need one.
+ */
+const RAIL_LABEL: Record<CashRail, string> = {
+  x402: 'x402 - signed for this trade',
+  'arc-vault': 'Escrowed capital - no signature needed',
+};
 
 function Proof({ record }: { record: ProofRecord }) {
   const { trade } = record;
@@ -233,10 +253,31 @@ function Proof({ record }: { record: ProofRecord }) {
               {cashChainId === null ? '' : ` · chain ${cashChainId}`}
             </Label>
             <Row term="State" value={<LegState state={trade.cashLeg.state} />} />
+            {record.cashLeg.rail ? (
+              <Row term="Rail" value={RAIL_LABEL[record.cashLeg.rail]} />
+            ) : null}
             <Row
               term={trade.cashLeg.state === 'settled' ? 'Transferred' : 'To transfer'}
               value={`${formatMoney(trade.proceeds)}${record.cashLeg.asset ? ` ${record.cashLeg.asset}` : ''}`}
             />
+            {/*
+              The figure that matches the transaction. The row above is the invoice price in
+              dollars; this is what actually moved, in the settlement asset's own units, and
+              the two differ by the venue's testnet scale. A reader checking the explorer sees
+              this number, so a page showing only the first reads as a discrepancy.
+            */}
+            {record.cashLeg.settledAmountMinor === null ? null : (
+              <Row
+                term="Settled amount"
+                value={
+                  record.cashLeg.rail === 'arc-vault'
+                    ? formatUsdc(record.cashLeg.settledAmountMinor)
+                    : `${record.cashLeg.settledAmountMinor.toString(10)}${
+                        record.cashLeg.asset ? ` (${record.cashLeg.asset})` : ''
+                      }`
+                }
+              />
+            )}
             {record.cashLeg.from ? (
               <Row term="From" value={<Mono>{elide(record.cashLeg.from, 10, 6)}</Mono>} />
             ) : null}
@@ -252,6 +293,53 @@ function Proof({ record }: { record: ProofRecord }) {
               <Explorer href={cashExplorer} label={`Open in ${cashExplorerName}`} />
             ) : null}
           </div>
+
+          {/*
+            Where the money actually is.
+
+            A vault payout is locked in an escrow claimable by the seller alone, for a day -
+            it is not in their wallet. Reporting the cash leg as settled and stopping there
+            would tell a seller they have been paid before anyone moved the money to them,
+            which is the one thing this page exists not to do.
+          */}
+          {record.cashLeg.lock === null ? null : (
+            <div className="bg-raised px-5 py-5">
+              <Label className="mb-3">Payout escrow · {CHAINS[CASH_CHAIN].name}</Label>
+              <Row
+                term="State"
+                value={
+                  record.cashLeg.lock.status === 'claimed' ? (
+                    <span className="text-pos">Seller has taken the payout</span>
+                  ) : record.cashLeg.lock.status === 'locked' ? (
+                    <span className="text-muted">Locked for the seller, not yet claimed</span>
+                  ) : record.cashLeg.lock.status === 'refunded' ? (
+                    <span className="text-muted">Unclaimed; returned to the buyer</span>
+                  ) : (
+                    <span className="text-muted">The escrow could not be read just now</span>
+                  )
+                }
+              />
+              <Row term="Lock" value={<Mono>{elide(record.cashLeg.lock.lockId, 12, 8)}</Mono>} />
+              {record.cashLeg.lock.beneficiary ? (
+                <Row
+                  term="Claimable by"
+                  value={<Mono>{elide(record.cashLeg.lock.beneficiary, 10, 6)}</Mono>}
+                />
+              ) : null}
+              {record.cashLeg.lock.amountMinor === null ? null : (
+                <Row term="Held" value={formatUsdc(record.cashLeg.lock.amountMinor)} />
+              )}
+              {record.cashLeg.lock.claimableUntil ? (
+                <Row
+                  term="Claimable until"
+                  value={formatDateTime(record.cashLeg.lock.claimableUntil)}
+                />
+              ) : null}
+              {record.cashLeg.lock.explorerUrl ? (
+                <Explorer href={record.cashLeg.lock.explorerUrl} label="Open in ArcScan" />
+              ) : null}
+            </div>
+          )}
         </div>
 
         {/*

@@ -88,3 +88,19 @@ export const SETTLEMENT_STATE_SENTENCE: Record<SettlementState, string> = {
     'The cash leg did not settle, so the hold was released. Nothing moved and the position was never encumbered for longer than the challenge window.',
   failed: 'This sale did not go through, and nothing moved.',
 };
+
+/**
+ * The same ending, reached without a challenge.
+ *
+ * A sale settled out of the buyer's escrowed capital is `settled` like any other, so it is
+ * not a sixth state — but the sentence above describes an x402 exchange that did not happen
+ * here, and it stops short of the one fact this seller most needs: the money is in an escrow
+ * they still have to claim, and it does not wait forever.
+ *
+ * Kept out of `SETTLEMENT_STATE_SENTENCE` deliberately. That table is keyed by state, and
+ * adding a rail to its keys would make every consumer handle a state the venue never emits.
+ */
+export const SETTLED_FROM_ESCROW_SENTENCE =
+  'Both legs settled. The buyer had already escrowed this capital on Arc, so there was ' +
+  'nothing for them to sign — the payout is locked for you in the escrow and you claim it ' +
+  'with the key that holds the paper.';
