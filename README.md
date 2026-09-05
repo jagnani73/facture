@@ -12,14 +12,20 @@
 
 > **Status: running on testnet.** The five moves below have each happened on chain, once, for
 > real. A receivable was issued as an ATS zero-coupon bond, priced off a standing mandate,
-> checked against the security's own control list, settled delivery-versus-payment across two
-> chains, and matured — paying its holder par. Addresses, transaction ids and balances either
-> side of each of those are in [docs/deployments.md](./docs/deployments.md), which is written
-> so that every claim on this page can be checked somewhere that is not us.
+> checked against the security's own control list, settled delivery-versus-payment, and
+> matured — paying its holder par. Addresses, transaction ids and balances either side of each
+> of those are in [docs/deployments.md](./docs/deployments.md), which is written so that every
+> claim on this page can be checked somewhere that is not us.
+> [docs/demo.md](./docs/demo.md) walks the same five moves against the running venue, and
+> [docs/ai-usage.md](./docs/ai-usage.md) says which parts a model wrote and which decisions
+> were not its to make.
 >
 > What that does **not** mean: this is a hackathon build on Hedera and Arc testnets, with a
-> seeded demo book behind it. Where a section describes behaviour the build does not have yet,
-> it says so in place rather than leaving you to find out.
+> seeded demo book behind it. The cash leg that has actually settled ran over x402 on Hedera,
+> in HBAR under a declared scale — the Arc contracts are deployed and the Hedera book records
+> the Arc vault and chain id as construction-time immutables, but no USDC has crossed that link
+> yet. Where a section describes behaviour the build does not have yet, it says so in place
+> rather than leaving you to find out.
 
 Factoring is bond pricing done over the phone. A business that is owed money and needs it now calls
 a factor, the factor prices the paper privately, and the business takes 2&ndash;5% off the face value
@@ -98,6 +104,11 @@ day one: selling the same receivable to three financiers is the specific fraud t
 always had, and it is roughly what broke Greensill. A registry does not make an invoice real, but it
 stops it being sold twice.
 
+Today that uniqueness is enforced by a unique index on the hash, written in the same statement that
+creates the invoice, so there is no check-then-insert window for the fraud to fit through. The
+`UniquenessRegistry` contract is deployed and the venue does not yet call it, so the guarantee is
+currently the venue's rather than the chain's.
+
 ### Quote
 
 Bids are standing, not per-asset. They carry a rating floor, a maximum tenor, an annualised yield and
@@ -117,7 +128,11 @@ not at settlement.
 That ordering is the whole argument. An AMM matches first and discovers the transfer is illegal
 afterwards, so a non-compliant trade shows up as a revert. Here an ineligible counterparty is never
 matched in the first place, and the refusal is a first-class output rather than a failed transaction.
-Every refusal writes a receipt to HCS that the rejected party can check without trusting us.
+
+Every refusal is stored with its reason code and its sentence, and the schema carries the HCS topic
+and sequence number that would let the refused party check it without trusting us. **Nothing writes
+to HCS yet**, so those two fields are null on every trade that really settled. The seeded book fills
+them in; the ledger does not.
 
 ### Settle
 
@@ -131,6 +146,13 @@ Nothing is wrapped and nothing crosses.
 The honest reason for two chains is not that it is clever. It is that **buyer capital already lives
 where stablecoins live.** You do not ask a treasury desk to bridge onto Hedera to buy a $40k
 receivable. DvP means it never has to.
+
+Where the build actually is: the trades that settled ran their cash leg over x402 on
+`hedera:testnet`, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
+The Arc leg &mdash; `MandateVault` and the payment-side `DvpEscrow` &mdash; is deployed on Arc
+testnet, and the Hedera book's `cashLeg()` returns Arc's chain id and the vault address as
+immutables recorded at construction, so the link cannot be redirected. It has not yet carried USDC.
+The mechanism is real; the second chain is wired and idle.
 
 ### Mature
 
@@ -176,7 +198,9 @@ receipts, the compliance decision and both settlement legs.
 ### The book
 
 A seller connects a wallet, or has one made from an email address, and adds their outstanding
-invoices: customer, amount, invoice number, due date.
+invoices: customer, amount, invoice number, due date. There is no sign-in in this build &mdash; the
+screens are told which seller and which buyer they are looking at by configuration, and the venue
+scopes every route by that id.
 
 Each invoice becomes an instrument at this moment, not at the moment of sale. That ordering matters
 more than it looks. Tokenisation happens at onboarding, when nobody is watching a clock, so issuance
@@ -235,6 +259,11 @@ The reason this is not decoration: buyers bid tighter on paper they know they ca
 secondary leg and every mandate widens, and the seller gets less on day zero. The two markets are not
 sequential features. One prices the other.
 
+Neither half of this is built. A sold invoice cannot be requoted &mdash; the venue answers _this
+invoice has already been sold, so it cannot be priced_ &mdash; and partial position sales are
+cut-list item 4, so an exit today is all or nothing. This section is the argument for why the
+secondary leg is worth building, not a description of a screen that exists.
+
 ### Ratings are earned, not assigned
 
 A customer starts unrated, and their first invoice prices at the wide end of the curve. Every invoice
@@ -277,26 +306,32 @@ rating self-correcting rather than merely accumulated: the market prices its own
 ### The refusal
 
 A mandate that is not eligible for an instrument does not match, and the funder is told why in words
-rather than by a reverted transaction &mdash; _this invoice is restricted to buyers verified under
-Reg D 506(c), and your mandate is not_ &mdash; with a receipt they can check without trusting the
-venue.
+rather than by a reverted transaction. The first one this venue produced for real, against the
+tightest bid in the book, read:
+
+> Cordell Credit Partners is not permitted to hold this security by its control list.
+
+That arrived as a 403 with that sentence attached. Nothing was reserved, nothing was held and
+nothing moved.
 
 ## What is decided, and what is not
 
 Recorded here so they are not relitigated mid-build.
 
-- **One bond per invoice is affordable. Measured, not assumed.** `Factory.deployBond` costs
-  **6,978,091 gas** in the repo's default configuration &mdash; 47% of Hedera's 15M per-transaction
-  ceiling &mdash; and 8,158,081 in the heaviest configuration that could be constructed, which is
-  still only 54%. Ninety-four facets initialise in that one transaction, at roughly 74k each. The
-  facet count would have to almost double before the ceiling binds. Live operations are cheap by
-  comparison: a role grant is 180k, a KYC grant 190k, a mint 465k, a transfer 254k warm. Corroborated
-  by the repo's own deploy scripts, which ship `gasLimit: 10_000_000` for this call on both
-  `hedera-testnet` and `hedera-mainnet`, against five real dated testnet deployment records.
-  Heterogeneous per-invoice paper stands.
+- **One bond per invoice is affordable. Measured on chain, not estimated.** `Factory.deployBond`
+  cost **7,016,307 gas** for the first bond this project issued, and 7,024,576 and 7,023,179 for the
+  two the venue went on to issue by itself &mdash; about 47% of Hedera's 15M per-transaction ceiling,
+  and inside the 6,956,443&ndash;7,310,717 range read off 24 historical calls to the deployed
+  factory. That is 7.3&ndash;8.9 HBAR an issuance. Ninety-four facets initialise in that one
+  transaction, at roughly 74k each, so the facet count would have to almost double before the
+  ceiling binds. Live operations are cheap by comparison: a role grant is 180k, a KYC grant 190k, a
+  mint 465k, a transfer 254k warm. Heterogeneous per-invoice paper stands.
 
-- **What makes a bid firm.** Mandate capital is escrowed at funding. Matching is bounded by
-  unallocated balance, which is also what resolves two invoices arriving against one mandate.
+- **What makes a bid firm.** Matching is bounded by a mandate's unallocated balance, which is also
+  what resolves two invoices arriving against one mandate. That bound is enforced. The escrow behind
+  it is not yet: no escrow provider is wired into this build, so funding records the reference and
+  the amount rather than reading a confirmed deposit, and the store is the authority on how much
+  landed.
 - **Where a rating comes from.** Earned on the platform out of settled payment behaviour, starting
   unrated. No oracle, and no invented score.
 - **Whether an invoice is real.** Debtor confirmation gates listability, and a uniqueness registry
@@ -306,7 +341,10 @@ Recorded here so they are not relitigated mid-build.
   said plainly rather than mocked.
 - **Whether market-makers are visible.** They are real agents holding funded mandates on
   policy-capped wallets, and they are presented as exactly that. Fake liquidity is the one thing that
-  would undo every argument above.
+  would undo every argument above. In this build the agent runs against Circle developer-controlled
+  wallets and defaults to a dry run &mdash; it reads the book, prices it, reports what its mandates
+  would take, and arms nothing without being told to in so many words. The standing bids in the demo
+  book are seeded rows, not bids an agent wrote.
 
 ## Prior art
 
