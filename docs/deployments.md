@@ -12,7 +12,7 @@ Testnet only. Recorded 2026-09-01.
 | `UniquenessRegistry`       | `0x82ab4e85640b14070d337ef4d4d02c8974e7b0a8` | 1,554  |
 | `AtsComplianceGate`        | `0xc65e6a706a98c847cad85ffda1f7e008b50f8af8` | 982    |
 
-Verified on-chain: `book.invoiceRegistry()` returns the registry above, and
+Verified on-chain after redeploy: `book.invoiceRegistry()` returns the registry above, and
 `book.cashLeg()` returns `(5042002, 0x217256d0…)` — the Arc chain id and vault, both
 immutables. The cross-chain link is recorded at construction and cannot be redirected.
 
