@@ -725,6 +725,104 @@ a day later.
   to end — fictional trades against securities never deployed — and putting one real address
   into it would make the rest read as real.
 
+### Resolved: the Arc rail pays the seller, and what it cost to make safe
+
+**Built 2026-09-03.** A mandate whose capital is escrowed in `MandateVault` settles on Arc in
+USDC. An unfunded one settles pay-as-you-go over x402 on Hedera, unchanged. See the two-rails
+decision above for why both stay.
+
+- **A funded mandate settles in ONE call and returns 200, already settled.** There is no
+  challenge because there is nothing to sign: the buyer escrowed the capital and wrote the
+  terms, so an invoice meeting those terms is a trade they have already agreed to. **A second
+  consent would make a standing bid not standing**, which is the product's whole claim. An
+  unfunded mandate still gets a 402, and both bodies carry `rail.reason`.
+- **The order is chosen by which way a failure hurts.** Hold the paper → `registerMatch` →
+  `executePayout` → execute the hold → hand over the preimage. **Cash commits before the
+  paper moves.** Reverse those two and a failed payout leaves the buyer holding paper nobody
+  paid for, unrecoverable. This way a failed delivery leaves money in an escrow and the seller
+  keeps their position.
+- **`registerMatch` is one-shot and no binding can ever be corrected** — a second call reverts
+  even with identical arguments. So every write reads first. A match whose payout already
+  executed is refused rather than retried, because `reclaimPayout` returns the capital while
+  leaving `executed` true forever.
+- **The seller must claim with their own key.** `DvpEscrow.claim` requires
+  `msg.sender == beneficiary`; even the attester holding the public preimage gets
+  `NotBeneficiary`. Arc gas is USDC, so **a seller holding nothing cannot claim** and needs a
+  top-up. Workable here only because operator and seller are the same account.
+- **The preimage is not a credential and is published on the proof view.** The secret alone
+  moves nothing — the contract says the hashlock "does not keep anyone out" — and `claim`
+  writes it to storage in the clear anyway. It was previously returned exactly once, in the
+  settlement response, so a dropped connection left money nobody could ever claim.
+
+**Still not wired: `reclaimPayout`.** It is permissionless and it is what returns a stranded
+lock's capital to the mandate — and **nothing in the backend calls it**, though three comments
+implied it happened by itself. Corrected rather than deleted, because the wrong version was
+committed. Recovering a stranded lock is an operator action today.
+
+### The Arc rail's defects, and why they were all the same defect
+
+An adversarial review of the first Arc-rail commit found a double-spend and five defects
+around it. Every one came from the same root, and it is worth stating because it will keep
+being true: **on this rail there is no second consent, so every hole the x402 path leaves open
+becomes reachable without anyone signing anything.**
+
+- **The invoice stayed for sale after the buyer had paid for it.** The cash leaves
+  irreversibly, then the paper moves. A failed delivery left the invoice quotable, the hold
+  expired in three minutes, and a fresh quote drew a SECOND payout from the same mandate. One
+  receivable, paid for twice, silently. The x402 path has the identical hole and cannot reach
+  it, because a second sale needs a second signature. **The invoice is marked sold when the
+  cash commits, not when the paper moves.**
+- **Compensation released capital that had already left.** `abandon` refunded the mandate on
+  every failure, so a bid quoted against USDC sitting in an escrow lock. The signed x402 half
+  already carved out `internal_error`; the arming half did not.
+- **`unwind` could release a trade whose cash had moved.** An Arc trade sits in
+  `awaiting_payment` for its whole settlement and `reclaimExpired` sweeps that state on nearly
+  every request. Status alone was a sufficient guard only while `awaiting_payment` meant
+  nothing had moved.
+- **An x402 signature was accepted against a trade the vault was paying for**, which would
+  have taken a second payment and overwritten the row's rail.
+- **The hold window was sized for a challenge on a rail with no challenge.** 180 seconds had
+  to cover two Arc writes and two receipt waits. `VAULT_HOLD_WINDOW_SECONDS` is 12 minutes.
+- **A receipt timeout was reported as a revert.** viem gives up while the transaction is still
+  live, and `send` claimed "nothing was written" — so the venue would report failure, release
+  the capital, and then the payout would land in a lock nobody recorded. **A timeout is not a
+  revert**, and the unknown case now says so.
+
+Two smaller ones worth keeping: the escrow address cached a _rejected promise_, so one RPC
+blip would make every lock read "unreadable" for the life of the process — cache the value,
+never the promise. And writing a test found an **existing test passing vacuously**: it read
+`quote.body.mandateId`, which is undefined because the mandate is named on the quote itself,
+so it compared an absent mandate with itself.
+
+### Two more mechanisms nobody calls
+
+Found while mapping the settlement path, and neither is fixed:
+
+- **`trades.hcs_topic_id` / `hcs_sequence_number` have a reader and no runtime writer.**
+  `proof.ts` renders them into a HashScan link and only `seed.ts` ever sets them, so on every
+  live trade that block is null. `services/hcs.ts` publishes refusal receipts only; nothing
+  publishes the match itself.
+- **`reclaimPayout`**, above.
+
+That is eight and nine. The pattern holds: look for the caller before trusting the mechanism.
+
+### The agent measures in the wrong unit, and checks the wrong pot
+
+**The note that escrowing capital "starved" the agent was wrong**, and it was acted on. Before
+the deposit the wallet held 6 USDC — $6.00 at par — still four orders of magnitude short of a
+$6,400 receivable. The deposit did not flip a passing check to a failing one.
+
+`agent.ts` converts USDC to cents **at par and applies no ppm scale**, so it demands the full
+face-value dollar amount while the venue charges a millionth of it. Under the venue's own
+convention its 0.996822 USDC backs about $996,822 of proceeds. **The agent is not short; it is
+measuring in the wrong unit** — the same defect as the Arc funding check, in a third place.
+
+Underneath that is a larger one: the agent checks its **Circle wallet**, and that wallet pays
+for neither rail. The Arc rail is paid by the vault; the x402 rail needs a Hedera key the
+Circle wallet does not have and cannot produce. The wallet's real job is funding the vault.
+But that same check is the only spending cap the agent has, and Circle enforces none — so
+removing it is not free, and the fix is a decision rather than a patch.
+
 ## Cut list
 
 Ordered by what leaves the product most intact, not by which track is cheapest to lose. A prize is

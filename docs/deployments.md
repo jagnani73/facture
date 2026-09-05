@@ -609,3 +609,42 @@ book that could not settle.
 Migration `0005_meridian_real_arc_wallet` — a plain UPDATE, applied after a `VACUUM INTO`
 backup. Six migrations applied, `integrity_check` ok, `foreign_key_check` clean, 29 invoices
 and 27 trades intact.
+
+## The Arc rail, in the build — 2026-09-03
+
+Nothing new deployed. `MandateVault` and the Arc `DvpEscrow` were reached by nothing until
+now; the backend calls both. **No live trade has settled on this rail yet** — what follows is
+what the code does and what the chain is configured to allow, not a settlement record.
+
+|                      |                                                                                |
+| -------------------- | ------------------------------------------------------------------------------ |
+| rail chosen when     | the mandate's vault balance covers the trade AND the seller has an Arc address |
+| what runs            | `registerMatch` → `executePayout` → ATS `executeHold`                          |
+| what the seller gets | a lock in `DvpEscrow` `0x32e3511A…`, claimable for 24 h                        |
+| who may claim        | **the beneficiary only** — `msg.sender == beneficiary`                         |
+| the preimage         | published on the proof view; not a credential                                  |
+
+### Two operational facts the demo has to include
+
+**The seller needs Arc gas.** `claim` must be sent by the beneficiary, Arc gas is USDC, and
+`0x2Da63Ac0…` holds **0 USDC**. It can be paid and then cannot afford the transaction that
+collects. A top-up from the attester (213.95 USDC available) is a prerequisite, not a detail.
+
+**`reclaimPayout` is not wired.** It is the permissionless call that returns a stranded lock's
+capital to the mandate, and nothing in the backend makes it. A payout whose delivery failed
+sits until an operator calls it by hand. Three comments in the first commit implied this
+happened by itself; they are corrected rather than deleted, because the wrong version shipped.
+
+### What the review caught before any of it ran
+
+An adversarial pass over the first Arc-rail commit found a **double-spend**: a failed delivery
+left the invoice quotable, the hold expired in three minutes, and a fresh quote drew a second
+payout from the same funded mandate — one receivable paid for twice, with no second signature
+anywhere, because this rail's premise is that none is needed. Fixed by marking the invoice
+sold when the cash commits rather than when the paper moves. Five related defects went with
+it; the full list is in CLAUDE.md.
+
+The verification that matters for anyone reading this later: **the x402 rail has the same
+hole and cannot reach it.** Every Arc defect was a pre-existing hole made reachable by
+removing the buyer's per-trade signature. That is the thing to check first when adding
+anything else to this rail.

@@ -520,8 +520,14 @@ export const settlementService: SettlementService = {
    *
    * **Cash commits before the paper moves.** Reverse 3 and 4 and a failed payout leaves the
    * buyer holding paper nobody paid for, which is unrecoverable. This way a failed step 4
-   * leaves money locked in an escrow that returns it to the mandate after 24 hours, and the
-   * seller still has their position — so the bad case costs a day, not a receivable.
+   * leaves money locked in an escrow that CAN be returned to the mandate after 24 hours, and
+   * the seller still has their position — so the bad case is recoverable, not a lost
+   * receivable.
+   *
+   * "Can be" is exact. `MandateVault.reclaimPayout` is permissionless and does exactly this,
+   * and **nothing in this service calls it.** Recovering a stranded lock is an operator
+   * action today, not something the venue does on its own, and saying otherwise would
+   * describe a safety net that is not strung.
    *
    * Step 2 is not bookkeeping. `registerMatch` is what lets a seller read `payoutOf(matchId)`
    * and see the price and the payee fixed and public **before** parting with the paper. It is
@@ -612,8 +618,9 @@ export const settlementService: SettlementService = {
       throw conflict(
         'conflict',
         `Trade ${intent.tradeId} has already drawn its payout from the vault. If the seller ` +
-          'never claimed it, the capital returns to the buyer when the lock expires and this ' +
-          'receivable needs a new sale rather than a retry of this one.',
+          'never claimed it, the capital can be reclaimed to the buyer once the lock expires ' +
+          '— by someone calling reclaimPayout, which this venue does not do automatically — ' +
+          'and this receivable needs a new sale rather than a retry of this one.',
       );
     }
 
@@ -711,8 +718,8 @@ export const settlementService: SettlementService = {
       });
       throw internalError(
         `The payout was locked on Arc but the security did not transfer. Trade ` +
-          `${intent.tradeId} is being reconciled; the capital returns to the buyer when the ` +
-          'lock expires and the seller keeps their position. Quote this id.',
+          `${intent.tradeId} is being reconciled; the seller keeps their position and the ` +
+          'locked capital can be reclaimed to the buyer after the lock expires. Quote this id.',
       );
     }
 
