@@ -252,6 +252,19 @@ const money = (amount: MinorUnits, currency: Currency): string =>
   formatMinorUnits(amount, currency, { symbol: true });
 
 /**
+ * The on-chain spelling of one refusal code, expressed as a type rather than as data.
+ *
+ * Written this way so identity is enforced rather than merely asserted: the seven codes both
+ * layers model cannot be given any value but their own name, which is the half of a rename
+ * that would otherwise be applied to the key and forgotten on the value.
+ */
+type OnChainSpelling<C extends AgentRefusalCode> = C extends 'INELIGIBLE_JURISDICTION'
+  ? 'CONTROL_LIST_BLOCKED'
+  : C extends 'CURRENCY_MISMATCH' | 'WALLET_BALANCE_SHORT'
+    ? null
+    : C;
+
+/**
  * The same refusals under the on-chain vocabulary.
  *
  * **The two vocabularies were unified**: `libraries/ReasonCodes.sol` was renamed to spell
@@ -259,15 +272,23 @@ const money = (amount: MinorUnits, currency: Currency): string =>
  * reads the same in a `MatchRefused` event and in the API. That was the point — the product
  * claims every refusal names its reason, and two names for one decision undercuts it.
  *
- * So this map is an identity for everything the book models. It is kept rather than deleted
- * because the two `null`s and the one genuine translation still carry information a reader
- * would otherwise have to rediscover, and because it is the place a future divergence would
- * be recorded.
+ * What is left is therefore not a translation table. It is a record of the only three places
+ * the two layers do not line up, and {@link OnChainSpelling} makes the compiler enforce that:
+ * every other code must map to itself, so a rename applied to a key but not to its value stops
+ * being something anyone can write. Deleting the map would delete the three facts with it.
  *
- * `null` means the on-chain book has no equivalent: it does not model currency at all, and
- * a jurisdiction refusal is decided inside a compliance gate rather than the book.
+ * - `INELIGIBLE_JURISDICTION` is the one genuine translation, and it is not a leftover of the
+ *   rename. The book does not decide jurisdiction at all — `AtsComplianceGate` does, by asking
+ *   the instrument's own `ControlList`, and what it emits is `CONTROL_LIST_BLOCKED`. There is
+ *   no `INELIGIBLE_JURISDICTION` in `ReasonCodes.sol` for this to be identical to. The
+ *   asymmetry is about reading events back rather than about anything this agent can say:
+ *   `INELIGIBLE_JURISDICTION` is absent from {@link AGENT_EMITTED_REFUSAL_CODES} precisely
+ *   because only a diamond the agent has not called could decide it.
+ * - `CURRENCY_MISMATCH` is `null` because the on-chain book does not model currency.
+ * - `WALLET_BALANCE_SHORT` is `null` because it is this agent's own refusal about a Circle
+ *   wallet, which nothing on the venue's chain can observe.
  */
-export const ON_CHAIN_REASON_CODE: Readonly<Record<AgentRefusalCode, string | null>> = {
+export const ON_CHAIN_REASON_CODE: { readonly [C in AgentRefusalCode]: OnChainSpelling<C> } = {
   RATING_BELOW_MANDATE: 'RATING_BELOW_MANDATE',
   TENOR_EXCEEDS_MANDATE: 'TENOR_EXCEEDS_MANDATE',
   EXPOSURE_EXHAUSTED: 'EXPOSURE_EXHAUSTED',
@@ -278,7 +299,7 @@ export const ON_CHAIN_REASON_CODE: Readonly<Record<AgentRefusalCode, string | nu
   INELIGIBLE_JURISDICTION: 'CONTROL_LIST_BLOCKED',
   CURRENCY_MISMATCH: null,
   WALLET_BALANCE_SHORT: null,
-} as const;
+};
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
  * The decision

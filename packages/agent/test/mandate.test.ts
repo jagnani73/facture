@@ -31,7 +31,6 @@ import {
   isQuoting,
   isWalletBalanceShort,
   NO_ALLOCATIONS,
-  ON_CHAIN_REASON_CODE,
   toSharedMandate,
   unallocated,
   withAllocation,
@@ -478,39 +477,8 @@ describe('agreement with the venue', () => {
   });
 });
 
-describe('on-chain reason codes', () => {
-  it('names an equivalent, or `null`, for every code the agent can emit', () => {
-    for (const code of AGENT_EMITTED_REFUSAL_CODES) {
-      expect(ON_CHAIN_REASON_CODE).toHaveProperty(code);
-    }
-    for (const code of REFUSAL_CODES) {
-      expect(ON_CHAIN_REASON_CODE).toHaveProperty(code);
-    }
-  });
-
-  it('spells every modelled refusal the same on-chain as off', () => {
-    // The vocabularies were unified: ReasonCodes.sol now spells each overlapping code
-    // exactly as @facture/shared does, so one decision reads the same in a MatchRefused
-    // event and in the API. This asserts the identity so a future divergence fails here
-    // rather than being discovered in a proof view.
-    for (const code of [
-      'EXPOSURE_EXHAUSTED',
-      'DEBTOR_CONCENTRATION',
-      'RATING_BELOW_MANDATE',
-      'TENOR_EXCEEDS_MANDATE',
-      'MANDATE_NOT_ACTIVE',
-      'INVOICE_NOT_CONFIRMED',
-      'NOT_KYC_VERIFIED',
-    ] as const) {
-      expect(ON_CHAIN_REASON_CODE[code]).toBe(code);
-    }
-  });
-
-  it('admits the book has no equivalent for a currency or funding refusal', () => {
-    expect(ON_CHAIN_REASON_CODE.CURRENCY_MISMATCH).toBeNull();
-    expect(ON_CHAIN_REASON_CODE.WALLET_BALANCE_SHORT).toBeNull();
-  });
-});
+// The on-chain vocabulary is pinned in `reason-codes.test.ts`, which checks it against the
+// strings `ReasonCodes.sol` declares rather than against a list copied out of it.
 
 describe('assertWellFormed', () => {
   it('accepts a partially funded mandate whose per-customer cap is not yet binding', () => {
