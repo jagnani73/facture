@@ -855,11 +855,12 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
 
 **The rest stand, and are worth knowing before trusting the claim beside them:**
 
-1. **`ArcEscrow.registerMandate` has no caller.** The vault refuses a deposit against an
-   unregistered mandate, so **no mandate created through `POST /v1/mandates` can ever be
-   escrowed** — its key is `keccak256(uuid)` and nothing registers it. The one working
-   mandate was registered by hand with a raw transaction. The Arc rail is real and has no
-   on-ramp.
+1. **`ArcEscrow.registerMandate` had no caller.** The vault refuses a deposit against an
+   unregistered mandate, so **no mandate created through `POST /v1/mandates` could ever be
+   escrowed** — its key is `keccak256(uuid)` and nothing registered it. The one working
+   mandate had been registered by hand. **Closed operationally by `pnpm demo:reset`**, which
+   registers any active mandate that is missing; it is still not called from the funding
+   route, so a mandate written between resets stays unescrowable until the next one.
 2. **`SettlementOutcome: 'default'` is never produced** and no route writes
    `invoices.status = 'defaulted'`. So the permanent-rating-mark story has no code path, and
    worse: maturing an overdue unpaid receivable records it as **`late`**, which is a default
@@ -897,6 +898,38 @@ hardcoded constant.
 The lesson stands and is now quantified: **nineteen mechanisms in this repo have a definition,
 documentation, and no caller.** Look for the caller before believing the comment — including
 comments written in this file.
+
+### Provisioning: `pnpm demo:reset`
+
+Modelled on the `gantry` repo's `demo-reset.mjs` — numbered steps matching the header, a
+`degraded` flag rather than throws, a cheat sheet printed before the exit code, and the
+relayer reported **first** because every step under it spends what it holds.
+
+- **It does not touch `facture.db`, and must not.** Provisioning and seeding are separate
+  there and separate here: the book is 29 invoices, 27 trades and two proven lifecycles, and
+  `db:seed` remains the empty-database-only path.
+- **The attester is the relayer.** It holds the float on Arc and tops up the seller and the
+  buyer's wallet toward target balances. It cannot refill itself — Arc testnet has no faucet
+  this script can call — so a dry relayer is a loud warning rather than a fix.
+- **It refuses to send money to an address it cannot verify.** Four seeded parties carry
+  invented addresses; topping them up would not fail, it would succeed and burn testnet USDC
+  into addresses nobody holds a key for. The seller is verified by **derivation** from
+  `HEDERA_OPERATOR_KEY`; everything else must pass an EIP-55 checksum, which catches all four
+  because they were typed rather than generated. **That is an accident, not a proof**, and a
+  fabricated address with a correct checksum would still get through.
+- **It never transfers downward toward a target.** A script that pulled balances down could
+  silently undo a rehearsal someone is halfway through.
+- **It does not deposit into the vault on the buyer's behalf.** `deposit` pulls from
+  `msg.sender`, so a relayer-funded deposit credits the mandate with the venue's money while
+  the deployment record calls that capital the buyer's own. `--deposit <usdc>` overrides it
+  and labels the result.
+- **Invented addresses are reported, never degraded.** Making every run red teaches the reader
+  to ignore the colour.
+
+Its first run fixed the live blocker — the seller held **zero** USDC on Arc, and
+`DvpEscrow.claim` is beneficiary-only while Arc gas is USDC — and registered Harrow Point's
+second mandate, which closes the `registerMandate` finding above: that function had no caller,
+so no mandate created through the API could ever be escrowed.
 
 ## Cut list
 
