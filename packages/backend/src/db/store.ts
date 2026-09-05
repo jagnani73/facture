@@ -73,6 +73,12 @@ export interface ListMandatesCriteria {
 export interface ListTradesCriteria {
   readonly sellerId?: string | undefined;
   readonly buyerId?: string | undefined;
+  /**
+   * Scopes the read to one receivable. Maturity needs every settled trade on an invoice
+   * and nothing else — filtering a page of the whole book in memory finds the current
+   * holder only while the book is small enough to fit in that page.
+   */
+  readonly invoiceId?: string | undefined;
   readonly status?: TradeStatusValue | undefined;
   readonly limit: number;
 }
@@ -228,6 +234,16 @@ export interface Store {
   getTrade(id: string): Promise<TradeRow | null>;
   getTradeForInvoice(invoiceId: string): Promise<TradeRow | null>;
   listTrades(criteria: ListTradesCriteria): Promise<TradeRow[]>;
+  /**
+   * Trades still armed — `preparing` or `awaiting_payment` — created at or before
+   * `before`, oldest first.
+   *
+   * The read behind expiry. An armed trade holds mandate capital and encumbers the
+   * seller's position, so one whose challenge window has passed has to be findable without
+   * scanning the book: `before` is the arming time the window has already run out from.
+   * Oldest first so a backlog is worked off in the order it accumulated.
+   */
+  listArmedTradesOlderThan(before: Date, limit: number): Promise<TradeRow[]>;
   updateTrade(id: string, patch: Partial<NewTradeRow>): Promise<TradeRow>;
 
   insertRefusals(rows: readonly NewRefusalReceiptRow[]): Promise<RefusalReceiptRow[]>;

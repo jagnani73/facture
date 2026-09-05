@@ -393,6 +393,23 @@ export const trades = sqliteTable(
     tenorDays: integer('tenor_days').notNull(),
     status: text('status', { enum: TRADE_STATUS }).notNull().default('preparing'),
 
+    /**
+     * How many units of the security this trade moves: the seller's WHOLE position, read
+     * off the instrument with `balanceOf` when the trade is armed.
+     *
+     * Not derived from the face value, even though issuance currently mints one unit per
+     * minor unit of face — the two are separate facts, and the one that decides what the
+     * hold moves is the balance. It is stored rather than re-read because
+     * `executeHoldByPartition` and `releaseHoldByPartition` must name the same amount the
+     * hold was created for, and a balance re-read after the hold exists is a different
+     * number.
+     *
+     * Nullable only for rows written before this column existed; every trade this build
+     * arms carries it, and settlement refuses to execute or release a hold whose amount it
+     * cannot name.
+     */
+    unitsMinor: bigintText('units_minor'),
+
     // Asset leg — Hedera. The hold is placed before the cash leg and executed after it.
     holdId: text('hold_id'),
     assetTxId: text('asset_tx_id'),

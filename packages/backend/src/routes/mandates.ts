@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { getStore } from '../db/store.js';
 import { badRequest, notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
+import { settlementService } from '../services/settlement.js';
 import { readJson, readParams, readQuery } from '../validate.js';
 import { money, moneyString, wireMandate } from '../wire.js';
 
@@ -100,6 +101,11 @@ mandateRoutes.get('/', async (c) => {
   const query = readQuery(c, listMandatesQuery);
   const store = getStore();
 
+  // Allocated capital is a real column, so a trade that expired without paying keeps
+  // consuming this mandate until something gives it back. See
+  // `settlementService.reclaimExpired` for why that happens here rather than on a timer.
+  await settlementService.reclaimExpired();
+
   const rows = await store.listMandates({
     buyerId: query.buyerId,
     ...(query.status === undefined ? {} : { status: query.status }),
@@ -126,6 +132,10 @@ mandateRoutes.get('/', async (c) => {
 mandateRoutes.get('/exposure', async (c) => {
   const query = readQuery(c, z.object({ buyerId: z.uuid() }));
   const store = getStore();
+
+  // Utilisation is the number this screen exists for, and an expired trade nobody paid
+  // for inflates it. Reclaimed first so the figure is true when it is read.
+  await settlementService.reclaimExpired();
 
   const rows = await store.listMandates({ buyerId: query.buyerId, limit: 200 });
   const exposure = await store.debtorExposure(rows.map((row) => row.id));
@@ -222,6 +232,10 @@ mandateRoutes.post('/:id/fund', async (c) => {
 mandateRoutes.post('/:id/withdraw', async (c) => {
   const { id } = readParams(c, uuidParam);
   const body = await readJson(c, withdrawBody);
+
+  // A buyer withdrawing "everything unallocated" must not be short-changed by capital
+  // reserved for a trade whose challenge window has already run out.
+  await settlementService.reclaimExpired();
 
   /*
    * The row lock lives in the store, and it is what makes a withdrawal racing a match lose

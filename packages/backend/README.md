@@ -41,26 +41,28 @@ configure a service.
 Grouped by actor. `/health` sits outside the version prefix because it is operational,
 not product surface.
 
-| Method | Path                                    | Actor  |                                                     |
-| ------ | --------------------------------------- | ------ | --------------------------------------------------- |
-| GET    | `/health`                               | ops    | service status, indexer cursor vs chain head, queue |
-| POST   | `/v1/invoices`                          | seller | create; queues issuance, returns `202`              |
-| GET    | `/v1/invoices`                          | seller | the book, each row with a live price                |
-| GET    | `/v1/invoices/:id`                      | seller | detail incl. issuance state                         |
-| POST   | `/v1/invoices/:id/confirmation-request` | seller | email the debtor a confirmation link                |
-| GET    | `/v1/confirm/:token`                    | debtor | one sentence, two buttons — no wallet, no signup    |
-| POST   | `/v1/confirm/:token`                    | debtor | confirm or dispute                                  |
-| GET    | `/v1/invoices/:id/quote`                | seller | best live quote **plus refusals**                   |
-| POST   | `/v1/mandates`                          | buyer  | post a standing bid                                 |
-| POST   | `/v1/mandates/:id/fund`                 | buyer  | escrow — this is what makes the quote firm          |
-| GET    | `/v1/mandates`                          | buyer  | list                                                |
-| GET    | `/v1/mandates/exposure`                 | buyer  | exposure across the book                            |
-| GET    | `/v1/mandates/:id/exposure`             | buyer  | exposure for one mandate                            |
-| POST   | `/v1/mandates/:id/withdraw`             | buyer  | withdraw unallocated capital only                   |
-| POST   | `/v1/trades`                            | both   | execute a sale (DvP)                                |
-| GET    | `/v1/trades`                            | both   | list                                                |
-| GET    | `/v1/trades/:id`                        | both   | detail                                              |
-| GET    | `/v1/trades/:id/proof`                  | both   | the audit view, one click from any trade            |
+| Method | Path                                    | Actor  |                                                      |
+| ------ | --------------------------------------- | ------ | ---------------------------------------------------- |
+| GET    | `/health`                               | ops    | service status, indexer cursor vs chain head, queue  |
+| POST   | `/v1/invoices`                          | seller | create; queues issuance, returns `202`               |
+| GET    | `/v1/invoices`                          | seller | the book, each row with a live price                 |
+| GET    | `/v1/invoices/:id`                      | seller | detail incl. issuance state                          |
+| POST   | `/v1/invoices/:id/confirmation-request` | seller | email the debtor a confirmation link                 |
+| GET    | `/v1/confirm/:token`                    | debtor | one sentence, two buttons — no wallet, no signup     |
+| POST   | `/v1/confirm/:token`                    | debtor | confirm or dispute                                   |
+| GET    | `/v1/invoices/:id/quote`                | seller | best live quote **plus refusals**                    |
+| POST   | `/v1/invoices/:id/mature`               | ops    | maturity — pays the current holder, cash leg pending |
+| POST   | `/v1/mandates`                          | buyer  | post a standing bid                                  |
+| POST   | `/v1/mandates/:id/fund`                 | buyer  | escrow — this is what makes the quote firm           |
+| GET    | `/v1/mandates`                          | buyer  | list                                                 |
+| GET    | `/v1/mandates/exposure`                 | buyer  | exposure across the book                             |
+| GET    | `/v1/mandates/:id/exposure`             | buyer  | exposure for one mandate                             |
+| POST   | `/v1/mandates/:id/withdraw`             | buyer  | withdraw unallocated capital only                    |
+| POST   | `/v1/trades`                            | both   | execute a sale (DvP)                                 |
+| GET    | `/v1/trades`                            | both   | list                                                 |
+| GET    | `/v1/trades/:id`                        | both   | detail                                               |
+| POST   | `/v1/trades/:id/unwind`                 | both   | release an armed trade and its capital               |
+| GET    | `/v1/trades/:id/proof`                  | both   | the audit view, one click from any trade             |
 
 Errors are `application/problem+json` with a stable `code` and the request id, so a client
 can branch on the failure without matching on prose.
@@ -78,6 +80,37 @@ never received.
 `GET /v1/invoices/:id/quote` returns a `quoteId` beside the price. A trade is executed
 against that id because a seller must never be filled at a price they were not shown; an
 identical unexpired quote is reused rather than rewritten, so the route stays safe to poll.
+
+### A sale moves the whole position
+
+`prepare` reads the seller's balance off the instrument — `balanceOf` over the JSON-RPC
+relay, an `eth_call` that costs nothing — and holds **all of it**. Issuance mints
+face-value-many units, so the live bond `0.0.10316440` carries 6,230,000 against a $62,300
+face; a trade that moved a hardcoded `1` sold one part in millions of the paper it was paid
+for, and said so on the proof view. Partial sales are cut-list item 4, so this is
+all-or-nothing — but "all" is what the seller actually holds, never a number inferred from
+the invoice.
+
+The count is written to `trades.units_minor` at arming, because
+`executeHoldByPartition` and `releaseHoldByPartition` have to name the amount the hold was
+created for and a balance re-read afterwards is a different number. A seller holding
+nothing is a `409` naming the reason, not a settled transfer of zero units.
+
+### An armed trade that is never paid
+
+A trade holds the mandate's capital from the moment it is armed, so a buyer who never
+returns with a signature would otherwise strand it. Two ways out, and neither is a status
+edit — `allocated_minor` is a real column, so the release goes through the store:
+
+- `POST /v1/trades/:id/unwind` releases the hold and the capital. A **settled** trade is
+  refused with `409`: taking the paper back off a buyer who paid for it is not an unwind.
+  Repeating the call is fine and returns the same receipt.
+- Anything past its 180-second challenge window (plus a 30-second grace, because the row
+  is stamped a moment before the challenge is issued) is reclaimed **lazily**, on the paths
+  that care — arming a trade, listing trades, and the mandate capital views. Not on a timer:
+  stale capital is only wrong when somebody asks, nothing else in this process schedules
+  work, and a sweep would do the same writes with no one waiting on them. The argument in
+  full is on `settlementService.reclaimExpired`.
 
 ## Services
 
@@ -218,7 +251,14 @@ seller is worth less than the same history from five). See `services/rating.ts`.
 - **`ATS_FACTORY_ID` unset disables issuance; it does not simulate it.** A plausible
   security id for an instrument that does not exist would survive as far as the proof
   view, which is the one screen whose whole job is to be checkable.
-- **The debtor's maturity payment has no rail here.** `settleAtMaturity` finds the current
-  holder, records the outcome and releases the mandate's capital, and reports the cash leg
-  as `pending` with the payout requirement built. Marking it `settled` would put a payment
-  on the proof view that nobody made.
+- **The debtor's maturity payment has no rail here.** `POST /v1/invoices/:id/mature` runs
+  `settleAtMaturity`: it finds the current holder — the most recent settled trade on that
+  receivable, not the first buyer — writes the outcome to the settlement-outcome ledger,
+  releases the mandate's capital, and reports the cash leg as `pending` with the payout
+  requirement built. Marking it `settled` would put a payment on the proof view that
+  nobody made. It is operator-triggered because nothing here observes debtor payments;
+  when a rail exists, a Hedera Scheduled Transaction is the right shape for the payout.
+- **Maturity is idempotent through the ledger, not through a flag.** The unique index on
+  `(debtor_id, invoice_id)` is the fact, and the invoice's `matured` status marks the
+  second half. So a replay cannot tighten a rating or release capital twice, and a run that
+  died between the two steps is finished rather than skipped.

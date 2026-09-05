@@ -173,6 +173,66 @@ describe('the rating ledger', () => {
   });
 });
 
+describe('reading trades back', () => {
+  const invoice = () => h.seeded.invoiceIds['INV-2033'] ?? '';
+
+  it('scopes a read to one receivable, so maturity finds the current holder', async () => {
+    const settled = await store.listTrades({ invoiceId: invoice(), status: 'settled', limit: 50 });
+
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.id).toBe(h.seeded.tradeIds['TRD-4417']);
+    // Filtering a page of the whole book in memory finds this only while the book is small
+    // enough to fit in that page; scoping the read is what makes it true on a busy one.
+    expect(settled.every((t) => t.invoiceId === invoice())).toBe(true);
+  });
+
+  it('finds armed trades older than an instant, oldest first, and nothing settled', async () => {
+    const seedTrade = await store.getTrade(h.seeded.tradeIds['TRD-4417'] ?? '');
+    const base = seedTrade!.createdAt.getTime();
+
+    const older = await store.insertTrade({
+      ...seedTrade!,
+      id: seedId('TRD-ARMED-OLD'),
+      status: 'awaiting_payment',
+      createdAt: new Date(base),
+      settledAt: null,
+    });
+    const newer = await store.insertTrade({
+      ...seedTrade!,
+      id: seedId('TRD-ARMED-NEW'),
+      status: 'preparing',
+      createdAt: new Date(base + 60_000),
+      settledAt: null,
+    });
+    await store.insertTrade({
+      ...seedTrade!,
+      id: seedId('TRD-ARMED-FRESH'),
+      status: 'awaiting_payment',
+      createdAt: new Date(base + 600_000),
+      settledAt: null,
+    });
+
+    const stale = await store.listArmedTradesOlderThan(new Date(base + 120_000), 25);
+
+    expect(stale.map((t) => t.id)).toEqual([older.id, newer.id]);
+  });
+
+  it('honours its limit, so one request cannot inherit the whole backlog', async () => {
+    const seedTrade = await store.getTrade(h.seeded.tradeIds['TRD-4417'] ?? '');
+    for (let i = 0; i < 5; i += 1) {
+      await store.insertTrade({
+        ...seedTrade!,
+        id: seedId(`TRD-BACKLOG-${i}`),
+        status: 'awaiting_payment',
+        createdAt: new Date(seedTrade!.createdAt.getTime() + i * 1_000),
+        settledAt: null,
+      });
+    }
+
+    expect(await store.listArmedTradesOlderThan(new Date(), 2)).toHaveLength(2);
+  });
+});
+
 describe('issuance job state', () => {
   it('survives as a row so the queue can be rebuilt after a restart', async () => {
     await store.saveIssuanceJob({

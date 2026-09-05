@@ -52,8 +52,12 @@ export interface DvpIntent {
   sellerHederaAccountId: string;
   buyerHederaAccountId: string;
   buyerArcAddress: `0x${string}`;
-  /** Whole position. Partial sales are a later cut — see the cut list. */
-  unitsMinor: bigint;
+  /*
+   * There is deliberately no `unitsMinor` here. The size of the trade is the seller's
+   * whole position, which is a fact about the instrument rather than something a caller
+   * gets to assert — `prepare` reads it with `balanceOf` and writes it onto the trade.
+   * Passing it in is how it came to be `1n` against a security carrying 6,230,000 units.
+   */
   /** What the buyer pays today. Face minus the discount the curve implies. */
   proceedsMinor: bigint;
   faceValue: bigint;
@@ -65,6 +69,12 @@ export interface AssetLegReceipt {
   chain: 'hedera';
   state: LegState;
   holdId: string | null;
+  /**
+   * Units of the security this leg moves — the seller's whole position, as a decimal
+   * string. On the proof view it is the number a reader can check against the transfer on
+   * HashScan, which is the whole point of putting it there.
+   */
+  unitsMinor: string | null;
   transactionId: string | null;
   consensusAt: string | null;
   explorerUrl: string | null;
@@ -102,6 +112,29 @@ export interface SettlementResult {
   settledAt: string;
 }
 
+export interface MaturityResult extends SettlementResult {
+  /** Who the face value is owed to: whoever holds the paper now. */
+  holder: { buyerId: string; mandateId: string; name: string | null };
+  /** How the receivable resolved, as it was written to the settlement-outcome ledger. */
+  outcome: SettlementOutcome;
+  /**
+   * True when this receivable was already in the ledger, so this call changed nothing.
+   *
+   * Maturity is observable twice — a mirror-node replay, a retried scheduled transaction,
+   * an operator pressing the button again — and a replay must not tighten a rating or hand
+   * the mandate its capital back a second time.
+   */
+  alreadyRecorded: boolean;
+}
+
+/** One expired armed trade, and what unwinding it gave back. */
+export interface ReclaimedTrade {
+  tradeId: string;
+  mandateId: string;
+  /** Capital returned to the mandate, minor units. */
+  releasedMinor: string;
+}
+
 export interface SettlementService {
   prepare(intent: DvpIntent): Promise<DvpPreparation>;
   execute(input: {
@@ -112,11 +145,15 @@ export interface SettlementService {
   }): Promise<SettlementResult>;
   unwind(tradeId: string, reason: string): Promise<AssetLegReceipt>;
   /**
+   * Unwind every armed trade whose challenge window has passed. Safe to call on any path.
+   */
+  reclaimExpired(at?: Date): Promise<ReclaimedTrade[]>;
+  /**
    * Maturity. The debtor pays and settlement routes to whoever holds the token NOW, not
    * whoever bought it first. Without this the paper cannot legitimately change hands,
    * because a second buyer would have no way to be paid.
    */
-  settleAtMaturity(invoiceId: string): Promise<SettlementResult>;
+  settleAtMaturity(invoiceId: string): Promise<MaturityResult>;
 }
 
 /**
@@ -129,8 +166,49 @@ export interface SettlementService {
  */
 export const CHALLENGE_WINDOW_SECONDS = 180;
 
-/** A receivable paid within this many days of maturity still counts as on time. */
+/**
+ * A receivable paid within this many days of the due DATE still counts as on time.
+ *
+ * Zero, and the day itself is not the grace: `due_at` is an instant at the start of the
+ * due date, so a debtor paying at nine in the morning on the day the invoice falls due was
+ * previously recorded as late. "Due on the 12th" means any time on the 12th, and a rating
+ * mark is permanent — an off-by-one-day here widens a customer's curve for every seller
+ * afterwards for a payment that was on time.
+ */
 const ON_TIME_GRACE_DAYS = 0;
+
+const DAY_MS = 86_400_000;
+
+/** The last instant that still counts as paying on time. */
+const onTimeDeadline = (dueAt: Date): Date =>
+  new Date(dueAt.getTime() + (ON_TIME_GRACE_DAYS + 1) * DAY_MS - 1);
+
+/**
+ * How many expired trades one reclaim pass unwinds.
+ *
+ * Bounded because the pass runs on request paths: a backlog is worked off over several
+ * requests rather than turning one of them into a long chain of Hedera submissions.
+ */
+const RECLAIM_BATCH = 25;
+
+/**
+ * Slack between the challenge dying and the trade being reclaimed.
+ *
+ * Expiry is measured from the trade row's `created_at`, which is stamped a moment *before*
+ * the challenge is built — arming reads the position and submits a hold to Hedera in
+ * between, and that is seconds, not milliseconds. Without this grace the cutoff would sit
+ * marginally earlier than the challenge the payer was actually given, so a buyer signing
+ * at the very end of their window could lose the trade to a reclaim. Erring late costs a
+ * little stale capital; erring early cancels a live payment.
+ */
+const RECLAIM_GRACE_SECONDS = 30;
+
+/**
+ * How old an armed trade has to be before it is reclaimable, from `created_at`.
+ *
+ * Exported so a test measures the same boundary the service does rather than restating it.
+ */
+export const EXPIRED_AFTER_SECONDS = CHALLENGE_WINDOW_SECONDS + RECLAIM_GRACE_SECONDS;
 
 /**
  * The `resource` a trade's challenge is bound to.
@@ -183,6 +261,7 @@ export const settlementService: SettlementService = {
    */
   async prepare(intent) {
     const store = getStore();
+    const ats = getAtsAdapter();
     const expiresAt = new Date(Date.now() + CHALLENGE_WINDOW_SECONDS * 1000);
 
     /*
@@ -191,13 +270,45 @@ export const settlementService: SettlementService = {
      * account in its EVM form. Mixing the two would deliver the paper to an address that
      * does not exist on the chain holding it.
      */
-    const hold = await getAtsAdapter().createHold({
+    const sellerEvmAddress = accountIdToEvmAddress(intent.sellerHederaAccountId);
+
+    /*
+     * The size of the trade, read off the instrument rather than assumed.
+     *
+     * "Whole position" has to mean the whole position. Issuance mints face-value-many
+     * units, so the earlier hardcoded `1n` sold one unit in millions and left the seller
+     * holding paper they had been paid for. Partial sales are cut-list item 4 and are
+     * genuinely out of scope, which makes this an all-or-nothing sale — but all-or-nothing
+     * of the *balance*, not of an assumed unit.
+     *
+     * Read before the hold, because a hold moves units out of the free balance and the
+     * same call afterwards answers a smaller number.
+     */
+    const position = await ats.balanceOf({
       securityId: intent.securityId,
-      holderEvmAddress: accountIdToEvmAddress(intent.sellerHederaAccountId),
+      ownerEvmAddress: sellerEvmAddress,
+    });
+    if (position <= 0n) {
+      /*
+       * A zero-unit transfer would "settle" and deliver nothing, which is worse than not
+       * trading: the buyer pays and the proof view shows a transfer of nothing. Refused
+       * with the reason named, before the hold and before any payment challenge exists.
+       */
+      throw conflict(
+        'conflict',
+        `The seller holds no units of ${intent.securityId}, so there is no position to ` +
+          'sell. Either the instrument has not been issued to them yet, or it has ' +
+          'already been sold.',
+      );
+    }
+
+    const hold = await ats.createHold({
+      securityId: intent.securityId,
+      holderEvmAddress: sellerEvmAddress,
       toEvmAddress: accountIdToEvmAddress(intent.buyerHederaAccountId),
       // The venue is the escrow agent for the challenge window, and nothing longer.
       escrowEvmAddress: operatorEvmAddress(getConfig().env.HEDERA_OPERATOR_KEY),
-      units: intent.unitsMinor,
+      units: position,
       expiresAt,
     });
 
@@ -212,6 +323,9 @@ export const settlementService: SettlementService = {
     await store.updateTrade(intent.tradeId, {
       status: 'awaiting_payment',
       holdId: hold.holdId,
+      // Persisted, not re-read: `executeHoldByPartition` and `releaseHoldByPartition` have
+      // to name the amount the hold was created for, and the balance has moved by then.
+      unitsMinor: position,
       assetTxId: hold.transactionId,
       assetConsensusAt: new Date(hold.consensusAt),
       cashScheme: challenge.accepted.scheme,
@@ -225,6 +339,7 @@ export const settlementService: SettlementService = {
         chain: 'hedera',
         state: 'held',
         holdId: hold.holdId,
+        unitsMinor: position.toString(10),
         transactionId: hold.transactionId,
         consensusAt: hold.consensusAt,
         explorerUrl: explorer.hederaTx(hold.transactionId),
@@ -256,6 +371,19 @@ export const settlementService: SettlementService = {
     }
     if (trade.holdId === null) {
       throw conflict('conflict', 'This trade has no asset-leg hold; prepare it first.');
+    }
+    /*
+     * Checked here, before `verify` and `settle`, and not next to the hold execution it
+     * guards. The units are what the delivery is made in, and discovering they are unknown
+     * after the cash leg has cleared would manufacture the half-settled state on purpose.
+     */
+    const units = trade.unitsMinor;
+    if (units === null || units <= 0n) {
+      throw conflict(
+        'conflict',
+        'This trade does not record how many units it moves, so the security cannot be ' +
+          'delivered. Unwind it and arm it again.',
+      );
     }
 
     const verification = await client.verify(input.paymentPayload, input.requirements);
@@ -300,12 +428,13 @@ export const settlementService: SettlementService = {
         holderEvmAddress: accountIdToEvmAddress(seller?.hederaAccountId),
         toEvmAddress: accountIdToEvmAddress(buyer?.hederaAccountId),
         holdId: trade.holdId,
-        units: 1n,
+        units,
       });
       assetLeg = {
         chain: 'hedera',
         state: 'settled',
         holdId: trade.holdId,
+        unitsMinor: units.toString(10),
         transactionId: executed.transactionId,
         consensusAt: executed.consensusAt,
         explorerUrl: explorer.hederaTx(executed.transactionId),
@@ -369,6 +498,7 @@ export const settlementService: SettlementService = {
         chain: 'hedera',
         state: 'released',
         holdId: trade.holdId,
+        unitsMinor: trade.unitsMinor?.toString(10) ?? null,
         transactionId: trade.assetTxId,
         consensusAt: trade.assetConsensusAt === null ? null : trade.assetConsensusAt.toISOString(),
         explorerUrl: trade.assetTxId === null ? null : explorer.hederaTx(trade.assetTxId),
@@ -382,13 +512,29 @@ export const settlementService: SettlementService = {
     let consensusAt = trade.assetConsensusAt?.toISOString() ?? null;
 
     if (trade.holdId !== null) {
+      /*
+       * A hold can only be released for the amount it was created for, so a trade that
+       * carries a hold but no unit count cannot be unwound honestly. Refused rather than
+       * released for a guessed amount or marked unwound with the hold still standing —
+       * either would leave the ledger and the chain disagreeing about who owns the paper.
+       * No trade this build arms can be in that state; the column is nullable only for
+       * rows written before it existed, all of which are terminal.
+       */
+      if (trade.unitsMinor === null) {
+        throw conflict(
+          'conflict',
+          `Trade ${trade.id} holds ${trade.holdId} but does not record its size, so the ` +
+            'hold cannot be released for the right amount. It expires on its own at the ' +
+            'end of the challenge window.',
+        );
+      }
       const invoice = await store.getInvoice(trade.invoiceId);
       const seller = await store.getSeller(trade.sellerId);
       const released = await getAtsAdapter().releaseHold({
         securityId: invoice?.securityId ?? '',
         holderEvmAddress: accountIdToEvmAddress(seller?.hederaAccountId),
         holdId: trade.holdId,
-        units: 1n,
+        units: trade.unitsMinor,
       });
       transactionId = released.transactionId;
       consensusAt = released.consensusAt;
@@ -402,12 +548,18 @@ export const settlementService: SettlementService = {
     });
     await store.setQuoteStatus(trade.quoteId, 'expired');
 
-    rootLogger.info('trade unwound', { tradeId, reason });
+    rootLogger.info('trade unwound', {
+      tradeId,
+      reason,
+      releasedMinor: trade.proceedsMinor.toString(10),
+      mandateId: trade.mandateId,
+    });
 
     return {
       chain: 'hedera',
       state: 'released',
       holdId: trade.holdId,
+      unitsMinor: trade.unitsMinor?.toString(10) ?? null,
       transactionId,
       consensusAt,
       explorerUrl: transactionId === null ? null : explorer.hederaTx(transactionId),
@@ -415,17 +567,79 @@ export const settlementService: SettlementService = {
   },
 
   /**
+   * Reclaim armed trades whose challenge window has passed.
+   *
+   * ## Lazily, on the paths that care — not on a timer
+   *
+   * An armed trade that is never paid holds the mandate's capital and the seller's
+   * position for as long as nobody looks. Something has to end it, and the two options are
+   * a background sweep and reclaiming lazily when the state is next read. This is the lazy
+   * one, called from the trade and mandate routes.
+   *
+   * The argument for it over a timer:
+   *
+   * - **Stale capital is only wrong when someone asks.** The whole cost of an expired
+   *   trade is that a mandate looks fuller than it is, and that is only ever observed by
+   *   arming a trade, listing positions, or reading the capital views. Reclaiming there
+   *   means the number is never stale at the moment it is used, which a timer can only
+   *   approximate by running often enough.
+   * - **Nothing in this process schedules work.** The only timer here is the issuance
+   *   queue's backoff, and a second one would need start/stop wiring through `index.ts`,
+   *   would keep the process alive at shutdown, and would fire inside tests that freeze the
+   *   clock. A sweep also does the same writes; it just does them when nobody asked.
+   * - **The window is {@link EXPIRED_AFTER_SECONDS} seconds, not a day.** Reclaiming on
+   *   the next request cannot be meaningfully later than a sweep unless there are no
+   *   requests at all — and with no requests there is nobody the capital is stuck from.
+   *
+   * What this costs, stated plainly: a request that happens to find expired trades pays
+   * for their `releaseHoldByPartition` submissions, so it is slower than one that does not.
+   * That is bounded by {@link RECLAIM_BATCH}, and it is the same work a sweep would do.
+   *
+   * Reads deliberately not hooked: the quote and book screens. They are polled, they must
+   * stay free of chain writes, and a mandate that looks fuller than it is can only quote
+   * *wide* — never through capital it does not have. Arming re-prices against the live
+   * curve after reclaiming, so nothing can be filled against a stale allocation.
+   *
+   * One trade failing to unwind must not take the request with it: the failure is logged
+   * against that trade and the rest of the batch continues.
+   */
+  async reclaimExpired(at = new Date()) {
+    const store = getStore();
+    const expiredBefore = new Date(at.getTime() - EXPIRED_AFTER_SECONDS * 1000);
+    const stale = await store.listArmedTradesOlderThan(expiredBefore, RECLAIM_BATCH);
+
+    const reclaimed: ReclaimedTrade[] = [];
+    for (const trade of stale) {
+      try {
+        await settlementService.unwind(trade.id, 'challenge window expired');
+        reclaimed.push({
+          tradeId: trade.id,
+          mandateId: trade.mandateId,
+          releasedMinor: trade.proceedsMinor.toString(10),
+        });
+      } catch (err) {
+        rootLogger.warn('expired trade could not be reclaimed', { tradeId: trade.id, err });
+      }
+    }
+    if (reclaimed.length > 0) {
+      rootLogger.info('reclaimed expired trades', { count: reclaimed.length });
+    }
+    return reclaimed;
+  },
+
+  /**
    * Maturity.
    *
    * The load-bearing line is the holder lookup: settlement routes to whoever holds the
-   * token **now**, read off the most recent settled trade, not to whoever bought it first.
-   * Without that the paper cannot legitimately change hands, because a second buyer would
-   * have no way to be paid — so this is what makes the secondary market a market rather
-   * than a screen.
+   * token **now** — the most recently settled trade on this receivable — not to whoever
+   * bought it first. Without that the paper cannot legitimately change hands, because a
+   * second buyer would have no way to be paid, so this is what makes the secondary market
+   * a market rather than a screen.
    *
-   * The outcome (`on_time` / `late` / `default`) goes to `ratingService.recordOutcome`,
-   * which is idempotent per receivable, so a replayed maturity event cannot tighten or
-   * mark a rating twice.
+   * **Idempotent through the settlement-outcome ledger.** The ledger's unique index on
+   * `(debtor_id, invoice_id)` is the fact; everything else here is a consequence of
+   * writing it. A replay therefore cannot tighten a rating twice, and — the part that used
+   * to be missing — cannot hand the mandate its capital back twice either.
    *
    * **The cash leg comes back `pending`, deliberately.** The debtor's payment is the money
    * that settles a matured receivable, and there is no debtor payment rail in this build.
@@ -440,19 +654,25 @@ export const settlementService: SettlementService = {
     const invoice = await store.getInvoice(invoiceId);
     if (!invoice) throw notFound(`Invoice ${invoiceId}`);
 
-    const trades = await store.listTrades({ status: 'settled', limit: 200 });
-    const holderTrade = trades
-      .filter((t) => t.invoiceId === invoiceId)
-      .sort((a, b) => (b.settledAt?.getTime() ?? 0) - (a.settledAt?.getTime() ?? 0))[0];
+    /*
+     * Every settled trade on THIS receivable, newest first — an indexed read scoped to the
+     * invoice rather than a page of the whole book filtered in memory. The old form asked
+     * for 200 trades of any invoice and hoped this one was among them, which on a busy
+     * book silently matures nothing while reporting that the invoice never sold.
+     */
+    const settled = await store.listTrades({ invoiceId, status: 'settled', limit: 50 });
+    const holderTrade = [...settled].sort(
+      (a, b) => (b.settledAt?.getTime() ?? 0) - (a.settledAt?.getTime() ?? 0),
+    )[0];
     if (!holderTrade) {
       throw conflict('conflict', `Invoice ${invoiceId} has never settled, so nothing matures.`);
     }
 
     const now = new Date();
-    const graceEnd = new Date(invoice.dueAt.getTime() + ON_TIME_GRACE_DAYS * 86_400_000);
-    const outcome: SettlementOutcome = now.getTime() <= graceEnd.getTime() ? 'on_time' : 'late';
+    const outcome: SettlementOutcome =
+      now.getTime() <= onTimeDeadline(invoice.dueAt).getTime() ? 'on_time' : 'late';
 
-    await ratingService.recordOutcome({
+    const { alreadyRecorded } = await ratingService.recordOutcome({
       debtorId: invoice.debtorId,
       invoiceId,
       outcome,
@@ -460,10 +680,31 @@ export const settlementService: SettlementService = {
       at: now,
     });
 
-    // The capital comes back to the mandate, which is what lets an `exhausted` bid quote
-    // again rather than sitting on the book with nothing behind it.
-    await store.release(holderTrade.mandateId, holderTrade.proceedsMinor);
-    await store.updateInvoice(invoiceId, { status: 'matured' });
+    /*
+     * The ledger write is the first of two steps and the invoice status is the marker for
+     * the second, so a replay finishes the job rather than repeating it or abandoning it.
+     *
+     * - not recorded before -> do both.
+     * - recorded, invoice already `matured` -> nothing to do; this is the ordinary replay.
+     * - recorded, invoice NOT `matured` -> a previous run died between the two. The capital
+     *   was never released, so releasing it now is a repair and not a double release.
+     */
+    const finished = alreadyRecorded && invoice.status === 'matured';
+    if (!finished) {
+      // The capital comes back to the mandate, which is what lets an `exhausted` bid quote
+      // again rather than sitting on the book with nothing behind it.
+      await store.release(holderTrade.mandateId, holderTrade.proceedsMinor);
+      await store.updateInvoice(invoiceId, { status: 'matured' });
+    }
+
+    /*
+     * Only the current holder's mandate is released here, because only the current holder
+     * is owed anything at maturity. An earlier holder was paid by the buyer who took the
+     * paper off them, and it is that resale which owes them their capital back — not this.
+     * There is no resale path in this build (a `sold` invoice is unquotable), so today
+     * "current holder" and "only holder" coincide; when relisting lands, `execute` is where
+     * the previous holder's allocation has to be freed.
+     */
 
     const holder = await store.getBuyer(holderTrade.buyerId);
     const challenge = await getX402Client().buildRequirements({
@@ -475,17 +716,39 @@ export const settlementService: SettlementService = {
         `current holder ${holder?.name ?? holderTrade.buyerId}.`,
     });
 
+    rootLogger.info('receivable matured', {
+      invoiceId,
+      tradeId: holderTrade.id,
+      holder: holderTrade.buyerId,
+      outcome,
+      alreadyRecorded,
+    });
+
     return {
       tradeId: holderTrade.id,
+      holder: {
+        buyerId: holderTrade.buyerId,
+        mandateId: holderTrade.mandateId,
+        name: holder?.name ?? null,
+      },
+      outcome,
+      alreadyRecorded,
       assetLeg: {
         chain: 'hedera',
         state: 'settled',
         holdId: holderTrade.holdId,
+        unitsMinor: holderTrade.unitsMinor?.toString(10) ?? null,
         transactionId: holderTrade.assetTxId,
         consensusAt: holderTrade.assetConsensusAt?.toISOString() ?? null,
         explorerUrl:
           holderTrade.assetTxId === null ? null : explorer.hederaTx(holderTrade.assetTxId),
       },
+      /*
+       * `pending`, with no transaction and no explorer link. The face value is owed to the
+       * holder and nobody has paid it: there is no debtor payment rail here, and a cash leg
+       * reported as settled would be a receipt for a payment that did not happen on the one
+       * screen whose whole job is to be checkable.
+       */
       cashLeg: {
         chain: challenge.accepted.network.startsWith('hedera') ? 'hedera' : 'arc',
         scheme: 'x402',

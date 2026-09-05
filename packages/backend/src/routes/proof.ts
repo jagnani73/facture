@@ -71,6 +71,16 @@ export interface TradeProof {
   assetLeg: {
     chain: 'hedera';
     holdId: string | null;
+    /**
+     * How many units of the security moved: the seller's whole position, read off the
+     * instrument when the trade was armed.
+     *
+     * On this screen it is the number a reader checks the HashScan transfer against, and
+     * it is here because the two disagreed — issuance mints face-value-many units and the
+     * trade used to move exactly one of them, which is the kind of claim a proof view
+     * exists to make impossible to hide.
+     */
+    unitsMinor: string | null;
     transactionId: string | null;
     consensusAt: string | null;
     explorerUrl: string | null;
@@ -157,6 +167,7 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
     assetLeg: {
       chain: 'hedera',
       holdId: trade.holdId,
+      unitsMinor: trade.unitsMinor?.toString(10) ?? null,
       transactionId: trade.assetTxId,
       consensusAt: iso(trade.assetConsensusAt),
       explorerUrl: link(trade.assetTxId, explorer.hederaTx),

@@ -58,10 +58,20 @@ export interface Harness {
 
 export interface RecordingAtsAdapter extends AtsAdapter {
   holds: { securityId: string; units: bigint }[];
-  executed: string[];
-  released: string[];
+  executed: { holdId: string; units: bigint }[];
+  released: { holdId: string; units: bigint }[];
   /** Set to make the next hold execution fail — the half-settled path. */
   failExecute: boolean;
+  /**
+   * What `balanceOf` answers for a holder with no entry in {@link balances}.
+   *
+   * Face-value-many units, matching what issuance actually mints: the live bond
+   * `0.0.10316440` carries 6,230,000 against a $62,300 face. A fake that answered `1`
+   * would agree with the bug rather than with the instrument.
+   */
+  defaultBalance: bigint;
+  /** Per `securityId` overrides, for the seller-holds-nothing case. */
+  balances: Map<string, bigint>;
 }
 
 function createRecordingAts(): RecordingAtsAdapter {
@@ -71,6 +81,12 @@ function createRecordingAts(): RecordingAtsAdapter {
     executed: [],
     released: [],
     failExecute: false,
+    defaultBalance: 6_230_000n,
+    balances: new Map(),
+
+    balanceOf(input) {
+      return Promise.resolve(adapter.balances.get(input.securityId) ?? adapter.defaultBalance);
+    },
 
     deployBond(job) {
       return Promise.resolve({
@@ -94,7 +110,7 @@ function createRecordingAts(): RecordingAtsAdapter {
 
     executeHold(input) {
       if (adapter.failExecute) return Promise.reject(new Error('CONTRACT_REVERT_EXECUTED'));
-      adapter.executed.push(input.holdId);
+      adapter.executed.push({ holdId: input.holdId, units: input.units });
       return Promise.resolve({
         transactionId: `0.0.5512@1756000200.000000001`,
         consensusAt: new Date('2026-09-01T09:32:20.000Z').toISOString(),
@@ -102,7 +118,7 @@ function createRecordingAts(): RecordingAtsAdapter {
     },
 
     releaseHold(input) {
-      adapter.released.push(input.holdId);
+      adapter.released.push({ holdId: input.holdId, units: input.units });
       return Promise.resolve({
         transactionId: `0.0.5512@1756000300.000000001`,
         consensusAt: new Date('2026-09-01T09:32:30.000Z').toISOString(),

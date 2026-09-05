@@ -38,7 +38,7 @@
  * exactly the fraud the uniqueness registry exists to close.
  */
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, notInArray, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, notInArray, or } from 'drizzle-orm';
 import { conflict, duplicateReceivable, notFound } from '../errors.js';
 import type { Database } from './index.js';
 import type {
@@ -690,11 +690,27 @@ export class SqliteStore implements Store {
         and(
           criteria.sellerId === undefined ? undefined : eq(trades.sellerId, criteria.sellerId),
           criteria.buyerId === undefined ? undefined : eq(trades.buyerId, criteria.buyerId),
+          criteria.invoiceId === undefined ? undefined : eq(trades.invoiceId, criteria.invoiceId),
           criteria.status === undefined ? undefined : eq(trades.status, criteria.status),
         ),
       )
       .orderBy(desc(trades.createdAt), desc(trades.id))
       .limit(criteria.limit);
+  }
+
+  /** Oldest first, unlike every other trade read here — see the interface. */
+  async listArmedTradesOlderThan(before: Date, limit: number): Promise<TradeRow[]> {
+    return this.#db
+      .select()
+      .from(trades)
+      .where(
+        and(
+          inArray(trades.status, ['preparing', 'awaiting_payment']),
+          lte(trades.createdAt, before),
+        ),
+      )
+      .orderBy(asc(trades.createdAt), asc(trades.id))
+      .limit(limit);
   }
 
   async updateTrade(id: string, patch: Partial<NewTradeRow>): Promise<TradeRow> {

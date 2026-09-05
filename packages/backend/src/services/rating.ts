@@ -194,6 +194,17 @@ export function accumulate(
 
 // --- persistence-backed surface -------------------------------------------------
 
+/**
+ * The assessment after an outcome was written, plus whether the write was a replay.
+ *
+ * Callers need the second half. Maturity releases the mandate's capital alongside the
+ * rating move, and "this receivable was already in the ledger" is the only thing standing
+ * between a replayed maturity event and a mandate being handed its capital back twice.
+ */
+export interface RecordedOutcome extends RatingAssessment {
+  alreadyRecorded: boolean;
+}
+
 export interface RatingService {
   ratingFor(debtorId: string): Promise<RatingAssessment>;
   /** Batched: pricing a book of invoices must not fan out one query per debtor. */
@@ -205,7 +216,7 @@ export interface RatingService {
     outcome: SettlementOutcome;
     faceValue: bigint;
     at: Date;
-  }): Promise<RatingAssessment>;
+  }): Promise<RecordedOutcome>;
 }
 
 export const ratingService: RatingService = {
@@ -262,6 +273,6 @@ export const ratingService: RatingService = {
     if (!alreadyRecorded && debtor.rating !== assessment.rating) {
       await store.updateDebtorRating(debtor.id, assessment.rating);
     }
-    return assessment;
+    return { ...assessment, alreadyRecorded };
   },
 };

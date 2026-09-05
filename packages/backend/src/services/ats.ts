@@ -40,7 +40,14 @@ import {
   PrivateKey,
 } from '@hiero-ledger/sdk';
 import { REGULATIONS, type RegulationKey } from '@facture/shared';
-import { encodeFunctionData, type Address, type Hex } from 'viem';
+import {
+  createPublicClient,
+  encodeFunctionData,
+  http,
+  type Address,
+  type Hex,
+  type PublicClient,
+} from 'viem';
 import { hedera } from '../chain.js';
 import { badRequest, upstreamUnavailable } from '../errors.js';
 import type { Logger } from '../logger.js';
@@ -95,6 +102,23 @@ export const ATS_ABI = [
       },
     ],
     outputs: [{ name: 'security', type: 'address' }],
+  },
+  /**
+   * The position size. `view`, so it is an `eth_call` over the relay and costs nothing.
+   *
+   * A security's total balance for a holder, across partitions. Facture only ever uses
+   * {@link DEFAULT_PARTITION}, so this and `balanceOfByPartition` are the same number
+   * here — and this is the one reported present on the deployed security.
+   *
+   * Read BEFORE a hold is placed. An ATS hold moves units out of the free balance into a
+   * held balance, so the same call after `createHoldByPartition` answers a smaller number.
+   */
+  {
+    type: 'function',
+    name: 'balanceOf',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ type: 'uint256' }],
   },
   {
     type: 'function',
@@ -170,7 +194,14 @@ export const DEFAULT_PARTITION: Hex = `0x${'0'.repeat(63)}1`;
 
 const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
 
-/** Bond units are whole receivables: one invoice, one unit, no fractions. */
+/**
+ * Indivisible units — `decimals = 0`, so a unit is never split.
+ *
+ * NOT "one invoice, one unit", which is what this used to say and what a hardcoded hold of
+ * `1` was built on. Supply is whatever is issued against the security, and issuance mints
+ * face-value-many units: `0.0.10316440` carries 6,230,000 for a $62,300 receivable. The
+ * size of a position is read with `balanceOf`, never inferred from this constant.
+ */
 const SECURITY_DECIMALS = 0;
 
 export interface HoldRequest {
@@ -190,6 +221,16 @@ export interface HoldReceipt {
 
 export interface AtsAdapter {
   deployBond(job: IssuanceJob): Promise<DeployedSecurity>;
+  /**
+   * Units of `securityId` held by `ownerEvmAddress`, read off the instrument.
+   *
+   * This is what makes "whole position" true rather than assumed. Issuance mints
+   * face-value-many units — the live bond `0.0.10316440` carries 6,230,000 against a
+   * $62,300 face — so a trade that hardcodes one unit moves one part in six million of the
+   * paper it claims to sell. The balance is a fact about the instrument and is read from
+   * it, never inferred from the invoice.
+   */
+  balanceOf(input: { securityId: string; ownerEvmAddress: Address }): Promise<bigint>;
   createHold(request: HoldRequest): Promise<HoldReceipt>;
   executeHold(input: {
     securityId: string;
@@ -245,6 +286,7 @@ export function createDisabledAtsAdapter(): AtsAdapter {
   };
   return {
     deployBond: (job) => refuse(`Issuing invoice ${job.invoiceId}`),
+    balanceOf: (input) => refuse(`Reading the position in ${input.securityId}`),
     createHold: (request) => refuse(`Holding ${request.securityId}`),
     executeHold: (input) => refuse(`Executing the hold on ${input.securityId}`),
     releaseHold: (input) => refuse(`Releasing the hold on ${input.securityId}`),
@@ -267,6 +309,17 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
     AccountId.fromString(config.operatorId),
     PrivateKey.fromStringECDSA(config.operatorKey),
   );
+
+  /*
+   * Reads go over the JSON-RPC relay, writes go through the SDK client above.
+   *
+   * Not fastidiousness: a `ContractCallQuery` through the SDK is a paid query — the
+   * operator funds every read — while `eth_call` on the relay is free and answers from the
+   * same state. `services/compliance.ts` already reads this diamond the same way, so
+   * "reads are viem, writes are the SDK" is one rule for the whole Hedera surface rather
+   * than two conventions for one contract.
+   */
+  const reader: PublicClient = createPublicClient({ transport: http(hedera.jsonRpcUrl) });
 
   async function submit(
     contractId: string,
@@ -358,6 +411,30 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
         transactionId: receipt.transactionId,
         gasUsed: receipt.gasUsed,
       };
+    },
+
+    async balanceOf(input) {
+      /*
+       * A read that cannot be read is not a zero. Zero is a refusal with a sentence
+       * attached — "this seller holds none of this instrument" — and answering it for an
+       * unreachable relay would turn an outage into a false statement about a position.
+       */
+      try {
+        const units = await reader.readContract({
+          address: accountIdToEvmAddress(input.securityId),
+          abi: ATS_ABI,
+          functionName: 'balanceOf',
+          args: [input.ownerEvmAddress],
+        });
+        return units;
+      } catch (err) {
+        log.warn('balanceOf failed', { securityId: input.securityId, err });
+        throw upstreamUnavailable(
+          'Hedera',
+          `The position in ${input.securityId} could not be read, so the size of the ` +
+            'trade is unknown. Nothing was held.',
+        );
+      }
     },
 
     async createHold(request) {

@@ -27,6 +27,36 @@ export async function readJson<S extends z.ZodType>(c: Context, schema: S): Prom
   return result.data;
 }
 
+/**
+ * Like {@link readJson}, but an absent body parses as `{}`.
+ *
+ * For a POST whose fields are all optional — unwinding a trade, say. `c.req.json()` throws
+ * on an empty body, and refusing "give me my capital back" for want of a pair of braces is
+ * a bad way to answer a request that was perfectly clear. A body that is present and
+ * malformed is still a 400: silence is the only thing being read generously.
+ */
+export async function readOptionalJson<S extends z.ZodType>(
+  c: Context,
+  schema: S,
+): Promise<z.infer<S>> {
+  const raw = (await c.req.text()).trim();
+  if (raw.length === 0) {
+    const empty = schema.safeParse({});
+    if (!empty.success) throw validationFailed(toIssues(empty.error), 'Request body is required.');
+    return empty.data;
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    throw badRequest('Request body is not valid JSON.');
+  }
+  const result = schema.safeParse(body);
+  if (!result.success) throw validationFailed(toIssues(result.error), 'Request body is invalid.');
+  return result.data;
+}
+
 export function readQuery<S extends z.ZodType>(c: Context, schema: S): z.infer<S> {
   const result = schema.safeParse(c.req.query());
   if (!result.success) {

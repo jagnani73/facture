@@ -937,6 +937,13 @@ export async function seedStore(store: Store): Promise<SeedResult> {
       annualisedYieldBps: bps,
       tenorDays: heldDays,
       status: 'settled',
+      /*
+       * The whole position, which is face-value-many units: issuance mints one unit per
+       * minor unit of face, so the live bond `0.0.10316440` carries 6,230,000 against a
+       * $62,300 face. A seeded position that moved one unit would put the same
+       * disagreement between the book and the paper into the demo data.
+       */
+      unitsMinor: faceValue,
       holdId: String(1_000 + POSITIONS.indexOf(spec)),
       assetTxId: spec.assetRef ?? `${SELLER.hederaAccountId}@${issuanceStamp(spec.label)}`,
       assetConsensusAt: boughtAt,

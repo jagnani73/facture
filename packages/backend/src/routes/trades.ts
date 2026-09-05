@@ -23,7 +23,7 @@ import { getComplianceGate } from '../services/compliance.js';
 import { quoteEngine } from '../services/quote-engine.js';
 import { buildTradeChallenge, settlementService } from '../services/settlement.js';
 import { X402_HEADERS, X402_VERSION } from '../services/x402.js';
-import { readJson, readParams, readQuery } from '../validate.js';
+import { readJson, readOptionalJson, readParams, readQuery } from '../validate.js';
 import { money, wireQuote, wireTrade } from '../wire.js';
 
 const executeTradeBody = z.object({
@@ -39,6 +39,16 @@ const executeTradeBody = z.object({
    */
   maxSlippageBps: z.number().int().min(0).max(500).default(0),
 });
+
+const uuidParam = z.object({ id: z.uuid() });
+
+const unwindBody = z
+  .object({
+    /** Recorded in the log beside the trade id, so an unwind can be accounted for later. */
+    reason: z.string().min(1).max(200).optional(),
+  })
+  /* An empty body is the ordinary case: "give me my capital back" needs no explanation. */
+  .default({});
 
 const listTradesQuery = z
   .object({
@@ -60,6 +70,15 @@ export const tradeRoutes = new Hono<AppEnv>();
  */
 tradeRoutes.post('/', async (c) => {
   const body = await readJson(c, executeTradeBody);
+
+  /*
+   * Give back the capital of anything that expired before pricing this one. A mandate
+   * still carrying the allocation of a trade nobody paid for quotes as though that money
+   * were spent, and the seller sees a worse price — or none — for a fill that never
+   * happened. See `settlementService.reclaimExpired` for why this is lazy rather than a
+   * background sweep.
+   */
+  await settlementService.reclaimExpired();
 
   /*
    * One route, two halves of one x402 exchange. The first request arms the trade and comes
@@ -201,9 +220,11 @@ async function prepareTrade(
       sellerHederaAccountId: seller.hederaAccountId ?? '',
       buyerHederaAccountId: buyer.hederaAccountId ?? '',
       buyerArcAddress: (buyer.arcAddress ?? '0x') as `0x${string}`,
-      // Whole position: partial sales are a later cut, and an all-or-nothing exit is the
-      // instrument this build ships.
-      unitsMinor: 1n,
+      /*
+       * No unit count. `prepare` reads the seller's whole position off the instrument with
+       * `balanceOf` — partial sales are cut-list item 4, so this is all-or-nothing, and
+       * "all" is whatever the seller actually holds rather than a number asserted here.
+       */
       proceedsMinor: live.quote.proceeds,
       faceValue: invoice.faceValue,
       currency: invoice.currency,
@@ -313,8 +334,45 @@ async function executeTrade(
   });
 }
 
+/**
+ * Give the position back and release the capital.
+ *
+ * This is the way out of an armed trade whose buyer never returned. Without it a trade
+ * that nobody pays for holds the mandate's capital until someone edits the database, and
+ * `allocated_minor` is a real column rather than a derived one — so the release has to go
+ * through the store, which is what this does by calling `unwind` rather than setting a
+ * status.
+ *
+ * Guarded on one thing above all: a settled trade cannot be unwound. Releasing a hold
+ * against a payment that actually cleared would take the paper back off a buyer who paid
+ * for it, so `settlementService.unwind` refuses that with 409 and this route does not
+ * reach around it. Unwinding an already-unwound trade is fine and returns the same
+ * receipt — the caller who retries after a dropped connection is not doing anything wrong.
+ */
+tradeRoutes.post('/:id/unwind', async (c) => {
+  const { id } = readParams(c, uuidParam);
+  const body = await readOptionalJson(c, unwindBody);
+
+  const assetLeg = await settlementService.unwind(id, body.reason ?? 'unwound by request');
+  const trade = await refresh(id);
+
+  return c.json({
+    trade: wireTrade(trade),
+    assetLeg,
+    /**
+     * The capital this trade had reserved against the mandate. The first unwind gives it
+     * back; a repeat call reports the same figure without releasing anything twice.
+     */
+    releasedMinor: money(trade.proceedsMinor),
+    mandateId: trade.mandateId,
+  });
+});
+
 tradeRoutes.get('/', async (c) => {
   const query = readQuery(c, listTradesQuery);
+  // A position list that still shows an expired trade as awaiting payment is showing
+  // capital as committed that nothing is going to spend.
+  await settlementService.reclaimExpired();
   const rows = await getStore().listTrades({
     ...(query.sellerId === undefined ? {} : { sellerId: query.sellerId }),
     ...(query.buyerId === undefined ? {} : { buyerId: query.buyerId }),
@@ -325,8 +383,10 @@ tradeRoutes.get('/', async (c) => {
 });
 
 tradeRoutes.get('/:id', async (c) => {
-  const { id } = readParams(c, z.object({ id: z.uuid() }));
+  const { id } = readParams(c, uuidParam);
   const store = getStore();
+
+  await settlementService.reclaimExpired();
 
   const trade = await store.getTrade(id);
   if (!trade) throw notFound(`Trade ${id}`);

@@ -38,6 +38,7 @@ import { getIssuanceQueue } from '../services/issuance.js';
 import { getNotifier } from '../services/notifier.js';
 import { quoteEngine } from '../services/quote-engine.js';
 import { ratingService } from '../services/rating.js';
+import { settlementService } from '../services/settlement.js';
 import { readJson, readParams, readQuery } from '../validate.js';
 import { moneyString, wireInvoice, wireQuote, wireRefusalReceipt } from '../wire.js';
 
@@ -330,6 +331,48 @@ invoiceRoutes.post('/:id/confirmation-request', async (c) => {
        */
       link: getConfig().isProduction ? null : link,
     },
+  });
+});
+
+/**
+ * Maturity: the receivable comes due and the face value is owed to whoever holds the paper
+ * NOW, not to whoever bought it first.
+ *
+ * Without a way to run this the paper cannot legitimately change hands, because a second
+ * buyer would have no way to be paid — which is why the README calls it load-bearing and
+ * why the service having no caller was a gap rather than an omission.
+ *
+ * **The cash leg comes back `pending` and that is the honest answer.** The money that
+ * settles a matured receivable is the debtor's payment, and there is no debtor payment
+ * rail in this build. What this does is real: it names the current holder, writes the
+ * outcome to the settlement-outcome ledger (which is what moves the customer's rating),
+ * and releases the mandate's capital so an exhausted bid can quote again. What it does not
+ * do is claim anyone was paid.
+ *
+ * Operator-triggered, because nothing observes debtor payments here. When a rail exists,
+ * the trigger is that observation and a Hedera Scheduled Transaction carries the payout —
+ * one-shot maturity settlement is exactly what `ScheduleCreateTransaction` is for.
+ */
+invoiceRoutes.post('/:id/mature', async (c) => {
+  const { id } = readParams(c, uuidParam);
+  const result = await settlementService.settleAtMaturity(id);
+
+  // Read back rather than patched locally: `settleAtMaturity` moves the invoice to
+  // `matured`, and the row is the authority on whether it did.
+  const invoice = await getStore().getInvoice(id);
+  if (!invoice) throw notFound(`Invoice ${id}`);
+
+  return c.json({
+    invoice: wireInvoice(invoice),
+    /** Whoever holds the token now. The whole point of the lookup behind this. */
+    holder: result.holder,
+    outcome: result.outcome,
+    /** True when this receivable had already matured, so nothing moved a second time. */
+    alreadyRecorded: result.alreadyRecorded,
+    assetLeg: result.assetLeg,
+    cashLeg: result.cashLeg,
+    maturedAt: result.settledAt,
+    proofUrl: `/v1/trades/${result.tradeId}/proof`,
   });
 });
 

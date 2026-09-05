@@ -72,6 +72,12 @@ const EXPOSING_TRADE_STATUSES = new Set<TradeRow['status']>([
 ]);
 const CLOSED_INVOICE_STATUSES = new Set<InvoiceRow['status']>(['matured', 'defaulted']);
 
+/**
+ * Armed but not finished: capital reserved, hold placed or about to be, nothing settled.
+ * These are the trades a challenge window can expire out from under.
+ */
+const ARMED_TRADE_STATUSES = new Set<TradeRow['status']>(['preparing', 'awaiting_payment']);
+
 const clone = <T>(value: T): T => ({ ...value }) as T;
 
 /** Deterministic ids keep a seeded book reproducible across runs. */
@@ -590,6 +596,7 @@ export class MemoryStore implements Store {
       annualisedYieldBps: row.annualisedYieldBps,
       tenorDays: row.tenorDays,
       status: row.status ?? 'preparing',
+      unitsMinor: row.unitsMinor ?? null,
       holdId: row.holdId ?? null,
       assetTxId: row.assetTxId ?? null,
       assetConsensusAt: row.assetConsensusAt ?? null,
@@ -626,9 +633,20 @@ export class MemoryStore implements Store {
     return [...this.trades.values()]
       .filter((t) => criteria.sellerId === undefined || t.sellerId === criteria.sellerId)
       .filter((t) => criteria.buyerId === undefined || t.buyerId === criteria.buyerId)
+      .filter((t) => criteria.invoiceId === undefined || t.invoiceId === criteria.invoiceId)
       .filter((t) => criteria.status === undefined || t.status === criteria.status)
       .sort(byCreatedAtDescThenId)
       .slice(0, criteria.limit)
+      .map((t) => clone(t));
+  }
+
+  /** Oldest first, unlike every other trade read here — see the interface. */
+  async listArmedTradesOlderThan(before: Date, limit: number): Promise<TradeRow[]> {
+    return [...this.trades.values()]
+      .filter((t) => ARMED_TRADE_STATUSES.has(t.status))
+      .filter((t) => t.createdAt.getTime() <= before.getTime())
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : 1))
+      .slice(0, limit)
       .map((t) => clone(t));
   }
 

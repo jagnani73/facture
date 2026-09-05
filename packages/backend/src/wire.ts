@@ -182,6 +182,12 @@ export const wireTrade = (row: TradeRow) => ({
     chain: 'hedera' as const,
     state: assetLegState(row),
     holdId: row.holdId,
+    /**
+     * Units of the security, not money — a decimal string for the same reason the amounts
+     * are: issuance mints face-value-many units, so this is in the millions and `number`
+     * is the wrong type to hand a client for something that indexes a position.
+     */
+    unitsMinor: row.unitsMinor?.toString(10) ?? null,
     transactionId: row.assetTxId,
     consensusAt: isoOrNull(row.assetConsensusAt),
   },

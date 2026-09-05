@@ -268,6 +268,62 @@ describe('allocation is bounded without a row lock', () => {
   });
 });
 
+describe('the expiry read, in SQL', () => {
+  /*
+   * `created_at` is an epoch-ms INTEGER and `status` is TEXT with no enum behind it, so
+   * this read is a numeric comparison and an `IN` list rather than anything the dialect
+   * checks. Both are easy to get quietly wrong — a string comparison on the instant would
+   * still return rows, just the wrong ones.
+   */
+  let seeded: SeedResult;
+
+  beforeEach(async () => {
+    seeded = await seedStore(store);
+  });
+
+  it('returns only armed trades, oldest first, from before the cutoff', async () => {
+    const settled = await store.getTrade(seeded.tradeIds['TRD-4417'] ?? '');
+    const base = settled!.createdAt.getTime();
+
+    await store.insertTrade({
+      ...settled!,
+      id: seedId('TRD-SQL-OLD'),
+      status: 'awaiting_payment',
+      createdAt: new Date(base - 60_000),
+      settledAt: null,
+    });
+    await store.insertTrade({
+      ...settled!,
+      id: seedId('TRD-SQL-FRESH'),
+      status: 'awaiting_payment',
+      createdAt: new Date(base + 3_600_000),
+      settledAt: null,
+    });
+
+    const stale = await store.listArmedTradesOlderThan(new Date(base), 25);
+
+    expect(stale.map((t) => t.id)).toEqual([seedId('TRD-SQL-OLD')]);
+  });
+
+  it('scopes a trade read to one receivable', async () => {
+    const forInvoice = await store.listTrades({
+      invoiceId: seeded.invoiceIds['INV-2033'] ?? '',
+      status: 'settled',
+      limit: 50,
+    });
+
+    expect(forInvoice.map((t) => t.id)).toEqual([seeded.tradeIds['TRD-4417']]);
+  });
+
+  it('round-trips the position size through the TEXT money column', async () => {
+    const settled = await store.getTrade(seeded.tradeIds['TRD-4417'] ?? '');
+
+    // Face-value-many units, as issuance mints them — and a bigint, never a number.
+    expect(settled?.unitsMinor).toBe(9_500_000n);
+    expect(typeof settled?.unitsMinor).toBe('bigint');
+  });
+});
+
 describe('the migration and the demo book applied to a file', () => {
   let seeded: SeedResult;
 
