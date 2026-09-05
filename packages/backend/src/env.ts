@@ -88,6 +88,15 @@ export const envSchema = z
       .optional(),
 
     /**
+     * `InvoiceRegistry` on Hedera. Unset leaves a receivable's terms and its debtor
+     * confirmation visible only inside this database — see `services/invoice-registry.ts`.
+     */
+    HEDERA_INVOICE_REGISTRY_ADDRESS: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/)
+      .optional(),
+
+    /**
      * Privy, for seller sign-in. Unset disables the route rather than letting it accept an
      * unverified email — see `services/privy.ts`.
      *

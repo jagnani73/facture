@@ -20,6 +20,7 @@ import type { Logger } from '../logger.js';
 import { isinForInvoice } from '@facture/shared';
 import { rootLogger } from '../logger.js';
 import { getAtsAdapter } from './ats.js';
+import { getInvoiceRegistry } from './invoice-registry.js';
 import { getUniquenessRegistry } from './uniqueness.js';
 
 export type IssuanceState = 'queued' | 'issuing' | 'issued' | 'failed';
@@ -374,6 +375,40 @@ export function createStoreIssuanceSink(): IssuanceSink {
             rootLogger.warn('receivable issued but not claimed on chain', {
               invoiceId: status.invoiceId,
               uniquenessHash: invoice.uniquenessHash,
+              err,
+            });
+          }
+        }
+
+        /*
+         * Then the record of what the receivable IS. Strictly after the claim, because
+         * `InvoiceRegistry.list` verifies the hash against the uniqueness registry rather than
+         * trusting the caller — an unclaimed receivable cannot be listed, and that ordering is
+         * the contract's rather than a convention chosen here.
+         *
+         * Also unable to fail the issuance, for the same reason as the claim: the instrument
+         * exists and the seller's invoice is real whether or not a second record of it landed.
+         */
+        const invoiceRegistry = getInvoiceRegistry();
+        const seller = invoice === null ? null : await store.getSeller(invoice.sellerId);
+        const debtor = invoice === null ? null : await store.getDebtor(invoice.debtorId);
+
+        if (invoiceRegistry.enabled && invoice !== null && seller !== null && debtor !== null) {
+          try {
+            await invoiceRegistry.list({
+              invoiceId: invoice.id,
+              instrument: status.security.evmAddress,
+              debtorId: invoice.debtorId,
+              // The venue's Hedera-side EVM address. `list` refuses the zero address.
+              seller: seller.hederaAccountId ?? '',
+              faceValue: invoice.faceValue,
+              dueAt: invoice.dueAt,
+              uniquenessHash: invoice.uniquenessHash,
+              rating: debtor.rating,
+            });
+          } catch (err) {
+            rootLogger.warn('receivable issued but not listed on chain', {
+              invoiceId: status.invoiceId,
               err,
             });
           }

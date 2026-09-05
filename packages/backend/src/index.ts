@@ -19,6 +19,7 @@ import { createAtsComplianceGate, setComplianceGate } from './services/complianc
 import { initArcEscrow } from './services/arc.js';
 import { initHcsPublisher } from './services/hcs.js';
 import { initIndexer } from './services/indexer.js';
+import { initInvoiceRegistry } from './services/invoice-registry.js';
 import { initUniquenessRegistry } from './services/uniqueness.js';
 import { initPrivyVerifier } from './services/privy.js';
 import {
@@ -105,6 +106,13 @@ function boot(): void {
   initUniquenessRegistry({
     // Unset leaves uniqueness to the database's index rather than faking a chain guarantee.
     registryAddress: env.HEDERA_UNIQUENESS_REGISTRY_ADDRESS,
+    operatorKey: env.HEDERA_OPERATOR_KEY,
+    logger: log,
+  });
+
+  initInvoiceRegistry({
+    // Unset leaves confirmation a fact only this venue can see.
+    registryAddress: env.HEDERA_INVOICE_REGISTRY_ADDRESS,
     operatorKey: env.HEDERA_OPERATOR_KEY,
     logger: log,
   });

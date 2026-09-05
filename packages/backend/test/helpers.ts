@@ -42,6 +42,11 @@ import {
   type UniquenessRegistry,
 } from '../src/services/uniqueness.js';
 import {
+  createDisabledInvoiceRegistry,
+  setInvoiceRegistry,
+  type InvoiceRegistry,
+} from '../src/services/invoice-registry.js';
+import {
   setPrivyVerifier,
   type PrivyVerifier,
   type VerifiedSeller,
@@ -332,6 +337,8 @@ export interface HarnessOptions {
   hcs?: HcsPublisher;
   /** Absent means no registry: uniqueness is the database's index alone, as today. */
   uniqueness?: UniquenessRegistry;
+  /** Absent means no registry: terms and confirmation stay inside the database. */
+  invoiceRegistry?: InvoiceRegistry;
 }
 
 /** What the stub verifier attests to when a test does not say otherwise. */
@@ -385,6 +392,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
   setArcEscrow(options.arc ?? createDisabledArcEscrow());
   setHcsPublisher(options.hcs ?? createDisabledHcsPublisher());
   setUniquenessRegistry(options.uniqueness ?? createDisabledUniquenessRegistry());
+  setInvoiceRegistry(options.invoiceRegistry ?? createDisabledInvoiceRegistry());
   setNotifier(silentNotifier);
 
   initIssuanceQueue({ minIntervalMs: 0, maxAttempts: 3, backoffBaseMs: 1 });
@@ -426,6 +434,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
       setArcEscrow(undefined);
       setHcsPublisher(undefined);
       setUniquenessRegistry(undefined);
+      setInvoiceRegistry(undefined);
       resetConfig();
     },
   };

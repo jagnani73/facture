@@ -26,6 +26,8 @@ import { z } from 'zod';
 import { getConfig } from '../config.js';
 import type { InvoiceRow, SellerRow } from '../db/schema.js';
 import { getStore } from '../db/store.js';
+import { rootLogger } from '../logger.js';
+import { INVOICE_STATUS, getInvoiceRegistry } from '../services/invoice-registry.js';
 import { claimedByAnother, getUniquenessRegistry } from '../services/uniqueness.js';
 import { badRequest, conflict, duplicateReceivable, notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
@@ -460,6 +462,34 @@ confirmationRoutes.post('/:token', async (c) => {
     ...(body.note === undefined ? {} : { note: body.note }),
     at: new Date(),
   });
+
+  /*
+   * The confirmation, on chain.
+   *
+   * This is the transition the product's risk argument rests on: debtor confirmation removes
+   * dispute risk, and that is what justifies advancing the full face value with no holdback.
+   * Until it was recorded here it was a column only the venue could see, and a buyer had to
+   * take our word for it. `isConfirmed(invoiceId)` is a public view.
+   *
+   * Never allowed to fail the confirmation. The debtor has answered — that is a real-world
+   * event which has already happened, and returning an error to a customer who did nothing
+   * wrong because a node was unreachable would be inexcusable. A registry that missed one
+   * leaves the invoice confirmed here and unconfirmed there, which is visible rather than
+   * silent, and is the honest failure of the two available.
+   */
+  if (body.decision === 'confirmed') {
+    const registry = getInvoiceRegistry();
+    if (registry.enabled) {
+      try {
+        await registry.setStatus(invoice.id, INVOICE_STATUS.Confirmed);
+      } catch (err) {
+        rootLogger.warn('invoice confirmed but not recorded on chain', {
+          invoiceId: invoice.id,
+          err,
+        });
+      }
+    }
+  }
 
   return c.json({
     decision: body.decision,
