@@ -22,6 +22,26 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    /*
+     * Provisioning scripts are plain ESM run by `node` directly, so they get no
+     * globals from a tsconfig the way `packages/contracts/scripts/*.ts` do — and
+     * `no-undef` would flag every `process`, `console` and `fetch` in them.
+     * Declared explicitly rather than by adding a `globals` dependency for six
+     * names, and scoped to `scripts/` so nothing in `packages/` inherits it.
+     */
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        console: 'readonly',
+        fetch: 'readonly',
+        process: 'readonly',
+        URL: 'readonly',
+        TextEncoder: 'readonly',
+        TextDecoder: 'readonly',
+      },
+    },
+  },
+  {
     rules: {
       '@typescript-eslint/no-unused-vars': [
         'error',

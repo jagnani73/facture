@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "typecheck": "pnpm -r --parallel typecheck",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "demo:reset": "node scripts/demo-reset.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.38.0",
