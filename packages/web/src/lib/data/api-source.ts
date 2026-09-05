@@ -22,13 +22,14 @@
  * the seller was shown.
  */
 
-import type { Debtor, Invoice, Mandate, Trade } from '@/lib/domain';
+import type { Debtor, Invoice, Mandate } from '@/lib/domain';
 import { ASSET_CHAIN, CHAINS, isQuotable, tenorDays } from '@/lib/domain';
 import type { Position } from '@/lib/pricing';
 import { api } from '@/lib/api/client';
 import { BUYER_ID, SELLER_ID, checkIdentity } from '@/lib/api/config';
-import type { LiveQuoteResponse } from '@/lib/api/contract';
+import type { LiveQuoteResponse, TradeProofResponse, TradeRecord } from '@/lib/api/contract';
 import { ApiError } from '@/lib/api/problem';
+import { isSettledTrade } from '@/lib/settlement';
 import type { ConfirmationRecord, InvoicePricing, Market, ProofRecord } from './types';
 import { buildMarket, derivedMeta } from './types';
 
@@ -97,12 +98,12 @@ function toPricing(invoiceId: string, live: LiveQuoteResponse): InvoicePricing {
 }
 
 /** Tenor is measured off the trade, so the maturity it implies is the trade's own. */
-function dueAtFromTrade(trade: Trade): string {
+function dueAtFromTrade(trade: TradeRecord): string {
   return new Date(Date.parse(trade.executedAt) + trade.tenorDays * 86_400_000).toISOString();
 }
 
 function toPosition(
-  trade: Trade,
+  trade: TradeRecord,
   invoice: Invoice | undefined,
   debtor: Debtor | undefined,
 ): Position {
@@ -176,7 +177,9 @@ export async function apiMarket(signal?: AbortSignal): Promise<Market> {
         quoteId: null,
         matches: [],
         matchCount: row.mandatesMatching,
-        candidatesConsidered: row.mandatesMatching,
+        // The book route answers how many matched, never how many were screened. Claiming
+        // the two are equal would understate the curve on any row that was refused.
+        candidatesConsidered: 0,
         refusals: [],
         pricedAt: asOf.toISOString(),
       },
@@ -197,7 +200,7 @@ export async function apiMarket(signal?: AbortSignal): Promise<Market> {
 
   const invoicesById = new Map(invoices.map((invoice) => [invoice.id, invoice]));
 
-  const trades: Trade[] = [];
+  const trades: TradeRecord[] = [];
   const seen = new Set<string>();
   for (const trade of [...sellerTrades.items, ...buyerTrades.items]) {
     if (seen.has(trade.id)) continue;
@@ -205,7 +208,12 @@ export async function apiMarket(signal?: AbortSignal): Promise<Market> {
     trades.push(trade);
   }
 
-  const positions = buyerTrades.items.map((trade) => {
+  /*
+   * Only a settled trade is a position. An attempt that was unwound, or one that
+   * half-settled, is a trade the buyer does not hold paper against — counting it would
+   * inflate the desk's exposure and its weighted yield with paper it never received.
+   */
+  const positions = buyerTrades.items.filter(isSettledTrade).map((trade) => {
     const invoice = invoicesById.get(trade.invoiceId);
     return toPosition(trade, invoice, invoice ? debtorsById.get(invoice.debtorId) : undefined);
   });
@@ -261,6 +269,37 @@ export async function apiConfirmation(
 
 const HEDERA = CHAINS[ASSET_CHAIN];
 
+/**
+ * The same refusal, said once, with how many times it was recorded.
+ *
+ * The first occurrence keeps its position, so the order the venue returned — which is the
+ * order they were written — still reads top to bottom.
+ */
+function collapseRefusals(refusals: TradeProofResponse['refusals']): ProofRecord['refusals'] {
+  const byReason = new Map<string, ProofRecord['refusals'][number] & { times: number }>();
+
+  for (const refusal of refusals) {
+    const key = `${refusal.mandateId} ${refusal.reasonCode} ${refusal.reasonText}`;
+    const seen = byReason.get(key);
+    if (seen) {
+      seen.times += 1;
+      // A receipt link only appears once the venue has one; take the first that exists.
+      seen.hcsExplorerUrl ??= refusal.hcsExplorerUrl;
+      continue;
+    }
+    byReason.set(key, {
+      mandateId: refusal.mandateId,
+      mandateName: null,
+      reasonCode: refusal.reasonCode,
+      reasonText: refusal.reasonText,
+      times: 1,
+      hcsExplorerUrl: refusal.hcsExplorerUrl,
+    });
+  }
+
+  return [...byReason.values()];
+}
+
 export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<ProofRecord> {
   const [trade, proof] = await Promise.all([
     api.getTrade(tradeId, signal),
@@ -298,6 +337,9 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
       explorerUrl: proof.assetLeg.explorerUrl,
     },
     cashLeg: {
+      // Read off the venue's own `network`, not assumed. This deployment settles in HBAR,
+      // so the cash leg is on Hedera and the explorer link has to be HashScan.
+      chain: proof.cashLeg.chain,
       from: proof.cashLeg.payer,
       to: null,
       asset: proof.cashLeg.asset,
@@ -306,25 +348,34 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
       transaction: proof.cashLeg.transaction,
       explorerUrl: proof.cashLeg.explorerUrl,
     },
-    // The venue publishes each leg and names the scheme that bound them. Nothing is invented
-    // here to fill the panel.
+    /*
+     * The venue publishes each leg and names the scheme that bound them. `scheme` is
+     * `exact` — that is the x402 scheme the payer signed under, not the protocol, and
+     * printing it as "Protocol: exact" said neither thing. The protocol is named here
+     * because it is a fact about this build rather than a field the venue happens to omit;
+     * the facilitator and the nonce are left null because they are not published.
+     */
     settlement:
-      proof.cashLeg.scheme === null
+      proof.cashLeg.scheme === null && proof.cashLeg.network === null
         ? null
         : {
-            protocol: proof.cashLeg.scheme,
+            protocol: 'x402 delivery versus payment',
+            scheme: proof.cashLeg.scheme,
+            network: proof.cashLeg.network,
             facilitator: null,
             challengeNonce: null,
             boundAt: null,
             note: 'Both legs are bound to one x402 challenge. Neither settles unless both do, and nothing is wrapped or bridged.',
           },
-    refusals: proof.refusals.map((refusal) => ({
-      mandateId: refusal.mandateId,
-      mandateName: null,
-      reasonCode: refusal.reasonCode,
-      reasonText: refusal.reasonText,
-      hcsExplorerUrl: refusal.hcsExplorerUrl,
-    })),
+    /*
+     * One row per mandate per reason, counted.
+     *
+     * The venue records a refusal receipt on every pricing pass, so an invoice that was
+     * quoted ten times carries the same four refusals ten times over. Every one of them is
+     * a real receipt and none of them is new information — printing forty identical
+     * sentences turns the record a rejected funder is owed into a wall to scroll past.
+     */
+    refusals: collapseRefusals(proof.refusals),
     invoiceNumber: proof.invoice.invoiceNumber === '' ? null : proof.invoice.invoiceNumber,
     debtorName: null,
     sellerName: null,

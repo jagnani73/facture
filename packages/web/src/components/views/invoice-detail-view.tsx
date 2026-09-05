@@ -5,10 +5,18 @@ import { useState } from 'react';
 
 import type { Invoice } from '@/lib/domain';
 import { isIssued, isQuotable, priceInvoice, settledCount } from '@/lib/domain';
-import { formatDate, formatDays, formatDueIn, formatMoney, formatRate } from '@/lib/format';
-import type { InvoicePricing, Market } from '@/lib/data';
+import {
+  formatDate,
+  formatDateTime,
+  formatDays,
+  formatDueIn,
+  formatMoney,
+  formatRate,
+} from '@/lib/format';
+import type { InvoicePricing, Market, SaleOutcome, TradeRecord } from '@/lib/data';
 import { isDemoBook, requestConfirmation, sellInvoice } from '@/lib/data';
 import { useMarket } from '@/lib/data/hooks';
+import { SETTLEMENT_STATE_SENTENCE, settlementStateOf } from '@/lib/settlement';
 import { curveFrom } from '@/lib/pricing';
 import { CurveStrip } from '@/components/curve-strip';
 import { driftBps, useMarketTick } from '@/components/market-tick';
@@ -71,7 +79,17 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
   const days = pricing.tenorDays;
   const baseRate = pricing.quote?.annualisedYieldBps ?? null;
   const liveRate = baseRate === null ? null : Math.max(1, baseRate + driftBps(invoice.id, tick));
-  const terms = liveRate === null ? null : priceInvoice(invoice.faceValue, liveRate, days);
+  /*
+   * The venue's own discount and proceeds while the rate on screen is the rate it named.
+   * The local pricer only takes over once the demo book's wobble has moved the rate off it,
+   * which is the only moment there is no venue figure to show.
+   */
+  const terms =
+    liveRate === null
+      ? null
+      : liveRate === baseRate && pricing.quote !== null
+        ? { discount: pricing.quote.discount, proceeds: pricing.quote.proceeds }
+        : priceInvoice(invoice.faceValue, liveRate, days);
   const best = pricing.matches[0];
   const nearest = pricing.refusals[0];
 
@@ -116,6 +134,7 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
                   faceValue={invoice.faceValue}
                   tenorDays={days}
                   bestRateBps={liveRate}
+                  quotedProceeds={liveRate === baseRate ? pricing.quote?.proceeds : undefined}
                   takers={pricing.matchCount}
                   size="hero"
                   live={false}
@@ -185,27 +204,7 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
             </Card>
           ) : null}
 
-          {trade ? (
-            <Card>
-              <CardHead
-                title="Sold"
-                hint={`Bought by ${market.metaOf(trade.mandateId).ownerName} on ${formatDate(trade.settledAt ?? trade.executedAt)}.`}
-              />
-              <div className="px-5 py-5">
-                <Row term="Face value" value={formatMoney(trade.faceValue)} />
-                <Row term="Tenor at sale" value={formatDays(trade.tenorDays)} />
-                <Row term="Annualised rate" value={formatRate(trade.annualisedYieldBps)} />
-                <Row term="Discount" value={`− ${formatMoney(trade.discount)}`} />
-                <Row term="Proceeds paid to you" value={formatMoney(trade.proceeds)} emphasis />
-                <Link
-                  href={`/proof/${encodeURIComponent(trade.id)}`}
-                  className={`${buttonClasses('secondary')} mt-4`}
-                >
-                  See the proof of settlement
-                </Link>
-              </div>
-            </Card>
-          ) : null}
+          {trade ? <TradeCard market={market} trade={trade} /> : null}
 
           {terms && liveRate !== null ? (
             <Card>
@@ -363,6 +362,71 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
 
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The trade behind an invoice, headed by what actually happened to it.
+ *
+ * "Sold" is a claim about both legs, and an invoice can carry a trade that is none of the
+ * things a sale is: still awaiting a signature, unwound, failed, or half-settled. Heading
+ * every one of them "Sold" would tell a seller they had been paid when they had not — and
+ * in the half-settled case, tell them nothing had happened when the money had actually
+ * moved.
+ */
+function TradeCard({ market, trade }: { market: Market; trade: TradeRecord }) {
+  const state = settlementStateOf(trade);
+  const owner = market.metaOf(trade.mandateId).ownerName;
+  const half = state === 'half_settled';
+
+  const title =
+    state === 'settled'
+      ? 'Sold'
+      : state === 'half_settled'
+        ? 'Half-settled — being reconciled'
+        : state === 'awaiting_payment'
+          ? 'Held, awaiting the cash leg'
+          : state === 'unwound'
+            ? 'Unwound — nothing moved'
+            : state === 'failed'
+              ? 'Did not go through'
+              : 'Being arranged';
+
+  return (
+    <Card className={half ? 'border-neg/45' : ''}>
+      <CardHead
+        title={title}
+        hint={
+          state === 'settled'
+            ? `Bought by ${owner} on ${formatDate(trade.settledAt ?? trade.executedAt)}.`
+            : SETTLEMENT_STATE_SENTENCE[state]
+        }
+      />
+      <div className="px-5 py-5">
+        <Row term="Face value" value={formatMoney(trade.faceValue)} />
+        <Row term="Tenor at sale" value={formatDays(trade.tenorDays)} />
+        <Row term="Annualised rate" value={formatRate(trade.annualisedYieldBps)} />
+        <Row term="Discount" value={`− ${formatMoney(trade.discount)}`} />
+        <Row
+          term={state === 'settled' ? 'Proceeds paid to you' : 'Proceeds if it settles'}
+          value={formatMoney(trade.proceeds)}
+          emphasis={state === 'settled'}
+        />
+        {half ? (
+          <p className="mt-3 text-sm text-ink">
+            The payment settled and the security did not transfer. Quote{' '}
+            <span className="num">{trade.id}</span> — the hold is deliberately not released while
+            this is reconciled.
+          </p>
+        ) : null}
+        <Link
+          href={`/proof/${encodeURIComponent(trade.id)}`}
+          className={`${buttonClasses('secondary')} mt-4`}
+        >
+          {state === 'settled' ? 'See the proof of settlement' : 'See both legs'}
+        </Link>
+      </div>
+    </Card>
+  );
+}
+
 function AwaitingCustomer({
   invoiceId,
   customer,
@@ -423,12 +487,15 @@ function AwaitingCustomer({
 }
 
 /**
- * The sale. Three states and no ceremony: an offer, a confirmation, a receipt. Nothing here
- * mentions how settlement happens, because a seller does not need to know and the proof
- * view is one click away when they want to.
+ * The sale. An offer, a confirmation, a receipt — and three endings that are not a receipt
+ * and must not look like one.
  *
- * A failure is a fourth state and it is written out in words — the venue said no, and here
- * is what it said. Never a reverted transaction, and never a silent nothing.
+ * The venue's trade path has five outcomes and only one of them is a sale. A 402 means the
+ * paper is **held** and the cash leg is unsigned, so nothing has moved; a 403 means the
+ * buyer was refused by the security's own control list *before* anything was matched; and a
+ * 500 carrying "half-settled" means the payment went through and the security did not. The
+ * first is not a sale, the second is not a failure, and the third is not "nothing happened".
+ * Each gets its own panel, in words, and none of them says a transaction reverted.
  */
 function SellPanel({
   invoiceId,
@@ -445,27 +512,57 @@ function SellPanel({
   ownerName: string;
   takers: number;
 }) {
-  const [stage, setStage] = useState<'idle' | 'confirm' | 'working' | 'done' | 'refused'>('idle');
-  const [message, setMessage] = useState<string>('');
+  const [stage, setStage] = useState<'idle' | 'confirm' | 'working'>('idle');
+  const [outcome, setOutcome] = useState<SaleOutcome | null>(null);
 
-  if (stage === 'refused') {
+  if (outcome !== null && outcome.ok === false && outcome.state === 'refused') {
+    return (
+      <SaleRefused
+        outcome={outcome}
+        onBack={() => {
+          setOutcome(null);
+          setStage('idle');
+        }}
+      />
+    );
+  }
+
+  if (outcome !== null && outcome.ok === false && outcome.state === 'half_settled') {
+    return <SaleHalfSettled outcome={outcome} />;
+  }
+
+  if (outcome !== null && outcome.ok === false) {
     return (
       <div className="mt-5 rounded-sm border border-warn/40 bg-warn-wash px-4 py-4">
-        <p className="text-sm text-ink">{message}</p>
-        <Button variant="quiet" size="sm" className="mt-3" onClick={() => setStage('idle')}>
+        <Label className="mb-1">Not sold</Label>
+        <p className="text-sm text-ink">{outcome.reason}</p>
+        <p className="mt-2 text-xs text-muted">Nothing moved. The invoice is still yours.</p>
+        <Button
+          variant="quiet"
+          size="sm"
+          className="mt-3"
+          onClick={() => {
+            setOutcome(null);
+            setStage('idle');
+          }}
+        >
           Back
         </Button>
       </div>
     );
   }
 
-  if (stage === 'done') {
+  if (outcome !== null && outcome.ok && outcome.state === 'awaiting_payment') {
+    return <SaleAwaitingPayment outcome={outcome} proceedsLabel={proceedsLabel} />;
+  }
+
+  if (outcome !== null && outcome.ok) {
     return (
       <div className="mt-5 rounded-sm border border-pos/40 bg-pos-wash px-4 py-4">
         <p className="text-sm">
           Sold for <span className="num font-medium">{proceedsLabel}</span> to {mandateName}.
         </p>
-        <p className="mt-1 text-xs text-muted">{message}</p>
+        <p className="mt-1 text-xs text-muted">{outcome.note}</p>
         <Link
           href={`/book/${encodeURIComponent(invoiceId)}`}
           className={`${buttonClasses('secondary', 'sm')} mt-3`}
@@ -491,14 +588,7 @@ function SellPanel({
             disabled={stage === 'working'}
             onClick={async () => {
               setStage('working');
-              const result = await sellInvoice(invoiceId, quoteId);
-              if (result.ok) {
-                setMessage(result.note);
-                setStage('done');
-              } else {
-                setMessage(result.reason);
-                setStage('refused');
-              }
+              setOutcome(await sellInvoice(invoiceId, quoteId));
             }}
           >
             {stage === 'working' ? 'Selling…' : `Sell for ${proceedsLabel}`}
@@ -520,6 +610,178 @@ function SellPanel({
         Settles against the best mandate that will take it
         {takers > 0 ? `, of the ${takers} that would` : ''}.
       </span>
+    </div>
+  );
+}
+
+/**
+ * The refusal.
+ *
+ * This is the product's distinguishing claim on a screen, so it is not styled as a failure
+ * and it does not use the word. Eligibility was read from the security's own control list
+ * and KYC facets *before* anything was matched, which is why the sentence exists at all —
+ * an automated market maker has no point of trade at which to ask, so the same fact reaches
+ * a seller there as a reverted transaction with no reason attached.
+ *
+ * The venue's `detail` can carry a whole contract-call trace inline, because the probe fails
+ * closed and reports what it could not read. That is true and it is not the answer, so it
+ * sits behind a disclosure and the sentence stands on its own.
+ */
+function SaleRefused({
+  outcome,
+  onBack,
+}: {
+  outcome: Extract<SaleOutcome, { state: 'refused' }>;
+  onBack: () => void;
+}) {
+  return (
+    <div className="mt-5 rounded-sm border border-rule-strong bg-sunken px-4 py-4">
+      <Label className="mb-1">Refused before matching</Label>
+      <p className="text-sm text-ink">{outcome.reason}</p>
+
+      {outcome.checks.length > 0 ? (
+        <ul className="mt-3 space-y-2">
+          {outcome.checks.map((check) => (
+            <li key={check.name} className="flex gap-2.5">
+              <span
+                aria-hidden
+                className={`mt-0.5 select-none text-xs ${check.passed ? 'text-pos' : 'text-neg'}`}
+              >
+                {check.passed ? '✓' : '✕'}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-xs">{check.name}</span>
+                <span className="block text-xs text-muted">{check.detail}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      <p className="mt-3 text-xs text-muted">
+        Nothing was reserved, nothing was held and nothing moved. Eligibility is read before the
+        match rather than at settlement, which is why this is a sentence with a reason attached
+        rather than a transaction that came back rejected.
+      </p>
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Button variant="quiet" size="sm" onClick={onBack}>
+          Back
+        </Button>
+        {outcome.code ? (
+          <span className="num text-[0.6875rem] text-faint">{outcome.code}</span>
+        ) : null}
+      </div>
+
+      {outcome.technical ? (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-[0.6875rem] text-faint hover:text-muted">
+            What the venue could not read
+          </summary>
+          <pre className="num mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-xs bg-raised p-3 text-[0.6875rem] leading-relaxed text-faint">
+            {outcome.technical}
+          </pre>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The 402. The paper is held and the cash leg is unsigned.
+ *
+ * Deliberately not the green "Sold" panel: this is the middle of a delivery-versus-payment
+ * and the money has not moved. It is also not a failure — if the buyer never signs, the hold
+ * expires on its own and the seller's position was never encumbered for longer than the
+ * challenge window.
+ *
+ * The challenge itself is shown because a seller watching a sale stall is owed the terms the
+ * other side was handed, and because this is the one place the two chains are visible from a
+ * market screen: the amount is in the settlement asset's own smallest unit on
+ * `hedera:testnet`, not in the invoice's currency.
+ */
+function SaleAwaitingPayment({
+  outcome,
+  proceedsLabel,
+}: {
+  outcome: Extract<SaleOutcome, { state: 'awaiting_payment' }>;
+  proceedsLabel: string;
+}) {
+  const terms = outcome.challenge.payment.accepts[0];
+  const held = outcome.challenge.assetLeg?.state === 'held';
+
+  return (
+    <div className="mt-5 rounded-sm border border-accent/40 bg-sunken px-4 py-4">
+      <Label className="mb-1">
+        {held ? 'Paper held · awaiting the cash leg' : 'Awaiting the cash leg'}
+      </Label>
+      <p className="text-sm text-ink">
+        The buyer has been asked to sign <span className="num font-medium">{proceedsLabel}</span>{' '}
+        against this invoice. Neither leg settles unless both do.
+      </p>
+      <p className="mt-2 text-xs text-muted">{outcome.note}</p>
+
+      {terms ? (
+        <div className="mt-3 border-t border-rule pt-1">
+          <Row term="Scheme" value={terms.scheme} />
+          <Row term="Network" value={terms.network} />
+          <Row term="Asset" value={terms.asset} />
+          <Row term="Amount" value={terms.amount} />
+          <Row term="Paid to" value={terms.payTo} />
+          {outcome.challenge.expiresAt ? (
+            <Row term="Hold expires" value={formatDateTime(outcome.challenge.expiresAt)} />
+          ) : null}
+        </div>
+      ) : null}
+
+      <p className="mt-3 text-xs text-faint">
+        The amount above is the settlement asset&rsquo;s own smallest unit, not this invoice&rsquo;s
+        currency. If the signature never arrives, the hold expires and your position was never
+        encumbered.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * The half-settled trade.
+ *
+ * The cash leg settled and the security did not transfer, which means **the money moved**.
+ * The venue answers 500 here and deliberately does not unwind, because releasing a hold
+ * against a payment that actually happened turns a reconcilable state into a lost one — so
+ * this cannot render as "nothing happened", and there is no Back button pretending the sale
+ * can simply be retried.
+ */
+function SaleHalfSettled({
+  outcome,
+}: {
+  outcome: Extract<SaleOutcome, { state: 'half_settled' }>;
+}) {
+  return (
+    <div className="mt-5 rounded-sm border-2 border-neg/50 bg-neg-wash px-4 py-4" role="alert">
+      <Label className="mb-1">The payment went through — the paper did not</Label>
+      <p className="text-sm text-ink">{outcome.reason}</p>
+      <p className="mt-2 text-sm text-ink">
+        This is not a failed sale and it is not something to retry. One leg of the settlement
+        completed and the other did not, so it is being reconciled by hand rather than unwound —
+        releasing the hold against a payment that actually happened would turn a recoverable state
+        into a lost one.
+      </p>
+
+      {outcome.tradeId ? (
+        <div className="mt-3 border-t border-neg/30 pt-3">
+          <Label className="mb-1">Quote this reference</Label>
+          <p className="num text-sm" data-num>
+            {outcome.tradeId}
+          </p>
+          <Link
+            href={`/proof/${encodeURIComponent(outcome.tradeId)}`}
+            className={`${buttonClasses('secondary', 'sm')} mt-3`}
+          >
+            See both legs
+          </Link>
+        </div>
+      ) : null}
     </div>
   );
 }

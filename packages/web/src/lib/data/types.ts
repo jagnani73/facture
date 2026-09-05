@@ -14,6 +14,7 @@
  */
 
 import type {
+  ChainKey,
   Debtor,
   Invoice,
   Mandate,
@@ -21,14 +22,16 @@ import type {
   Rating,
   RefusalReceipt,
   RegulationKey,
-  Trade,
 } from '@/lib/domain';
 import type { MinorUnits } from '@/lib/domain';
+import type { TradeRecord } from '@/lib/api/contract';
 import type { MandateMeta } from '@/lib/fixtures';
 import type { Position } from '@/lib/pricing';
+import { settlementStateOf } from '@/lib/settlement';
 import type { DataSource } from '@/lib/api/config';
 
 export type { MandateMeta };
+export type { TradeRecord };
 
 export interface Party {
   id: string;
@@ -98,7 +101,7 @@ export interface Market {
   readonly debtors: readonly Debtor[];
   readonly mandates: readonly Mandate[];
   readonly positions: readonly Position[];
-  readonly trades: readonly Trade[];
+  readonly trades: readonly TradeRecord[];
   readonly notices: readonly string[];
   /**
    * Whether a customer's settled/unpaid/confirmed counters are published by this source.
@@ -124,8 +127,8 @@ export interface Market {
   positionsOf(mandateId: string): Position[];
   ownedPositions(): Position[];
 
-  getTrade(id: string): Trade | undefined;
-  tradeForInvoice(invoiceId: string): Trade | undefined;
+  getTrade(id: string): TradeRecord | undefined;
+  tradeForInvoice(invoiceId: string): TradeRecord | undefined;
   /** The confirmation link for an invoice, where this source can produce one. */
   tokenForInvoice(invoiceId: string): string | undefined;
 }
@@ -139,7 +142,7 @@ export interface MarketInput {
   debtors: readonly Debtor[];
   mandates: readonly Mandate[];
   positions: readonly Position[];
-  trades: readonly Trade[];
+  trades: readonly TradeRecord[];
   pricing: ReadonlyMap<string, InvoicePricing>;
   meta: ReadonlyMap<string, MandateMeta>;
   tokens: ReadonlyMap<string, string>;
@@ -229,7 +232,26 @@ export function buildMarket(input: MarketInput): Market {
     },
 
     getTrade: (id) => tradesById.get(id),
-    tradeForInvoice: (invoiceId) => input.trades.find((t) => t.invoiceId === invoiceId),
+
+    /*
+     * An invoice can carry more than one trade: an attempt that was unwound, an attempt
+     * that half-settled, and the one that actually filled. Taking whichever came back
+     * first would let a failed attempt render as "Sold", so the settled one wins, then the
+     * most recent — a half-settled trade beats an outright failure because it is the one
+     * still owed an answer.
+     */
+    tradeForInvoice: (invoiceId) => {
+      const candidates = input.trades.filter((t) => t.invoiceId === invoiceId);
+      if (candidates.length <= 1) return candidates[0];
+
+      const rank = (trade: TradeRecord): number => {
+        const state = settlementStateOf(trade);
+        return state === 'settled' ? 0 : state === 'half_settled' ? 1 : 2;
+      };
+      return [...candidates].sort(
+        (a, b) => rank(a) - rank(b) || Date.parse(b.executedAt) - Date.parse(a.executedAt),
+      )[0];
+    },
     tokenForInvoice: (invoiceId) => input.tokens.get(invoiceId),
   };
 }
@@ -283,7 +305,7 @@ export interface ProofCheck {
  */
 export interface ProofRecord {
   tradeId: string;
-  trade: Trade;
+  trade: TradeRecord;
   instrument: {
     tokenId: string | null;
     isin: string | null;
@@ -302,6 +324,8 @@ export interface ProofRecord {
     allowed: boolean | null;
     checkedAt: string | null;
     checks: readonly ProofCheck[];
+    /** The check that failed, in words. Present only on a refusal. */
+    reason: string | null;
     hcsTopicId: string | null;
     hcsSequenceNumber: string | null;
     hcsExplorerUrl: string | null;
@@ -316,6 +340,15 @@ export interface ProofRecord {
     explorerUrl: string | null;
   };
   cashLeg: {
+    /**
+     * Which chain the cash actually settled on.
+     *
+     * Not assumed to be Arc. This build settles the cash leg in HBAR through the Blocky402
+     * facilitator, so the venue answers `hedera` on network `hedera:testnet` — and a screen
+     * that hardcoded Arc would print an Arc chain id and an ArcScan link over a Hedera
+     * transaction id, on the one page whose entire job is being checkable elsewhere.
+     */
+    chain: ChainKey;
     from: string | null;
     to: string | null;
     asset: string | null;
@@ -327,6 +360,10 @@ export interface ProofRecord {
   /** What binds the two legs. Absent when the venue does not publish it. */
   settlement: {
     protocol: string;
+    /** The x402 scheme the payer signed under — `exact`. Not the protocol. */
+    scheme: string | null;
+    /** CAIP-2, with a colon: `hedera:testnet`. */
+    network: string | null;
     facilitator: string | null;
     challengeNonce: string | null;
     boundAt: string | null;
@@ -337,6 +374,13 @@ export interface ProofRecord {
     mandateName: string | null;
     reasonCode: string;
     reasonText: string;
+    /**
+     * How many times this same mandate was told no for this same reason while the invoice
+     * was being priced. The venue writes a receipt on every pricing pass, so a receivable
+     * that was quoted repeatedly accumulates the identical refusal many times over — and a
+     * list that repeats itself forty times reads as noise rather than as a record.
+     */
+    times: number;
     hcsExplorerUrl: string | null;
   }[];
   invoiceNumber: string | null;

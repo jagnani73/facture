@@ -604,6 +604,56 @@ export function readInvoiceDetail(raw: unknown, path = 'invoice'): InvoiceDetail
 /* Trades                                                                      */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The venue's own word for where a trade got to — `TradeRow.status`, rendered by
+ * `wireTrade`.
+ *
+ * Read because the leg states alone cannot separate `preparing` from `awaiting_payment`,
+ * and because the venue is the authority on its own trade. It stays **optional** on
+ * `TradeRecord`: the demo book has no such column, and a screen that needs the distinction
+ * asks `settlementStateOf`, which falls back to the legs.
+ */
+export const TRADE_STATUSES = [
+  'preparing',
+  'awaiting_payment',
+  'settled',
+  'unwound',
+  'failed',
+] as const;
+
+export type TradeStatus = (typeof TRADE_STATUSES)[number];
+
+/**
+ * A trade as this package carries it: the shared `Trade`, plus the venue's status where
+ * there is one.
+ *
+ * Extending rather than widening `Trade` keeps `@facture/shared` frozen and keeps the demo
+ * book assignable without a field it has never had.
+ */
+export interface TradeRecord extends Trade {
+  readonly status?: TradeStatus | undefined;
+}
+
+/**
+ * The wire names a leg's chain `hedera` / `arc`; `@facture/shared` names the same two
+ * chains `hedera-testnet` / `arc-testnet`, and `CHAINS` is keyed on the second spelling.
+ * A leg carrying the bare wire word would index that table to `undefined`, so the two are
+ * reconciled here rather than at every render site.
+ *
+ * This matters more than a label: the cash leg is **not** always Arc. When the deployment
+ * settles in HBAR the venue answers `chain: "hedera"` with `network: "hedera:testnet"`,
+ * and a screen that assumed Arc would offer an ArcScan link for a Hedera transaction.
+ */
+export function readChainKey(value: unknown, path: string, fallback: ChainKey): ChainKey {
+  const raw = readOptionalString(value, path);
+  if (raw === null) return fallback;
+  if (raw === 'hedera' || raw === 'hedera-testnet' || raw.startsWith('hedera:')) {
+    return 'hedera-testnet';
+  }
+  if (raw === 'arc' || raw === 'arc-testnet' || raw.startsWith('arc:')) return 'arc-testnet';
+  return fallback;
+}
+
 function readLeg(raw: unknown, path: string, fallbackChain: ChainKey): SettlementLeg {
   const body = readObject(raw, path);
   return {
@@ -612,7 +662,7 @@ function readLeg(raw: unknown, path: string, fallbackChain: ChainKey): Settlemen
       `${path}.state`,
       SETTLEMENT_LEG_STATES,
     ) as SettlementLegState,
-    chain: readOptionalString(field(body, 'chain'), `${path}.chain`) ?? fallbackChain,
+    chain: readChainKey(field(body, 'chain'), `${path}.chain`, fallbackChain),
     reference:
       readOptionalString(
         field(body, 'reference', 'transaction', 'transactionId'),
@@ -626,12 +676,16 @@ function readLeg(raw: unknown, path: string, fallbackChain: ChainKey): Settlemen
 
 const PENDING_LEG = (chain: ChainKey): SettlementLeg => ({ state: 'pending', chain });
 
-export function readTrade(raw: unknown, path = 'trade'): Trade {
+export function readTrade(raw: unknown, path = 'trade'): TradeRecord {
   const body = readObject(raw, path);
   const assetLeg = field(body, 'assetLeg');
   const cashLeg = field(body, 'cashLeg');
+  const status = field(body, 'status');
 
   return {
+    ...(status === undefined
+      ? {}
+      : { status: readEnum(status, `${path}.status`, TRADE_STATUSES) as TradeStatus }),
     id: readString(field(body, 'id'), `${path}.id`),
     invoiceId: readString(field(body, 'invoiceId'), `${path}.invoiceId`),
     mandateId: readString(field(body, 'mandateId'), `${path}.mandateId`),
@@ -660,6 +714,176 @@ export function readTrade(raw: unknown, path = 'trade'): Trade {
     executedAt: readString(field(body, 'executedAt', 'createdAt'), `${path}.executedAt`),
     settledAt: readOptionalString(field(body, 'settledAt'), `${path}.settledAt`) ?? undefined,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The x402 challenge — the 402 from `POST /v1/trades`                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The cash leg's terms, as the venue builds them in `services/x402.ts`.
+ *
+ * **This shape moved, and the old spelling fails silently.** In `@x402/core` 2.24.0 the
+ * amount field is `amount`, not `maxAmountRequired`, and `resource` / `description` /
+ * `mimeType` are no longer requirements fields at all — they live on
+ * `PaymentRequired.resource`, a sibling of `accepts`. The backend's own note records that
+ * this was settled by signing three live payments against the facilitator rather than read
+ * off documentation, so it is decoded here strictly: `amount` is required by that name, and
+ * a body still sending `maxAmountRequired` is reported as unreadable rather than guessed at.
+ */
+export interface PaymentRequirements {
+  scheme: string;
+  /** CAIP-2 style, with a **colon**: `hedera:testnet`, never `hedera-testnet`. */
+  network: string;
+  /** Hedera references HTS assets by native id. `0.0.0` is HBAR. */
+  asset: string;
+  /** The asset's smallest unit, as a decimal string. Tinybars for HBAR. */
+  amount: string;
+  /** Native id `0.0.x` of the receiving account. */
+  payTo: string;
+  maxTimeoutSeconds: number;
+  /** Carries `feePayer`, which the venue reads from the facilitator at runtime. */
+  extra: Record<string, unknown>;
+}
+
+/** The `resource` sibling of `accepts`. Three fields that used to sit inside `accepts[0]`. */
+export interface ResourceInfo {
+  resource: string;
+  description: string;
+  mimeType: string | null;
+}
+
+/** What the `payment-required` header carries, whole — not a bare requirements object. */
+export interface PaymentRequired {
+  x402Version: number;
+  accepts: PaymentRequirements[];
+  resource: ResourceInfo | null;
+}
+
+export function readPaymentRequirements(raw: unknown, path: string): PaymentRequirements {
+  const body = readObject(raw, path);
+  const amount = field(body, 'amount');
+
+  if (amount === undefined) {
+    unreadable(
+      `${path}.amount`,
+      'is missing — x402 v2 renamed `maxAmountRequired` to `amount`, and a challenge ' +
+        'without it cannot be signed',
+    );
+  }
+
+  return {
+    scheme: readString(field(body, 'scheme'), `${path}.scheme`),
+    network: readString(field(body, 'network'), `${path}.network`),
+    asset: readString(field(body, 'asset'), `${path}.asset`),
+    amount: readString(amount, `${path}.amount`),
+    payTo: readString(field(body, 'payTo'), `${path}.payTo`),
+    maxTimeoutSeconds: readNumber(
+      field(body, 'maxTimeoutSeconds') ?? 0,
+      `${path}.maxTimeoutSeconds`,
+    ),
+    extra:
+      field(body, 'extra') === undefined ? {} : readObject(field(body, 'extra'), `${path}.extra`),
+  };
+}
+
+function readResourceInfo(raw: unknown, path: string): ResourceInfo {
+  const body = readObject(raw, path);
+  return {
+    resource: readString(field(body, 'resource'), `${path}.resource`),
+    description: readOptionalString(field(body, 'description'), `${path}.description`) ?? '',
+    mimeType: readOptionalString(field(body, 'mimeType'), `${path}.mimeType`),
+  };
+}
+
+export function readPaymentRequired(raw: unknown, path = 'paymentRequired'): PaymentRequired {
+  const body = readObject(raw, path);
+  const accepts = field(body, 'accepts');
+  const resource = field(body, 'resource');
+
+  if (accepts === undefined) unreadable(`${path}.accepts`, 'is missing');
+
+  return {
+    x402Version: readNumber(field(body, 'x402Version') ?? 2, `${path}.x402Version`),
+    accepts: readArray(accepts, `${path}.accepts`).map((item, i) =>
+      readPaymentRequirements(item, `${path}.accepts[${i}]`),
+    ),
+    resource: resource === undefined ? null : readResourceInfo(resource, `${path}.resource`),
+  };
+}
+
+/**
+ * The whole 402 body.
+ *
+ * A 402 here is not a failure. It is the middle of a delivery-versus-payment: the asset leg
+ * is **held** on Hedera, nothing has moved, and the cash leg is waiting for the buyer's
+ * signature. A screen that renders this as "sold" is claiming a settlement that has not
+ * happened, and one that renders it as an error is claiming a failure that has not happened
+ * either.
+ */
+export interface TradeChallenge {
+  trade: TradeRecord | null;
+  quote: Quote | null;
+  /** Held, not moved. Nobody goes first. */
+  assetLeg: SettlementLeg | null;
+  compliance: ComplianceDecision | null;
+  payment: PaymentRequired;
+  /** After this the hold is released whether or not the buyer signed. */
+  expiresAt: string | null;
+  /** The header the signed payload comes back in. `PAYMENT-SIGNATURE` in x402 v2. */
+  signatureHeader: string;
+}
+
+/** The pre-match decision, as `services/compliance.ts` renders it. */
+export interface ComplianceDecision {
+  allowed: boolean | null;
+  checks: ProofCheck[];
+  checkedAt: string | null;
+  /** Set when refused: the first check that failed, in words. */
+  reason: string | null;
+}
+
+export function readComplianceDecision(raw: unknown, path: string): ComplianceDecision {
+  const body = readObject(raw, path);
+  return {
+    ...readChecks(body, path),
+    checkedAt: readOptionalString(field(body, 'checkedAt'), `${path}.checkedAt`),
+    reason: readOptionalString(field(body, 'reason'), `${path}.reason`),
+  };
+}
+
+export function readTradeChallenge(raw: unknown, path = 'challenge'): TradeChallenge {
+  const body = readObject(raw, path);
+  const trade = field(body, 'trade');
+  const quote = field(body, 'quote');
+  const assetLeg = field(body, 'assetLeg');
+  const compliance = field(body, 'compliance');
+
+  return {
+    trade: trade === undefined ? null : readTrade(trade, `${path}.trade`),
+    quote: quote === undefined ? null : readQuote(quote, `${path}.quote`),
+    assetLeg:
+      assetLeg === undefined ? null : readLeg(assetLeg, `${path}.assetLeg`, 'hedera-testnet'),
+    compliance:
+      compliance === undefined ? null : readComplianceDecision(compliance, `${path}.compliance`),
+    payment: readPaymentRequired(body, path),
+    expiresAt: readOptionalString(field(body, 'expiresAt'), `${path}.expiresAt`),
+    signatureHeader:
+      readOptionalString(field(body, 'signatureHeader'), `${path}.signatureHeader`) ??
+      'PAYMENT-SIGNATURE',
+  };
+}
+
+/** The `payment-required` header, which is base64 JSON of a whole `PaymentRequired`. */
+export function decodePaymentRequiredHeader(header: string | null): PaymentRequired | null {
+  if (header === null || header.trim() === '') return null;
+  try {
+    return readPaymentRequired(JSON.parse(atob(header)), 'paymentRequiredHeader');
+  } catch {
+    // The body carries the same two fields, so an unreadable header is a lost cross-check
+    // rather than a lost challenge. It is not worth failing a sale over.
+    return null;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -700,6 +924,8 @@ export interface TradeProofResponse {
   compliance: {
     allowed: boolean | null;
     checks: ProofCheck[];
+    /** The failed check, in words. The whole point of refusing before matching. */
+    reason: string | null;
     checkedAt: string | null;
     hcsTopicId: string | null;
     hcsSequenceNumber: string | null;
@@ -721,7 +947,13 @@ export interface TradeProofResponse {
     explorerUrl: string | null;
   };
   cashLeg: {
-    chain: 'arc' | 'hedera';
+    /**
+     * Reconciled to a `ChainKey`, because the cash leg is **not** always Arc: this
+     * deployment settles in HBAR, so the venue answers `hedera` with a
+     * `network: "hedera:testnet"`, and an ArcScan link over a Hedera transaction id would
+     * be a dead link on the one screen whose whole job is being checkable.
+     */
+    chain: ChainKey;
     scheme: string | null;
     network: string | null;
     asset: string | null;
@@ -810,6 +1042,13 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
     },
     compliance: {
       ...readChecks(field(compliance, 'decision'), `${path}.compliance.decision`),
+      reason: readOptionalString(
+        field(
+          readObject(field(compliance, 'decision') ?? {}, `${path}.compliance.decision`),
+          'reason',
+        ),
+        `${path}.compliance.decision.reason`,
+      ),
       checkedAt: readOptionalString(field(compliance, 'checkedAt'), `${path}.compliance.checkedAt`),
       hcsTopicId: readOptionalString(
         field(compliance, 'hcsTopicId'),
@@ -866,10 +1105,13 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
       ),
     },
     cashLeg: {
-      chain:
-        readOptionalString(field(cashLeg, 'chain'), `${path}.cashLeg.chain`) === 'hedera'
-          ? 'hedera'
-          : 'arc',
+      // The network wins over the bare chain word when both are present: `hedera:testnet`
+      // is the thing the payer actually signed against.
+      chain: readChainKey(
+        field(cashLeg, 'network') ?? field(cashLeg, 'chain'),
+        `${path}.cashLeg.chain`,
+        'arc-testnet',
+      ),
       scheme: readOptionalString(field(cashLeg, 'scheme'), `${path}.cashLeg.scheme`),
       network: readOptionalString(field(cashLeg, 'network'), `${path}.cashLeg.network`),
       asset: readOptionalString(field(cashLeg, 'asset'), `${path}.cashLeg.asset`),

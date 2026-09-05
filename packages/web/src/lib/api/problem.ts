@@ -112,6 +112,117 @@ export function isApiError(error: unknown): error is ApiError {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Two answers that are not failures                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A compliance refusal.
+ *
+ * `POST /v1/trades` checks the buyer against the security's own `ControlList` and `Kyc`
+ * facets **before** matching, and answers 403 when they are not eligible. That 403 is the
+ * product's distinguishing claim rather than an error: an AMM matches first and finds out
+ * afterwards, so non-compliance arrives there as a revert nobody can read. Here it arrives
+ * as a sentence — *"Harrow Point is not permitted to hold this security by its control
+ * list."* — and nothing was reserved, held or moved.
+ *
+ * `forbidden` is raised in exactly one place in the whole service (`routes/trades.ts`), so
+ * the code alone identifies it.
+ */
+export const isComplianceRefusal = (error: unknown): boolean =>
+  isApiError(error) && error.code === 'forbidden';
+
+/**
+ * The half-settled trade: the cash leg settled and the asset leg did not.
+ *
+ * The venue answers 500 and deliberately does **not** unwind, because releasing a hold
+ * against a payment that actually happened turns a reconcilable state into a lost one. So
+ * this must never render as a generic failure — the money moved, and the seller is owed a
+ * sentence saying exactly that plus the id to quote.
+ *
+ * Matched on the detail rather than the code because `internal_error` is also the code for
+ * an ordinary crash, and those two must not be shown the same way.
+ */
+export const isHalfSettled = (error: unknown): boolean =>
+  isApiError(error) && error.code === 'internal_error' && /half-settled/i.test(error.detail ?? '');
+
+/** The trade id the venue told the reader to quote. */
+export function halfSettledTradeId(error: unknown): string | null {
+  if (!isApiError(error)) return null;
+  const match = /Trade\s+([0-9a-f-]{36})/i.exec(error.detail ?? '');
+  return match?.[1] ?? null;
+}
+
+/**
+ * A problem detail split into the part a person reads and the part a developer does.
+ *
+ * The venue's compliance detail can carry a whole viem call trace — contract address,
+ * selector, ABI docs link, library version — inline in `detail`, because the probe fails
+ * closed and reports what it could not read. All of that is true and none of it belongs in
+ * the sentence a funder is shown. So a parenthesis containing a line break is lifted out
+ * whole, and a `SCREAMING_CODE:` prefix becomes a label rather than the first three words
+ * of an English sentence.
+ */
+export interface SplitDetail {
+  /** Machine code the venue led with, if it led with one. */
+  code: string | null;
+  /** What happened, in words, with the trace taken out. */
+  sentence: string;
+  /** The trace, kept for whoever is debugging. Never shown above the fold. */
+  technical: string | null;
+}
+
+export function splitDetail(detail: string | undefined | null): SplitDetail {
+  const raw = (detail ?? '').trim();
+  if (raw === '') return { code: null, sentence: '', technical: null };
+
+  const technical: string[] = [];
+
+  // Lift out any parenthesis that contains a line break. Those are traces, not asides.
+  let sentence = '';
+  let depth = 0;
+  let buffer = '';
+  for (const char of raw) {
+    if (char === '(') {
+      if (depth === 0) buffer = '';
+      else buffer += char;
+      depth += 1;
+      continue;
+    }
+    if (char === ')' && depth > 0) {
+      depth -= 1;
+      if (depth === 0) {
+        if (buffer.includes('\n')) technical.push(buffer.trim());
+        else sentence += `(${buffer})`;
+      } else {
+        buffer += char;
+      }
+      continue;
+    }
+    if (depth > 0) buffer += char;
+    else sentence += char;
+  }
+  if (depth > 0 && buffer !== '') technical.push(buffer.trim());
+
+  let code: string | null = null;
+  const prefix = /^([A-Z][A-Z0-9_]{3,}):\s*/.exec(sentence);
+  if (prefix?.[1]) {
+    code = prefix[1];
+    sentence = sentence.slice(prefix[0].length);
+  }
+
+  sentence = sentence
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([.,;:])/g, '$1')
+    .trim();
+
+  return {
+    code,
+    sentence,
+    technical: technical.length === 0 ? null : technical.join('\n\n'),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Sentences                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -121,7 +232,8 @@ export function isApiError(error: unknown): error is ApiError {
  */
 export function explainApiError(error: ApiError): string {
   const subject = error.what ?? 'what this page needs';
-  const detail = error.detail?.trim();
+  const split = splitDetail(error.detail);
+  const detail = split.sentence === '' ? undefined : split.sentence;
 
   switch (error.code) {
     case 'unreachable':
@@ -148,8 +260,17 @@ export function explainApiError(error: ApiError): string {
     case 'bad_request':
       return detail ?? 'The venue could not read that request.';
 
-    case 'unauthorized':
+    // Not "you are not permitted to see this". A 403 from this venue is a compliance
+    // refusal against an instrument, checked before matching, and the sentence it carries
+    // is the answer rather than the wrapping around one.
     case 'forbidden':
+      return (
+        detail ??
+        'The security’s own control list and KYC facets were read before matching, and they ' +
+          'do not permit this buyer to hold it. Nothing was reserved and nothing moved.'
+      );
+
+    case 'unauthorized':
       return detail ?? `You are not permitted to see ${subject}.`;
 
     case 'duplicate_receivable':
@@ -182,6 +303,9 @@ export function explainApiError(error: ApiError): string {
     case 'upstream_unavailable':
       return detail ?? 'Something the venue depends on is not answering. Nothing has moved.';
 
+    // "Nothing has moved" is the right thing to say about a crash and the wrong thing to
+    // say about a half-settled trade, where the payment went through. The detail is the
+    // venue's own words and it says which one this is.
     case 'internal_error':
       return detail ?? 'The venue failed while answering. Nothing has moved.';
 
@@ -198,6 +322,22 @@ export function traceApiError(error: ApiError): string {
   parts.push(error.code);
   if (error.requestId) parts.push(`request ${error.requestId}`);
   return parts.join(' · ');
+}
+
+/**
+ * The trace the venue inlined into `detail`, if it inlined one.
+ *
+ * Kept separate from `explainApiError` so a screen can put it behind a disclosure rather
+ * than in the sentence. A contract selector and an ABI docs link are true and useless to
+ * the person being refused.
+ */
+export function technicalDetail(error: unknown): string | null {
+  return isApiError(error) ? splitDetail(error.detail).technical : null;
+}
+
+/** The machine code the venue led its detail with, e.g. `COMPLIANCE_PROBE_FAILED`. */
+export function detailCode(error: unknown): string | null {
+  return isApiError(error) ? splitDetail(error.detail).code : null;
 }
 
 /** Anything thrown anywhere, rendered as a sentence. */

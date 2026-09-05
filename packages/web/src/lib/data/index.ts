@@ -15,18 +15,30 @@
 import type { MinorUnits, Rating } from '@/lib/domain';
 import { api } from '@/lib/api/client';
 import { BUYER_ID, DATA_SOURCE, SELLER_ID, usingApi } from '@/lib/api/config';
-import { describeFailure } from '@/lib/api/problem';
+import type { TradeChallenge } from '@/lib/api/contract';
+import {
+  describeFailure,
+  halfSettledTradeId,
+  isApiError,
+  isComplianceRefusal,
+  isHalfSettled,
+  splitDetail,
+} from '@/lib/api/problem';
+import { SETTLEMENT_STATE_SENTENCE } from '@/lib/settlement';
 import { apiConfirmation, apiMarket, apiProof } from './api-source';
 import { fixtureConfirmation, fixtureMarket, fixtureProof } from './fixture-source';
-import type { ConfirmationRecord, Market, ProofRecord } from './types';
+import type { ConfirmationRecord, Market, ProofCheck, ProofRecord } from './types';
 
 export type {
   ConfirmationRecord,
   InvoicePricing,
   MandateMatch,
   Market,
+  ProofCheck,
   ProofRecord,
+  TradeRecord,
 } from './types';
+export type { TradeChallenge, PaymentRequirements, ResourceInfo } from '@/lib/api/contract';
 export { DATA_SOURCE, usingApi } from '@/lib/api/config';
 
 /** True when the numbers on screen are the demo book rather than a live venue. */
@@ -257,10 +269,46 @@ export async function writeAndFundMandate(
   };
 }
 
+/**
+ * What happened when someone pressed sell.
+ *
+ * Five outcomes, not two, because the sale has five genuinely different endings and three
+ * of them were previously collapsed into "it worked" or "it failed":
+ *
+ * - **`settled`** — both legs settled. The only ending that is a sale.
+ * - **`awaiting_payment`** — the 402. The paper is held on Hedera, the cash leg is waiting
+ *   for a signature, and **nothing has moved**. Rendering this as sold claims a settlement
+ *   that has not happened.
+ * - **`refused`** — the compliance refusal. Checked against the security's own control list
+ *   and KYC facets *before* matching, so nothing was reserved and nothing was held. This is
+ *   the product's distinguishing claim, not an error, and it names its reason.
+ * - **`half_settled`** — the payment went through and the security did not transfer. The
+ *   money moved. It must never read as a generic failure.
+ * - **`failed`** — everything else, in words.
+ */
 export type SaleOutcome =
   | { ok: true; state: 'settled'; note: string }
-  | { ok: true; state: 'payment_required'; note: string }
-  | { ok: false; reason: string };
+  | { ok: true; state: 'awaiting_payment'; note: string; challenge: TradeChallenge }
+  | {
+      ok: false;
+      state: 'refused';
+      /** The venue's sentence, with any probe trace lifted out of it. */
+      reason: string;
+      /** The machine code the venue led with, e.g. `COMPLIANCE_PROBE_FAILED`. */
+      code: string | null;
+      /** The trace, for whoever is debugging. Never shown above the fold. */
+      technical: string | null;
+      /** The pre-match checks, when the venue published them. */
+      checks: readonly ProofCheck[];
+    }
+  | {
+      ok: false;
+      state: 'half_settled';
+      reason: string;
+      /** The id the venue told the reader to quote while it reconciles. */
+      tradeId: string | null;
+    }
+  | { ok: false; state: 'failed'; reason: string };
 
 /**
  * Sell one invoice.
@@ -281,6 +329,7 @@ export async function sellInvoice(invoiceId: string, quoteId: string | null): Pr
   if (quoteId === null) {
     return {
       ok: false,
+      state: 'failed',
       reason:
         'The venue priced this invoice but did not hand back a reference for the price, and a sale has to name the exact quote the seller was shown. Nothing was sold.',
     };
@@ -291,16 +340,48 @@ export async function sellInvoice(invoiceId: string, quoteId: string | null): Pr
     if (result.status === 'payment_required') {
       return {
         ok: true,
-        state: 'payment_required',
-        note: 'The paper is held and the buyer has been asked to sign the cash leg. Neither leg settles unless both do; if the payment never arrives the hold expires and your position was never encumbered.',
+        state: 'awaiting_payment',
+        note: SETTLEMENT_STATE_SENTENCE.awaiting_payment,
+        challenge: result.challenge,
       };
     }
     return {
       ok: true,
       state: 'settled',
-      note: 'Settled. Delivery against payment, in one step, with nothing held back.',
+      note: SETTLEMENT_STATE_SENTENCE.settled,
     };
   } catch (error) {
-    return { ok: false, reason: describeFailure(error, 'this sale') };
+    /*
+     * A refusal before matching. The venue read the security's own ControlList and Kyc
+     * facets and this buyer may not hold it, so nothing was reserved, nothing was held and
+     * nothing moved. An AMM would have discovered this as a revert after the fact.
+     */
+    if (isComplianceRefusal(error)) {
+      const split = splitDetail(isApiError(error) ? error.detail : undefined);
+      return {
+        ok: false,
+        state: 'refused',
+        reason: split.sentence === '' ? describeFailure(error, 'this sale') : split.sentence,
+        code: split.code,
+        technical: split.technical,
+        checks: [],
+      };
+    }
+
+    /*
+     * The dangerous one. The cash leg settled and the asset leg did not, so the buyer has
+     * paid and does not hold the paper. The venue does not unwind it on purpose, and this
+     * screen must not imply that nothing happened.
+     */
+    if (isHalfSettled(error)) {
+      return {
+        ok: false,
+        state: 'half_settled',
+        reason: describeFailure(error, 'this sale'),
+        tradeId: halfSettledTradeId(error),
+      };
+    }
+
+    return { ok: false, state: 'failed', reason: describeFailure(error, 'this sale') };
   }
 }

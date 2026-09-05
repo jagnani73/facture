@@ -27,6 +27,16 @@ export interface PriceCellProps {
   tenorDays: number;
   /** Tightest standing bid that will take this invoice, or null for no bid. */
   bestRateBps: number | null;
+  /**
+   * The proceeds the venue itself quoted, where a venue quoted them.
+   *
+   * Preferred over re-deriving from `faceValue` and `bestRateBps` whenever the rate on
+   * screen is the rate the venue named. Both routes go through the same shared pricer and
+   * agree to the cent today, but a market with two opinions about its own price has one too
+   * many — so the venue's figure is the one rendered, and the local pricer is what draws the
+   * demo book's wobble between ticks.
+   */
+  quotedProceeds?: MinorUnits | undefined;
   takers: number;
   /** Why nobody is bidding, in one clause. Only read when `bestRateBps` is null. */
   noBidReason?: string | undefined;
@@ -39,6 +49,7 @@ export function PriceCell({
   faceValue,
   tenorDays,
   bestRateBps,
+  quotedProceeds,
   takers,
   noBidReason,
   size = 'row',
@@ -59,7 +70,10 @@ export function PriceCell({
   }
 
   const rateBps = Math.max(1, bestRateBps + driftBps(seed, tick));
-  const { proceeds } = priceInvoice(faceValue, rateBps, tenorDays);
+  const proceeds =
+    rateBps === bestRateBps && quotedProceeds !== undefined
+      ? quotedProceeds
+      : priceInvoice(faceValue, rateBps, tenorDays).proceeds;
 
   return (
     <LivePrice

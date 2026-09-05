@@ -10,6 +10,7 @@ import { formatDateShort, formatDueIn, formatMoney } from '@/lib/format';
 import type { InvoicePricing, Market } from '@/lib/data';
 import { isDemoBook } from '@/lib/data';
 import { useMarket } from '@/lib/data/hooks';
+import { isHalfSettledTrade } from '@/lib/settlement';
 import { curveFrom } from '@/lib/pricing';
 import { CurveStrip } from '@/components/curve-strip';
 import { PriceCell } from '@/components/price-cell';
@@ -113,17 +114,13 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
     .map((invoice) => {
       const pricing = market.pricingFor(invoice.id);
       const debtor = market.debtorFor(invoice);
-      const nearest = pricing.refusals[0];
-
       return {
         invoice,
         pricing,
         customer: debtor.name,
         settled: debtor.onTimeCount,
         issued: isIssued(invoice),
-        noBidReason: nearest
-          ? `Nearest bid: ${refusalShort(nearest.code)}`
-          : 'No standing bid reaches this invoice',
+        noBidReason: noBidReasonFor(pricing),
       };
     })
     .sort((a, b) => {
@@ -143,6 +140,13 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
         return true;
     }
   });
+
+  /*
+   * A trade whose cash leg settled and whose asset leg did not. It surfaces on the book
+   * rather than only on the invoice behind it, because the seller has been paid for paper
+   * that did not move and should not have to open a row to find that out.
+   */
+  const halfSettled = market.trades.filter(isHalfSettledTrade);
 
   const open = rows.filter((r) => OPEN.includes(r.invoice.status));
   const faceOpen = open.reduce((total, r) => total + r.invoice.faceValue, 0n);
@@ -177,6 +181,39 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
           </>
         }
       />
+
+      {halfSettled.length > 0 ? (
+        <Card className="border-2 border-neg/50 bg-neg-wash px-5 py-5" role="alert">
+          <Label className="mb-1">
+            {halfSettled.length === 1
+              ? 'One sale is half-settled'
+              : `${halfSettled.length} sales are half-settled`}
+          </Label>
+          <p className="max-w-3xl text-sm text-ink">
+            The payment settled and the security did not transfer. The money moved. These are being
+            reconciled by hand rather than unwound — releasing a hold against a payment that
+            actually happened would turn a recoverable state into a lost one.
+          </p>
+          <ul className="mt-3 space-y-1.5">
+            {halfSettled.map((trade) => {
+              const invoice = market.getInvoice(trade.invoiceId);
+              return (
+                <li key={trade.id} className="text-sm">
+                  <Link
+                    href={`/proof/${encodeURIComponent(trade.id)}`}
+                    className="text-accent underline underline-offset-2"
+                  >
+                    {invoice?.invoiceNumber ?? trade.invoiceId}
+                  </Link>
+                  <span className="num ml-2 text-xs text-muted" data-num>
+                    {formatMoney(trade.proceeds)} · quote {trade.id}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+      ) : null}
 
       <div className="grid gap-5 lg:grid-cols-[1fr_22rem]">
         <Card className="grid grid-cols-2 gap-px bg-rule sm:grid-cols-4">
@@ -306,6 +343,26 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
   );
 }
 
+/**
+ * Why there is no price, in one clause a table cell can hold.
+ *
+ * A row with no number is the thing this market exists to stop happening, so the cell says
+ * how many bids were screened and what they all said. When every mandate refused for the
+ * same reason — a customer rated `D`, which ranks below `UNRATED` on the shared scale, so
+ * even the widest bid on the book will not take it — that unanimity *is* the information,
+ * and reporting only the nearest miss would hide it.
+ */
+function noBidReasonFor(pricing: InvoicePricing): string {
+  const refusals = pricing.refusals;
+  const nearest = refusals[0];
+  if (!nearest) return 'No standing bid reaches this invoice';
+
+  const unanimous = refusals.every((receipt) => receipt.code === nearest.code);
+  return unanimous && refusals.length > 1
+    ? `All ${refusals.length} bids: ${refusalShort(nearest.code)}`
+    : `Nearest bid: ${refusalShort(nearest.code)}`;
+}
+
 function PriceRow({ row }: { row: Row }) {
   const { invoice, pricing, issued, noBidReason } = row;
 
@@ -335,6 +392,8 @@ function PriceRow({ row }: { row: Row }) {
       faceValue={invoice.faceValue}
       tenorDays={pricing.tenorDays}
       bestRateBps={pricing.quote?.annualisedYieldBps ?? null}
+      // The venue priced this row against the whole curve. Its number is the one shown.
+      quotedProceeds={pricing.quote?.proceeds}
       takers={pricing.matchCount}
       noBidReason={noBidReason}
       live={isDemoBook()}

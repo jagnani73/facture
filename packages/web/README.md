@@ -131,6 +131,7 @@ interface, and which one answers is decided in exactly one place:
 | `src/lib/data/fixture-source.ts` | The demo book, over the untouched `src/lib/fixtures.ts`.                                                                                       |
 | `src/lib/data/index.ts`          | The door. Reads, and the four things a person can actually do.                                                                                 |
 | `src/lib/data/hooks.ts`          | `useMarket`, `useConfirmation`, `useProof` — three states, never a fourth.                                                                     |
+| `src/lib/settlement.ts`          | Where a trade actually got to. Six states, derived from the legs first.                                                                        |
 
 Swapping back is one environment variable. See [`.env.example`](./.env.example).
 
@@ -146,6 +147,62 @@ double, exact only below 2^53, and a per-debtor exposure ladder passes that with
 wrong. `contract.ts` converts in both directions, and rejects a `number` where an amount belongs
 rather than coercing it — a `number` there means the convention was dropped, and accepting it
 quietly reintroduces exactly the silent corruption the convention exists to prevent.
+
+### The sale has five endings, and only one of them is a sale
+
+`POST /v1/trades` is one route carrying both halves of one x402 exchange, and it answers in
+five ways. Three of them were previously collapsed into "it worked" or "it failed", which
+made the screen claim things that had not happened. `SaleOutcome` in `src/lib/data/index.ts`
+names all five and `SellPanel` gives three of them their own panel.
+
+- **Settled.** Both legs. The only ending that is a sale, and the only one drawn in the
+  positive colour.
+- **402, `awaiting_payment`.** The paper is **held** on Hedera and the cash leg is unsigned.
+  Nothing has moved. The panel shows the challenge the other side was handed — scheme,
+  network, asset, amount, `payTo`, expiry — and says the amount is the settlement asset's
+  own smallest unit rather than the invoice's currency.
+- **403, `refused`.** The compliance refusal, checked against the security's own
+  `ControlList` and `Kyc` facets **before** matching. Nothing was reserved, nothing was held
+  and nothing moved. This is the product's distinguishing claim, so it is not styled as a
+  failure and does not use the word — see below.
+- **500 carrying "half-settled".** The payment settled and the security did not transfer.
+  **The money moved.** See below.
+- **Everything else, `failed`,** in words.
+
+### The refusal, and the trace inside it
+
+Against a live ATS security the venue's 403 detail is a sentence — _"Harrow Point is not
+permitted to hold this security by its control list."_ Against an instrument it cannot read,
+the same field arrives as `COMPLIANCE_PROBE_FAILED:` followed by a whole viem call trace —
+contract address, selector, ABI docs link, library version — inline, and then the closing
+sentence. All of it is true and none of it is the answer.
+
+`splitDetail` in `src/lib/api/problem.ts` lifts out any parenthesis containing a line break
+and reads a leading `SCREAMING_CODE:` as a label. The sentence stands on its own, the code
+becomes a chip, and the trace sits behind a disclosure. `explainApiError` uses the split
+sentence everywhere, so no screen can print a stack trace where a reason belongs.
+
+### The half-settled trade
+
+The cash leg settled and the asset leg did not. The venue answers 500 and deliberately does
+**not** unwind, because releasing a hold against a payment that actually happened turns a
+reconcilable state into a lost one. So this must never render as a generic failure, and it
+is the only thing in this package drawn in the negative colour with a `role="alert"`:
+
+- `/book` carries a banner naming every half-settled trade and the id to quote;
+- the invoice's own trade card is headed by what happened rather than by "Sold";
+- `/proof/[tradeId]` opens with it, names which leg moved, prints no settlement date, and
+  labels the failed leg's timestamp "Last consensus" rather than "Finalised".
+
+`settlementStateOf` derives this from the **leg states** rather than the venue's `status`,
+which is `failed` for a half-settled trade — true of the trade and misleading about the
+cash. The venue's own status is read where the legs do not answer, which is where it
+separates `preparing` from `awaiting_payment`.
+
+Two facts about the venue's data made this necessary rather than decorative: an invoice can
+carry many trades (`tradeForInvoice` prefers the settled one, then the most recent, so a
+failed attempt cannot render as "Sold"), and `settledAt` stays populated on a trade the
+venue later marks `failed` (so the proof view reads the legs, not the timestamp).
 
 ### Loading and failing
 
@@ -216,11 +273,28 @@ Worth confirming which number the root README should carry.
 
 ## What is not here yet
 
-- **Nothing has been run against the real service.** The client is written against the frozen zod
-  schemas and the renderers in `packages/backend/src/wire.ts`, and it has been exercised end to end
-  against a stand-in serving those exact shapes — not against the service with a database behind it.
-  Where the wire and the domain disagree on a name the mapping is spelled out in
-  `src/lib/api/contract.ts`, which is the only file that has to change if a shape moves.
+- **The cash leg is not always Arc, and the page no longer assumes it is.** This deployment
+  settles the cash leg in HBAR through the Blocky402 facilitator, so the venue answers
+  `chain: "hedera"` on network `hedera:testnet` — CAIP-2, with a **colon**. `readChainKey` in
+  `contract.ts` reconciles the wire's `hedera`/`arc` to shared's `hedera-testnet`/`arc-testnet`,
+  and the proof view reads the chain, its id and its explorer off that rather than hardcoding
+  ArcScan. An explorer link that 404s makes a worse claim than an absent one, and this is the
+  one screen whose whole job is being checkable somewhere that is not us.
+- **The x402 challenge shape is decoded, not passed through.** `PaymentRequirements` is
+  `{ scheme, network, asset, amount, payTo, maxTimeoutSeconds, extra }` — `amount`, **not**
+  `maxAmountRequired` — and `resource` / `description` / `mimeType` are a sibling `resource`
+  object on `PaymentRequired` rather than fields inside the requirements. The 402 body carries
+  both `accepts` and `resource`; the `payment-required` header carries a whole `PaymentRequired`
+  and is read as a cross-check. A body still sending `maxAmountRequired` is reported as
+  unreadable by that name rather than guessed at, because the old spelling fails at settle time
+  as an opaque rejection.
+- **Refusal receipts are collapsed.** The venue writes a receipt on every pricing pass, so an
+  invoice quoted repeatedly accumulates the identical refusal dozens of times. `apiProof`
+  collapses them to one row per mandate per reason with a count, which also removes a React
+  duplicate-key collision the raw list produced.
+- **Only a settled trade is a position.** A buyer's holdings are derived from
+  `GET /v1/trades?buyerId=…`, and an attempt that was unwound or half-settled is not paper the
+  desk holds — counting it inflated exposure and weighted yield.
 - **Selling needs a quote reference.** `POST /v1/trades` requires a `quoteId`, and only
   `GET /v1/invoices/:id/quote` mints one — the batched book listing does not. The client asks for it
   per quotable invoice. Without one the sale says so and does not proceed, rather than inventing
@@ -228,7 +302,10 @@ Worth confirming which number the root README should carry.
 - **No polling.** The quote route is described by the service as cheap and safe to poll, but the
   book reads once and offers a refresh. `driftBps` in `src/components/market-tick.ts` still makes
   the demo book's prices move; against a live venue it is switched off, because a wobble the venue
-  did not produce is a made-up price.
+  did not produce is a made-up price. `PriceCell` renders the venue's own `quote.proceeds`
+  whenever the rate on screen is the rate the venue named, and falls back to the local pricer only
+  where the demo book's wobble has moved off it — both go through the same shared pricer and agree
+  to the cent, but a market with two opinions about its own price has one too many.
 - **Buyer positions are derived from trades.** There is no positions route, so a buyer's holdings
   are `GET /v1/trades?buyerId=…` joined to the invoices behind them, and a holding whose invoice is
   not on this seller's book says the customer is not disclosed rather than guessing one.

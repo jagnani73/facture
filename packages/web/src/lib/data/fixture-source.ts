@@ -15,7 +15,7 @@
  */
 
 import { bestQuote } from '@/lib/domain';
-import { ASSET_CHAIN, CHAINS } from '@/lib/domain';
+import { ASSET_CHAIN, CASH_CHAIN, CHAINS } from '@/lib/domain';
 import type { Invoice } from '@/lib/domain';
 import { formatMoney } from '@/lib/format';
 import * as fixtures from '@/lib/fixtures';
@@ -134,6 +134,8 @@ export function fixtureProof(tradeId: string): ProofRecord | null {
       allowed: proof.compliance.decision === 'allowed',
       checkedAt: proof.compliance.checkedAt,
       checks: proof.compliance.checks,
+      // The demo book has no refused trade, so there is no failed check to name.
+      reason: null,
       hcsTopicId: proof.compliance.receiptTopicId,
       hcsSequenceNumber: String(proof.compliance.receiptSequence),
       hcsExplorerUrl: `${HEDERA.explorerUrl}/topic/${proof.compliance.receiptTopicId}`,
@@ -148,21 +150,26 @@ export function fixtureProof(tradeId: string): ProofRecord | null {
       explorerUrl: null,
     },
     cashLeg: {
+      // The demo book's cash leg is USDC on Arc, which is what its trades say.
+      chain: CASH_CHAIN,
       from: proof.cashLeg.from,
       to: proof.cashLeg.to,
       asset: proof.cashLeg.asset,
-      scheme: proof.settlement.protocol,
+      scheme: null,
       network: null,
       transaction: trade.cashLeg.reference ?? null,
       explorerUrl: null,
     },
     settlement: {
       protocol: proof.settlement.protocol,
+      scheme: null,
+      network: null,
       facilitator: proof.settlement.facilitator,
       challengeNonce: proof.settlement.challengeNonce,
       boundAt: proof.settlement.boundAt,
       note: proof.settlement.note,
     },
+    // The demo book's two trades both settled cleanly, so no funder was told no on them.
     refusals: [],
     invoiceNumber: invoice?.invoiceNumber ?? null,
     debtorName: invoice ? fixtures.debtorNameOf(invoice) : null,

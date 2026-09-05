@@ -20,9 +20,13 @@ import type {
   InvoiceRow,
   LiveQuoteResponse,
   Page,
+  TradeChallenge,
   TradeProofResponse,
+  TradeRecord,
+  TradeStatus,
 } from './contract';
 import {
+  decodePaymentRequiredHeader,
   readConfirmationPrompt,
   readHealth,
   readInvoice,
@@ -33,12 +37,13 @@ import {
   readObject,
   readPage,
   readTrade,
+  readTradeChallenge,
   readTradeProof,
   writeMoney,
 } from './contract';
 import type { Problem } from './problem';
 import { ApiError, SERVER_ERROR_CODES } from './problem';
-import type { Invoice, Mandate, Trade } from '@/lib/domain';
+import type { Invoice, Mandate } from '@/lib/domain';
 
 /* -------------------------------------------------------------------------- */
 /* Transport                                                                   */
@@ -190,7 +195,7 @@ export interface ExecuteTradeInput {
   maxSlippageBps?: number | undefined;
 }
 
-export type TradeStatus = 'preparing' | 'awaiting_payment' | 'settled' | 'unwound' | 'failed';
+export type { TradeStatus } from './contract';
 
 /* -------------------------------------------------------------------------- */
 /* The routes                                                                  */
@@ -464,15 +469,23 @@ export const api = {
   /**
    * `POST /v1/trades` — execute a sale.
    *
-   * The route answers 402 carrying `PAYMENT-REQUIRED` when the cash leg still has to be
-   * signed, which is a stage of delivery-versus-payment rather than a failure, so it is
-   * returned as a state and not thrown.
+   * One route, two halves of one x402 exchange. The first request arms the trade and comes
+   * back **402** carrying the challenge: the asset leg is held on Hedera, nothing has
+   * moved, and the cash leg is waiting for the buyer's signature in `PAYMENT-SIGNATURE`.
+   * That is a stage of delivery-versus-payment rather than a failure, so it is returned as
+   * a state and not thrown — and it is decoded, because a challenge nobody can read is a
+   * challenge nobody can sign.
+   *
+   * The `payment-required` header carries a whole `PaymentRequired` (v2), not a bare
+   * requirements object; the body carries the same `accepts` and `resource`, so the header
+   * is read as a cross-check and the body is the source.
    */
   executeTrade(
     input: ExecuteTradeInput,
     signal?: AbortSignal,
   ): Promise<
-    { status: 'settled'; trade: Trade } | { status: 'payment_required'; challenge: unknown }
+    | { status: 'settled'; trade: TradeRecord }
+    | { status: 'payment_required'; challenge: TradeChallenge }
   > {
     const url = `${API_V1}/trades`;
 
@@ -503,10 +516,35 @@ export const api = {
       }
 
       const text = await response.text();
-      const payload: unknown = text.trim() === '' ? undefined : JSON.parse(text);
+      let payload: unknown = undefined;
+      if (text.trim() !== '') {
+        try {
+          payload = JSON.parse(text);
+        } catch (cause) {
+          throw new ApiError({
+            code: 'unreadable',
+            status: response.status,
+            title: 'Unreadable response',
+            detail: 'the body is not JSON',
+            url,
+            what: 'this sale',
+            cause,
+          });
+        }
+      }
 
       if (response.status === 402) {
-        return { status: 'payment_required' as const, challenge: payload };
+        const challenge = readTradeChallenge(payload, 'the payment challenge');
+        // Same object, two carriers. Where the header decodes and the body did not name a
+        // resource, the header fills it in; a header that disagrees is not authoritative.
+        const header = decodePaymentRequiredHeader(response.headers.get('payment-required'));
+        return {
+          status: 'payment_required' as const,
+          challenge:
+            challenge.payment.resource === null && header?.resource
+              ? { ...challenge, payment: { ...challenge.payment, resource: header.resource } }
+              : challenge,
+        };
       }
       if (!response.ok) throw problemFrom(payload, response.status, url, 'this sale');
 
@@ -519,7 +557,7 @@ export const api = {
   listTrades(
     params: { sellerId?: string; buyerId?: string; status?: TradeStatus; limit?: number },
     signal?: AbortSignal,
-  ): Promise<Page<Trade>> {
+  ): Promise<Page<TradeRecord>> {
     return request(
       '/trades',
       {
@@ -537,7 +575,7 @@ export const api = {
   },
 
   /** `GET /v1/trades/:id`. */
-  getTrade(id: string, signal?: AbortSignal): Promise<Trade> {
+  getTrade(id: string, signal?: AbortSignal): Promise<TradeRecord> {
     return request(`/trades/${encodeURIComponent(id)}`, { what: 'that trade', signal }, (raw) => {
       const body = readObject(raw, 'trade');
       return readTrade(body['trade'] ?? body, 'trade');
