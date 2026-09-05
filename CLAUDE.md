@@ -794,17 +794,24 @@ never the promise. And writing a test found an **existing test passing vacuously
 `quote.body.mandateId`, which is undefined because the mandate is named on the quote itself,
 so it compared an absent mandate with itself.
 
-### Two more mechanisms nobody calls
+### Two more mechanisms nobody calls — one closed
 
-Found while mapping the settlement path, and neither is fixed:
+Found while mapping the settlement path. That makes eight and nine, and the pattern holds:
+look for the caller before trusting the mechanism.
 
-- **`trades.hcs_topic_id` / `hcs_sequence_number` have a reader and no runtime writer.**
-  `proof.ts` renders them into a HashScan link and only `seed.ts` ever sets them, so on every
-  live trade that block is null. `services/hcs.ts` publishes refusal receipts only; nothing
-  publishes the match itself.
-- **`reclaimPayout`**, above.
-
-That is eight and nine. The pattern holds: look for the caller before trusting the mechanism.
+- **`trades.hcs_topic_id` / `hcs_sequence_number` had a reader and no runtime writer.**
+  `proof.ts` rendered them into a HashScan link and only `seed.ts` ever set them, so on every
+  live trade that block was null. **Closed:** both rails now commit a settled match to the
+  same topic, as a digest and a trade id under `kind: 'facture.match'`. Its canonical form is
+  its own, not shared with refusals — one reordering would otherwise invalidate both — and
+  the field order is pinned in a test, because a digest anyone holds stops verifying the
+  moment it changes. `publishMatch` never throws: the sale has already happened and both legs
+  are checkable on chain, so an unavailable topic costs the coordinate, not the trade.
+- **`reclaimPayout` is still not wired**, and that is now a deliberate position rather than an
+  oversight. It returns a stranded payout's capital to the mandate, it is permissionless, and
+  the failure it recovers from should not happen. Automating it would mean the venue writing
+  to Arc on a timer for a case that needs judgement about whether the seller simply has not
+  claimed yet. **It is an operator action, and the code no longer claims otherwise.**
 
 ### The agent measures in the wrong unit, and checks the wrong pot
 
