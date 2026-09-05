@@ -430,7 +430,6 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
     consensusAt: string;
     gasUsed: number;
     returned: Uint8Array;
-    createdContract: string | null;
   }> {
     try {
       const response = await new ContractExecuteTransaction()
@@ -447,7 +446,6 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
         consensusAt: record.consensusTimestamp.toDate().toISOString(),
         gasUsed: result ? Number(result.gasUsed.toString()) : 0,
         returned: result?.bytes ?? new Uint8Array(),
-        createdContract: result?.contractId?.toString() ?? null,
       };
     } catch (err) {
       // Rethrown unchanged: the issuance queue classifies BUSY and friends as retryable by
@@ -547,7 +545,18 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
 
       const receipt = await submit(factoryId, calldata, `deployBond ${job.invoiceId}`);
       const evmAddress = decodeAddress(receipt.returned);
-      const securityId = receipt.createdContract ?? evmAddressToAccountId(evmAddress);
+
+      /*
+       * The security's id comes from the address the function RETURNED, never from
+       * `contractFunctionResult.contractId` — that is the contract which was *called*, so
+       * using it recorded the factory `0.0.9213391` as the instrument for every invoice.
+       * Silent, and wrong in a way that reads as plausible until two invoices claim the same
+       * security.
+       *
+       * ATS does not deploy to a long-zero address, so the number cannot be derived from the
+       * address arithmetically and the mirror node is the only thing that knows it.
+       */
+      const securityId = await resolveContractId(evmAddress);
 
       log.info('bond deployed', {
         invoiceId: job.invoiceId,
@@ -559,6 +568,7 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
       return {
         securityId,
         evmAddress,
+        isin: job.isin,
         transactionId: receipt.transactionId,
         gasUsed: receipt.gasUsed,
       };
@@ -708,20 +718,38 @@ function decodeHoldId(returned: Uint8Array): string {
 }
 
 /**
- * Fallback when the record carries no created-contract id. A long-zero EVM address encodes
- * the entity number directly, which is the only case where the conversion is exact —
- * anything else needs a mirror-node lookup and is reported as unknown rather than guessed.
+ * `0.0.x` for a contract that has just been created, by asking the mirror node.
+ *
+ * Retried, because the mirror node trails consensus by a second or two and this runs
+ * immediately after the deployment record comes back. Ten seconds is generous for that lag
+ * and short enough that a genuinely missing contract fails while the operator is still
+ * looking.
+ *
+ * Failing here is deliberate rather than falling back to something plausible. The bond does
+ * exist at this point — the gas is spent either way — but a security recorded under the wrong
+ * id is worse than one recorded as failed: the invoice would look tradeable and every hold
+ * against it would go to the wrong contract. The EVM address is in the log line above, so a
+ * failure is reconcilable by hand.
  */
-function evmAddressToAccountId(evmAddress: Address): string {
-  const body = evmAddress.slice(2).toLowerCase();
-  if (!body.startsWith('0'.repeat(24))) {
-    throw upstreamUnavailable(
-      'Hedera',
-      `Security deployed at ${evmAddress}, which is not a long-zero address; its 0.0.x id ` +
-        'must be read from the mirror node.',
-    );
+async function resolveContractId(evmAddress: Address): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 2_000));
+    try {
+      const response = await fetch(`${hedera.mirrorNodeUrl}/api/v1/contracts/${evmAddress}`);
+      if (!response.ok) continue;
+      const body: unknown = await response.json();
+      const id = (body as { contract_id?: unknown }).contract_id;
+      if (typeof id === 'string' && /^\d+\.\d+\.\d+$/.test(id)) return id;
+    } catch {
+      // Retry: an unreachable mirror node is not evidence the contract is absent.
+    }
   }
-  return `0.0.${BigInt(`0x${body.slice(24)}`).toString(10)}`;
+
+  throw upstreamUnavailable(
+    'Hedera',
+    `Deployed a security at ${evmAddress} but the mirror node did not resolve its 0.0.x id. ` +
+      'The bond exists and can be reconciled from that address.',
+  );
 }
 
 export const hederaNetworkName = (): string => hedera.network;

@@ -42,6 +42,14 @@ export interface DeployedSecurity {
   /** Native id of the deployed diamond, `0.0.x`. */
   securityId: string;
   evmAddress: `0x${string}`;
+  /**
+   * The ISIN the instrument was deployed with.
+   *
+   * Returned rather than assumed by the caller: the invoice row is what a proof view prints,
+   * and leaving it null while an instrument exists puts a security on screen with no
+   * identifier beside it. It is the job's own ISIN, carried back so the sink can write it.
+   */
+  isin: string;
   transactionId: string;
   gasUsed: number;
 }
@@ -327,6 +335,9 @@ export function createStoreIssuanceSink(): IssuanceSink {
           : {
               securityId: status.security.securityId,
               securityEvmAddress: status.security.evmAddress,
+              // Written here too: an instrument with no ISIN on its invoice is a security the
+              // proof view cannot identify.
+              isin: status.security.isin,
               issuanceTxId: status.security.transactionId,
             }),
       });
