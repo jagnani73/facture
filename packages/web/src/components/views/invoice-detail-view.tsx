@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 
 import type { Invoice } from '@/lib/domain';
-import { isIssued, isQuotable, priceInvoice, settledCount } from '@/lib/domain';
+import { isQuotable, priceInvoice, settledCount } from '@/lib/domain';
 import {
   formatDate,
   formatDateTime,
@@ -23,7 +23,7 @@ import { driftBps, useMarketTick } from '@/components/market-tick';
 import { PriceCell } from '@/components/price-cell';
 import { RatingChip, RatingWithRecord } from '@/components/rating-chip';
 import { RefusalNotice } from '@/components/refusal-notice';
-import { StatusPill, explainStatus } from '@/components/status-pill';
+import { issuanceDisplayOf, StatusPill, explainStatus } from '@/components/status-pill';
 import { Failure, Pending } from '@/components/ui/async';
 import { Button, Card, CardHead, Label, Row, buttonClasses } from '@/components/ui/primitives';
 
@@ -70,7 +70,7 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
   const pricing: InvoicePricing = market.pricingFor(invoice.id);
   const trade = market.tradeForInvoice(invoice.id);
   const token = market.tokenForInvoice(invoice.id);
-  const issued = isIssued(invoice);
+  const issuance = issuanceDisplayOf(invoice);
   const quotable = isQuotable(invoice);
 
   // The wobble is the demo book's stand-in for a curve that moves. Against a live venue
@@ -104,8 +104,8 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
             <Label className="mb-2">Invoice {invoice.invoiceNumber}</Label>
             <h1 className="text-3xl leading-tight">{market.debtorNameOf(invoice)}</h1>
             <p className="mt-2 flex flex-wrap items-center gap-3 text-sm text-muted">
-              <StatusPill status={invoice.status} issued={issued} size="md" />
-              <span>{explainStatus(invoice.status, issued)}</span>
+              <StatusPill status={invoice.status} issuance={issuance} size="md" />
+              <span>{explainStatus(invoice.status, issuance)}</span>
             </p>
           </div>
           <div className="text-right">
@@ -194,13 +194,40 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
             />
           ) : null}
 
-          {!issued ? (
+          {issuance === 'pending' ? (
             <Card className="px-5 py-6">
               <p className="text-sm text-muted">
                 This invoice is still being added to the book. Adding is paced deliberately, and
                 nothing waits on it — it becomes quotable the moment it lands, and you can close
                 this page.
               </p>
+            </Card>
+          ) : null}
+
+          {/*
+           * The case this screen used to have no words for. A failed issuance looked
+           * exactly like a paced one, so the page told a seller to close it and wait for
+           * something that was never going to happen. The reason is shown verbatim because
+           * it is the chain's own, and paraphrasing it would lose the only detail anyone
+           * could act on.
+           */}
+          {issuance === 'failed' ? (
+            <Card className="px-5 py-6">
+              <p className="text-sm text-neg">
+                This invoice could not be added to the book, and it will not keep trying on its own.
+                Until it is added it cannot be priced or sold.
+              </p>
+              {invoice.issuance?.error !== undefined ? (
+                <p className="mt-3 font-mono text-xs break-words text-muted">
+                  {invoice.issuance.error}
+                </p>
+              ) : null}
+              {invoice.issuance?.attempts !== undefined && invoice.issuance.attempts > 0 ? (
+                <p className="mt-2 text-xs text-faint">
+                  Tried {invoice.issuance.attempts}{' '}
+                  {invoice.issuance.attempts === 1 ? 'time' : 'times'}.
+                </p>
+              ) : null}
             </Card>
           ) : null}
 

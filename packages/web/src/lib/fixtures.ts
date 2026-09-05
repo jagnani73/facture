@@ -172,6 +172,11 @@ interface InvoiceSpec {
   status: InvoiceStatus;
   /** False while the instrument is still being issued — the book shows "being added". */
   issued?: boolean;
+  /**
+   * Why issuance stopped, if it did. Present means `failed`, which is a different thing
+   * from `issued: false` — one is paced and worth ignoring, the other needs a person.
+   */
+  issuanceError?: string;
 }
 
 const INVOICE_SPECS: readonly InvoiceSpec[] = [
@@ -281,6 +286,20 @@ const INVOICE_SPECS: readonly InvoiceSpec[] = [
     status: 'draft',
     issued: false,
   },
+  {
+    // Issuance that stopped. `onlyValidISIN` is a real ATS revert and the queue gives up on
+    // it rather than retrying, because a deterministic rejection does not become valid on
+    // the sixth attempt. Before the book could say this, the row read "being added" forever.
+    id: 'INV-2053',
+    invoiceNumber: 'MF-2053',
+    debtorId: 'DBT-ASHFIELD',
+    face: 15_400,
+    issuedOn: '2026-08-30',
+    dueOn: '2026-11-14',
+    status: 'draft',
+    issued: false,
+    issuanceError: 'CONTRACT_REVERT_EXECUTED: onlyValidISIN',
+  },
 
   // Closed, one way or another.
   {
@@ -339,11 +358,24 @@ function buildInvoice(spec: InvoiceSpec): Invoice {
     createdAt: at(spec.issuedOn),
   };
 
-  // Tokenisation happens at onboarding and is paced, so an invoice exists in the book
-  // before its instrument does. Nothing on the quoting path may assume otherwise.
-  if (spec.issued === false) return base;
+  /*
+   * Tokenisation happens at onboarding and is paced, so an invoice exists in the book
+   * before its instrument does. Nothing on the quoting path may assume otherwise.
+   *
+   * A failed issuance is NOT the same row with a longer wait. It carries the reason, and the
+   * book has to stop describing it as something still in progress.
+   */
+  if (spec.issuanceError !== undefined) {
+    return { ...base, issuance: { state: 'failed', attempts: 6, error: spec.issuanceError } };
+  }
+  if (spec.issued === false) return { ...base, issuance: { state: 'queued', attempts: 0 } };
 
-  return { ...base, instrumentAddress: addressFromHash(hash), isin: isinForInvoice(hash) };
+  return {
+    ...base,
+    instrumentAddress: addressFromHash(hash),
+    isin: isinForInvoice(hash),
+    issuance: { state: 'issued' },
+  };
 }
 
 export const invoices: readonly Invoice[] = INVOICE_SPECS.map(buildInvoice);

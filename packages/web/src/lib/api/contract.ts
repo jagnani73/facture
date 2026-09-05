@@ -35,6 +35,7 @@ import type {
   Currency,
   Debtor,
   Invoice,
+  InvoiceIssuance,
   InvoiceStatus,
   Mandate,
   MandateStatus,
@@ -53,6 +54,7 @@ import {
   CURRENCIES,
   formatMinorUnits,
   INVOICE_STATUSES,
+  ISSUANCE_STATES,
   MANDATE_STATUSES,
   RATINGS,
   REFUSAL_CODES,
@@ -220,8 +222,37 @@ export function readInvoice(raw: unknown, path = 'invoice'): Invoice {
     instrumentAddress: (instrument as `0x${string}` | null) ?? undefined,
     partition: (partition as `0x${string}` | null) ?? undefined,
     isin: readOptionalString(field(body, 'isin'), `${path}.isin`) ?? undefined,
+    issuance: readIssuance(field(body, 'issuance'), `${path}.issuance`),
     createdAt: readOptionalString(field(body, 'createdAt'), `${path}.createdAt`) ?? undefined,
     updatedAt: readOptionalString(field(body, 'updatedAt'), `${path}.updatedAt`) ?? undefined,
+  };
+}
+
+/**
+ * Tokenisation progress, which the book needs in order to stop describing a failed issuance
+ * as one that is still happening.
+ *
+ * Absent rather than guessed when the service does not send it. `undefined` reads as "not
+ * known", and the domain helpers treat that as pending rather than failed — inventing a
+ * state here would put a permanent error under an invoice on the strength of an older
+ * payload.
+ */
+function readIssuance(raw: unknown, path: string): InvoiceIssuance | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const body = readObject(raw, path);
+  const state = field(body, 'state');
+  if (state === undefined || state === null) return undefined;
+
+  const attempts = field(body, 'attempts');
+  return {
+    state: readEnum(state, `${path}.state`, ISSUANCE_STATES),
+    attempts:
+      attempts === undefined || attempts === null
+        ? undefined
+        : readNumber(attempts, `${path}.attempts`),
+    transactionId:
+      readOptionalString(field(body, 'transactionId'), `${path}.transactionId`) ?? undefined,
+    error: readOptionalString(field(body, 'error'), `${path}.error`) ?? undefined,
   };
 }
 

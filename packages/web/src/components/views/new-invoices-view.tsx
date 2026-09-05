@@ -362,7 +362,10 @@ function StagedList({ drafts, onClear }: { drafts: readonly Draft[]; onClear: ()
                 <span className="num text-sm" data-num>
                   {formatMoney(draft.amountMinor, { fractionDigits: 0 })}
                 </span>
-                <StatusPill status="draft" issued={submission.state === 'done'} />
+                <StatusPill
+                  status="draft"
+                  issuance={submission.state === 'done' ? 'issued' : 'pending'}
+                />
               </div>
             </div>
           ))}

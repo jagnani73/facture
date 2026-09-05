@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { useState } from 'react';
 
 import type { Invoice, InvoiceStatus } from '@/lib/domain';
-import { isIssued, isQuotable } from '@/lib/domain';
+import { isQuotable } from '@/lib/domain';
 import { formatDateShort, formatDueIn, formatMoney } from '@/lib/format';
 import type { InvoicePricing, Market } from '@/lib/data';
 import { isDemoBook } from '@/lib/data';
@@ -15,7 +15,8 @@ import { curveFrom } from '@/lib/pricing';
 import { CurveStrip } from '@/components/curve-strip';
 import { PriceCell } from '@/components/price-cell';
 import { RatingChip } from '@/components/rating-chip';
-import { StatusPill } from '@/components/status-pill';
+import type { IssuanceDisplay } from '@/components/status-pill';
+import { issuanceDisplayOf, StatusPill } from '@/components/status-pill';
 import { refusalShort } from '@/components/refusal-notice';
 import { Failure, Pending } from '@/components/ui/async';
 import { Card, Label, PageHeader, buttonClasses } from '@/components/ui/primitives';
@@ -70,7 +71,7 @@ interface Row {
   pricing: InvoicePricing;
   customer: string;
   settled: number;
-  issued: boolean;
+  issuance: IssuanceDisplay;
   noBidReason: string;
 }
 
@@ -119,7 +120,7 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
         pricing,
         customer: debtor.name,
         settled: debtor.onTimeCount,
-        issued: isIssued(invoice),
+        issuance: issuanceDisplayOf(invoice),
         noBidReason: noBidReasonFor(pricing),
       };
     })
@@ -317,7 +318,7 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
                       {formatMoney(row.invoice.faceValue, { fractionDigits: 0 })}
                     </Td>
                     <Td>
-                      <StatusPill status={row.invoice.status} issued={row.issued} />
+                      <StatusPill status={row.invoice.status} issuance={row.issuance} />
                     </Td>
                     <Td align="right">
                       <PriceRow row={row} />
@@ -364,9 +365,19 @@ function noBidReasonFor(pricing: InvoicePricing): string {
 }
 
 function PriceRow({ row }: { row: Row }) {
-  const { invoice, pricing, issued, noBidReason } = row;
+  const { invoice, pricing, issuance, noBidReason } = row;
 
-  if (!issued) return <span className="text-xs text-faint">Being added to the book</span>;
+  /*
+   * Two different things, and they used to be one. An invoice still being added is worth
+   * ignoring — nothing waits on it. An invoice that FAILED to be added is worth acting on,
+   * and saying "being added" under it is a promise the book cannot keep.
+   */
+  if (issuance === 'failed') {
+    return <span className="text-xs text-neg">Could not be added to the book</span>;
+  }
+  if (issuance === 'pending') {
+    return <span className="text-xs text-faint">Being added to the book</span>;
+  }
 
   if (!isQuotable(invoice)) {
     switch (invoice.status) {

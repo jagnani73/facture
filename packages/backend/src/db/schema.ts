@@ -33,7 +33,7 @@
  * `gen_random_uuid()` default becomes a Drizzle `$defaultFn` calling `randomUUID()`.
  */
 
-import type { InvoiceStatus, MandateStatus, Rating } from '@facture/shared';
+import type { InvoiceStatus, IssuanceState, MandateStatus, Rating } from '@facture/shared';
 import type { SettlementOutcome } from '../services/rating.js';
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
@@ -130,7 +130,9 @@ type _AssertMandateStatus = Expect<Drift<MandateStatus, (typeof MANDATE_STATUS)[
 type _AssertSettlementOutcome = Expect<
   Drift<SettlementOutcome, (typeof SETTLEMENT_OUTCOMES)[number]>
 >;
+type _AssertIssuanceState = Expect<Drift<IssuanceState, (typeof ISSUANCE_STATE)[number]>>;
 
+/** Members and order both mirror `ISSUANCE_STATES` in `@facture/shared`. */
 export const ISSUANCE_STATE = ['queued', 'issuing', 'issued', 'failed'] as const;
 
 export const REGULATION_TYPE = ['reg-d-506b', 'reg-d-506c', 'reg-s'] as const;

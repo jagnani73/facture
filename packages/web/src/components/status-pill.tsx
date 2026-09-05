@@ -1,4 +1,5 @@
-import type { InvoiceStatus } from '@/lib/domain';
+import type { Invoice, InvoiceStatus } from '@/lib/domain';
+import { isIssued, issuanceFailed } from '@/lib/domain';
 
 /**
  * The invoice state machine, in the seller's language.
@@ -10,9 +11,11 @@ import type { InvoiceStatus } from '@/lib/domain';
  * Grey until the customer confirms, then it has a price. That is the whole story the
  * colour is telling.
  *
- * Issuance is a separate axis. Tokenisation is paced, so an invoice can exist in the book
- * before its instrument does — `issued={false}` shows it as being added, whatever its
- * status, because that is the thing the seller can actually see happening.
+ * Issuance is a separate axis, and it has three states rather than two. Tokenisation is
+ * paced, so an invoice exists in the book before its instrument does and shows as being
+ * added whatever its status — that is the thing the seller can actually see happening. But
+ * issuance can also *fail*, and a failed one is not a slow one: nobody is coming, and the
+ * pill has to say so instead of pulsing indefinitely.
  */
 
 interface StatusMeta {
@@ -31,6 +34,19 @@ const BEING_ADDED: StatusMeta = {
   dot: 'bg-idle',
   chip: 'border-rule-strong bg-sunken text-muted',
   pulse: true,
+};
+
+/**
+ * Issuance stopped and will not resume. Deliberately in the negative palette rather than
+ * the idle one: this is not a slower version of being added, it is a thing that needs a
+ * person, and a pulsing grey chip would say the opposite.
+ */
+const COULD_NOT_ADD: StatusMeta = {
+  label: 'Could not add',
+  explain:
+    'Setting this invoice up on the ledger did not work, and it will not keep trying on its own. It cannot be priced or sold until it is added.',
+  dot: 'bg-neg',
+  chip: 'border-neg/45 bg-neg-wash text-neg',
 };
 
 const STATUS: Record<InvoiceStatus, StatusMeta> = {
@@ -87,25 +103,42 @@ const STATUS: Record<InvoiceStatus, StatusMeta> = {
   },
 };
 
-export function statusMeta(status: InvoiceStatus, issued = true): StatusMeta {
-  if (!issued) return BEING_ADDED;
+/**
+ * Where tokenisation has got to, as the pill needs to say it.
+ *
+ * Three states rather than a boolean, because `issued === false` covered two situations
+ * that want opposite things from a seller: one is worth ignoring, the other is worth acting
+ * on. A failed issuance read as "Being added" for as long as anyone cared to look.
+ */
+export type IssuanceDisplay = 'issued' | 'pending' | 'failed';
+
+/** The display state for one invoice, decided in a single place. */
+export const issuanceDisplayOf = (invoice: Invoice): IssuanceDisplay =>
+  issuanceFailed(invoice) ? 'failed' : isIssued(invoice) ? 'issued' : 'pending';
+
+export function statusMeta(
+  status: InvoiceStatus,
+  issuance: IssuanceDisplay = 'issued',
+): StatusMeta {
+  if (issuance === 'failed') return COULD_NOT_ADD;
+  if (issuance === 'pending') return BEING_ADDED;
   return STATUS[status];
 }
 
-export function explainStatus(status: InvoiceStatus, issued = true): string {
-  return statusMeta(status, issued).explain;
+export function explainStatus(status: InvoiceStatus, issuance: IssuanceDisplay = 'issued'): string {
+  return statusMeta(status, issuance).explain;
 }
 
 export function StatusPill({
   status,
-  issued = true,
+  issuance = 'issued',
   size = 'sm',
 }: {
   status: InvoiceStatus;
-  issued?: boolean | undefined;
+  issuance?: IssuanceDisplay | undefined;
   size?: 'sm' | 'md' | undefined;
 }) {
-  const meta = statusMeta(status, issued);
+  const meta = statusMeta(status, issuance);
   return (
     <span
       title={meta.explain}
