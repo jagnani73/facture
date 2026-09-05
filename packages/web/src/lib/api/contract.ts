@@ -314,6 +314,56 @@ export function readDebtor(raw: unknown, path = 'customer'): Debtor {
  * funded, not what it intends to fund — reading the ceiling here would make every quote on
  * the book look firmer than it is.
  */
+/**
+ * What the Arc vault actually holds behind a bid.
+ *
+ * Three states, not two, and the third is the one worth having. `deposited: null` with
+ * `checked: true` means the vault could not be read — which must not render as "nobody
+ * posted this", because that accuses a funded buyer of quoting on nothing. `backed` is
+ * deliberately not `deposited > 0`: a mandate counted as holding more than the vault does is
+ * an overclaim, and a partly-backed bid is not a funded one.
+ */
+export interface MandateEscrow {
+  checked: boolean;
+  deposited: MinorUnits | null;
+  backed: boolean;
+}
+
+/**
+ * A mandate as its owner's screen reads it.
+ *
+ * `escrow` and `operator` are absent on the fixture book, which has no vault behind it and
+ * carries its own hand-written metadata.
+ */
+export type MandateRecord = Mandate & {
+  escrow?: MandateEscrow;
+  operator?: 'agent' | 'desk';
+};
+
+export function readMandateEscrow(raw: unknown, path: string): MandateEscrow | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const body = readObject(raw, path);
+  return {
+    checked: field(body, 'checked') === true,
+    deposited: readOptionalMoney(field(body, 'deposited'), `${path}.deposited`),
+    backed: field(body, 'backed') === true,
+  };
+}
+
+export function readMandateRecord(raw: unknown, path = 'mandate'): MandateRecord {
+  const body = readObject(raw, path);
+  const escrow = readMandateEscrow(field(body, 'escrow'), `${path}.escrow`);
+  const rawOperator = readOptionalString(field(body, 'operator'), `${path}.operator`);
+  // Anything the screen has no rendering for is absent rather than guessed at.
+  const operator = rawOperator === 'agent' || rawOperator === 'desk' ? rawOperator : undefined;
+
+  return {
+    ...readMandate(raw, path),
+    ...(escrow === undefined ? {} : { escrow }),
+    ...(operator === undefined ? {} : { operator }),
+  };
+}
+
 export function readMandate(raw: unknown, path = 'mandate'): Mandate {
   const body = readObject(raw, path);
 

@@ -152,6 +152,70 @@ describe('funding with no vault configured', () => {
   });
 });
 
+describe('which bids are backed', () => {
+  const fund = async (id: string, amountMinor: string) =>
+    call(h.app, 'POST', `/v1/mandates/${id}/fund`, { body: { amountMinor, escrowRef: '0xref' } });
+
+  const mandates = async () =>
+    (
+      await call(h.app, 'GET', `/v1/mandates?buyerId=${h.seeded.buyerIds['BUY-ASHGROVE']}`)
+    ).body.mandates.filter((m: { escrow?: unknown }) => m.escrow !== undefined);
+
+  it('reports a fully deposited mandate as backed', async () => {
+    h = await createHarness({ arc: stubVault(5_000_000n) });
+    const id = await draftMandate();
+    await fund(id, '5000000');
+
+    const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
+    expect(mandate.escrow).toEqual({ checked: true, deposited: '5000000', backed: true });
+  });
+
+  /*
+   * The distinction the flag exists for. A seeded mandate counted as holding capital the
+   * vault never received is precisely the overclaim the funding check refuses, and it must
+   * not read as funded just because *some* capital is there.
+   */
+  it('does not call a partially deposited mandate backed', async () => {
+    h = await createHarness({ arc: stubVault(1_000_000n) });
+    const id = await draftMandate();
+    // Funded before the vault was consulted — how every seeded mandate got its balance.
+    await h.store.fundMandate({
+      mandateId: id,
+      amount: 5_000_000n,
+      escrowRef: 'escrow:seeded',
+      at: new Date(),
+    });
+
+    const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
+    expect(mandate.escrow.deposited).toBe('1000000');
+    expect(mandate.escrow.backed).toBe(false);
+  });
+
+  /* "We could not check" must never render as "nobody posted this". */
+  it('answers null rather than zero when the vault cannot be read', async () => {
+    h = await createHarness({
+      arc: {
+        enabled: true,
+        depositedFor: () => Promise.reject(new Error('rpc down')),
+        buyerOf: () => Promise.resolve(null),
+        registerMandate: () => Promise.resolve({ transactionHash: '0x' }),
+      },
+    });
+    const id = await draftMandate();
+
+    const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
+    expect(mandate.escrow).toEqual({ checked: true, deposited: null, backed: false });
+  });
+
+  it('says it did not check when no vault is configured', async () => {
+    h = await createHarness({ arc: createDisabledArcEscrow() });
+    const id = await draftMandate();
+
+    const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
+    expect(mandate.escrow).toEqual({ checked: false, deposited: null, backed: false });
+  });
+});
+
 describe('vaultMandateId', () => {
   /*
    * The vault keys capital by uint256 and the venue keys mandates by UUID, so this is the

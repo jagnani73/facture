@@ -383,6 +383,21 @@ describe('mandates', () => {
     expect(res.body.mandates).toHaveLength(3);
     expect(res.body.mandates.every((m: JsonBody) => m.quoting)).toBe(true);
   });
+
+  /*
+   * An agent is never dressed up as a person here — and, since the screen used to hardcode
+   * "desk", it must not be dressed down as one either. The venue knows which is which from
+   * the buyer's own policy, so it is the venue that says so.
+   */
+  it('says whether a desk is agent-run, from the buyer’s policy', async () => {
+    const desk = await call(h.app, 'GET', `/v1/mandates?buyerId=${buyerId()}`);
+    expect(desk.body.mandates.every((m: JsonBody) => m.operator === 'desk')).toBe(true);
+
+    const agentBuyer = h.seeded.buyerIds['BUY-HARROW'] ?? '';
+    const agent = await call(h.app, 'GET', `/v1/mandates?buyerId=${agentBuyer}`);
+    expect(agent.body.mandates.length).toBeGreaterThan(0);
+    expect(agent.body.mandates.every((m: JsonBody) => m.operator === 'agent')).toBe(true);
+  });
 });
 
 describe('POST /v1/trades — cross-chain DvP', () => {

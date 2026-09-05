@@ -114,13 +114,67 @@ mandateRoutes.get('/', async (c) => {
   });
   const exposure = await store.debtorExposure(rows.map((row) => row.id));
 
+  /*
+   * Who runs these bids. One read, because the route is scoped to one buyer.
+   *
+   * The screen used to hardcode "desk-run" in API mode, which quietly presented an
+   * agent-operated desk as a human one. That is the inverse of the overclaim the product
+   * warns about and still the screen saying something the venue knows to be false — an agent
+   * is never dressed up as a person here, and it must not be dressed down as one either.
+   */
+  const buyer = await store.getBuyer(query.buyerId);
+  const operator = buyer?.agentPolicy ? 'agent' : 'desk';
+
+  /*
+   * What the Arc vault actually holds behind each of these bids.
+   *
+   * One chain read per mandate, and that is allowed **here and nowhere else**. This is the
+   * buyer's own exposure screen — their handful of mandates, not the book — and the figure
+   * it exists to show is whether their capital is really posted. `GET /v1/invoices` prices
+   * the whole book in one pass precisely to avoid a read per row, and copying this into it
+   * would reintroduce exactly the N+1 that design is built to prevent.
+   *
+   * A vault that cannot be read answers `null` rather than zero. "Nobody posted this" and
+   * "we could not check" are different facts, and rendering the second as the first would
+   * accuse a funded buyer of quoting on nothing.
+   */
+  const escrow = getArcEscrow();
+  const deposits = new Map<string, bigint | null>();
+  if (escrow.enabled) {
+    await Promise.all(
+      rows.map(async (row) => {
+        try {
+          deposits.set(row.id, await escrow.depositedFor(row.id));
+        } catch {
+          deposits.set(row.id, null);
+        }
+      }),
+    );
+  }
+
   return c.json({
-    mandates: rows.map((row) => ({
-      ...wireMandate(row),
-      /** Only an active mandate quotes; `funding` is not yet firm. */
-      quoting: row.status === 'active',
-      debtorExposure: renderExposure(exposure.get(row.id) ?? {}),
-    })),
+    mandates: rows.map((row) => {
+      const deposited = deposits.get(row.id);
+      return {
+        ...wireMandate(row),
+        /** Only an active mandate quotes; `funding` is not yet firm. */
+        quoting: row.status === 'active',
+        operator,
+        debtorExposure: renderExposure(exposure.get(row.id) ?? {}),
+        /**
+         * Whether this bid is backed by capital anyone can verify, and how much.
+         *
+         * `backed` is deliberately not `deposited > 0`: a mandate counted as holding more
+         * than the vault does is exactly the overclaim the funding check refuses, and a
+         * partially-backed bid must not read as a funded one.
+         */
+        escrow: {
+          checked: escrow.enabled && deposited !== undefined,
+          deposited: deposited === undefined || deposited === null ? null : money(deposited),
+          backed: deposited !== undefined && deposited !== null && deposited >= row.fundedMinor,
+        },
+      };
+    }),
   });
 });
 

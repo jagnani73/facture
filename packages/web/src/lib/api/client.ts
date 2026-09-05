@@ -19,6 +19,7 @@ import type {
   InvoiceDetail,
   InvoiceRow,
   LiveQuoteResponse,
+  MandateRecord,
   Page,
   SellerSignIn,
   TradeChallenge,
@@ -35,6 +36,7 @@ import {
   readInvoiceRow,
   readLiveQuote,
   readMandate,
+  readMandateRecord,
   readObject,
   readPage,
   readSellerSignIn,
@@ -389,7 +391,7 @@ export const api = {
   listMandates(
     params: { buyerId: string; status?: MandateStatus; limit?: number },
     signal?: AbortSignal,
-  ): Promise<Page<Mandate>> {
+  ): Promise<Page<MandateRecord>> {
     return request(
       '/mandates',
       {
@@ -397,7 +399,9 @@ export const api = {
         query: { buyerId: params.buyerId, status: params.status, limit: params.limit ?? 200 },
         signal,
       },
-      (raw) => readPage(raw, 'mandates', readMandate, 'mandates'),
+      // The record, not the bare mandate: this route is the only one that says whether a
+      // bid's capital is actually posted, and dropping that here would lose it silently.
+      (raw) => readPage(raw, 'mandates', readMandateRecord, 'mandates'),
     );
   },
 

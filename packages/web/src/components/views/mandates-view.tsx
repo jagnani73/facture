@@ -195,6 +195,13 @@ function Mandates({ market }: { market: Market }) {
                       <p className="truncate text-sm">{meta.name}</p>
                       <p className="mt-0.5 flex items-center gap-2 text-xs text-muted">
                         <span className="truncate">{meta.ownerName}</span>
+                        {/*
+                          No escrow badge here, deliberately. This card's own hint says bids
+                          are public and what stands behind them is not, and whether a rival
+                          has posted capital is exactly that. The venue does not send it
+                          either — `/v1/mandates` is scoped to one buyer — so this is the
+                          principle and the plumbing agreeing rather than only the plumbing.
+                        */}
                         <OperatorBadge operator={meta.operator} />
                       </p>
                     </div>

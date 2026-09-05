@@ -13,6 +13,7 @@
  * swapping back a one-line change in `src/lib/api/config.ts`.
  */
 
+import type { MandateRecord } from '@/lib/api/contract';
 import type {
   ChainKey,
   Debtor,
@@ -99,7 +100,7 @@ export interface Market {
   readonly viewer: Party;
   readonly invoices: readonly Invoice[];
   readonly debtors: readonly Debtor[];
-  readonly mandates: readonly Mandate[];
+  readonly mandates: readonly MandateRecord[];
   readonly positions: readonly Position[];
   readonly trades: readonly TradeRecord[];
   readonly notices: readonly string[];
@@ -166,13 +167,18 @@ const UNKNOWN_DEBTOR: Debtor = {
  * the policy restated: "A or better, 60 days". That is not a placeholder — it is the only
  * honest name for a standing bid the screen has never been told the name of.
  */
-export function derivedMeta(mandate: Mandate): MandateMeta {
+export function derivedMeta(mandate: MandateRecord): MandateMeta {
   const floor =
     mandate.minRating === 'UNRATED' ? 'No default on record' : `${mandate.minRating} or better`;
   return {
     name: `${floor}, ${mandate.maxTenorDays} days`,
     ownerName: 'This desk',
-    operator: 'desk',
+    /*
+     * The venue's answer, not an assumption. This was hardcoded to `desk`, which presented
+     * an agent-operated desk as a human one — and the product's claim is that an agent is
+     * shown as exactly what it is, in both directions.
+     */
+    operator: mandate.operator ?? 'desk',
   };
 }
 

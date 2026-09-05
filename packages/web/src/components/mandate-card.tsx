@@ -1,5 +1,6 @@
 import Link from 'next/link';
 
+import type { MandateEscrow, MandateRecord } from '@/lib/api/contract';
 import type { Mandate } from '@/lib/domain';
 import { unallocated } from '@/lib/domain';
 import { formatMoney, formatMoneyCompact, formatRate } from '@/lib/format';
@@ -51,8 +52,39 @@ export function OperatorBadge({ operator }: { operator: MandateMeta['operator'] 
   );
 }
 
+/**
+ * Whether this bid's capital is posted where anyone can check it.
+ *
+ * Renders nothing when the venue did not say — the fixture book has no vault behind it, and
+ * an absent answer is not a negative one. `Unverified` is reserved for a vault that was
+ * actually consulted and did not hold the capital this mandate claims, which is a different
+ * statement and a much stronger one.
+ */
+export function EscrowBadge({ escrow }: { escrow: MandateEscrow | undefined }) {
+  if (!escrow?.checked) return null;
+
+  const backed = escrow.backed;
+  return (
+    <span
+      title={
+        backed
+          ? `Backed by ${formatMoney(escrow.deposited ?? 0n)} held in the Arc vault. Anyone can read that balance on chain; it is not our word for it.`
+          : escrow.deposited === null
+            ? 'The Arc vault could not be read just now, so this bid is unconfirmed rather than unbacked.'
+            : `The Arc vault holds ${formatMoney(escrow.deposited)} against this bid, which is less than it is counted as holding.`
+      }
+      className={[
+        'label-micro inline-flex h-5 items-center rounded-xs border px-1.5',
+        backed ? 'border-pos/45 bg-pos-wash text-pos' : 'border-rule-strong bg-sunken text-muted',
+      ].join(' ')}
+    >
+      {backed ? 'Escrowed on Arc' : escrow.deposited === null ? 'Unconfirmed' : 'Not escrowed'}
+    </span>
+  );
+}
+
 export interface MandateCardProps {
-  mandate: Mandate;
+  mandate: MandateRecord;
   meta: MandateMeta;
   positions: readonly Position[];
   /** Optional: mandates have no detail route of their own yet. */
@@ -81,6 +113,7 @@ export function MandateCard({ mandate, meta, positions, href }: MandateCardProps
           <p className="mt-1 flex items-center gap-2 text-xs text-muted">
             <span className="truncate">{meta.ownerName}</span>
             <OperatorBadge operator={meta.operator} />
+            <EscrowBadge escrow={mandate.escrow} />
           </p>
         </div>
 
