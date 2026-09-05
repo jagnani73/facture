@@ -78,6 +78,16 @@ export const envSchema = z
     HCS_REFUSAL_TOPIC_ID: ACCOUNT_ID.optional(),
 
     /**
+     * `UniquenessRegistry` on Hedera. Unset leaves one-receivable-one-instrument enforced by
+     * this database's unique index alone — which stops this venue listing a receivable twice
+     * and says nothing about it being financed somewhere else. See `services/uniqueness.ts`.
+     */
+    HEDERA_UNIQUENESS_REGISTRY_ADDRESS: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/)
+      .optional(),
+
+    /**
      * Privy, for seller sign-in. Unset disables the route rather than letting it accept an
      * unverified email — see `services/privy.ts`.
      *

@@ -20,6 +20,7 @@ import type { Logger } from '../logger.js';
 import { isinForInvoice } from '@facture/shared';
 import { rootLogger } from '../logger.js';
 import { getAtsAdapter } from './ats.js';
+import { getUniquenessRegistry } from './uniqueness.js';
 
 export type IssuanceState = 'queued' | 'issuing' | 'issued' | 'failed';
 
@@ -349,6 +350,35 @@ export function createStoreIssuanceSink(): IssuanceSink {
               issuanceTxId: status.security.transactionId,
             }),
       });
+
+      /*
+       * Bind the receivable to the instrument on chain, now that there is an instrument to
+       * bind it to. This cannot happen at listing: `claim` takes the security's address, and
+       * before `deployBond` there is none.
+       *
+       * Deliberately after the row is written and deliberately unable to fail the issuance. A
+       * registry that will not accept the claim leaves the venue exactly where it was — its
+       * own unique index — and turning that into a failed issuance would mean a seller's
+       * invoice is unlistable because a second, additive protection was unavailable. The
+       * claim is retried by nothing today; a receivable that missed it is protected within
+       * this venue and unprotected across venues, which is the honest description.
+       */
+      if (status.state === 'issued' && status.security !== null) {
+        const invoice = await store.getInvoice(status.invoiceId);
+        const registry = getUniquenessRegistry();
+
+        if (registry.enabled && invoice !== null) {
+          try {
+            await registry.claim(invoice.uniquenessHash, status.security.evmAddress);
+          } catch (err) {
+            rootLogger.warn('receivable issued but not claimed on chain', {
+              invoiceId: status.invoiceId,
+              uniquenessHash: invoice.uniquenessHash,
+              err,
+            });
+          }
+        }
+      }
     },
   };
 }

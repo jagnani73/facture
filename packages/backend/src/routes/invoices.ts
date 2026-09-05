@@ -26,7 +26,8 @@ import { z } from 'zod';
 import { getConfig } from '../config.js';
 import type { InvoiceRow, SellerRow } from '../db/schema.js';
 import { getStore } from '../db/store.js';
-import { badRequest, conflict, notFound } from '../errors.js';
+import { claimedByAnother, getUniquenessRegistry } from '../services/uniqueness.js';
+import { badRequest, conflict, duplicateReceivable, notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
 import {
   confirmationLink,
@@ -118,6 +119,22 @@ invoiceRoutes.post('/', async (c) => {
    * letting one invoice acquire two instruments.
    */
   const isin = isinForInvoice(hash);
+
+  /*
+   * Ask the chain before the database. The unique index below stops **this** venue listing a
+   * receivable twice; it says nothing about the same invoice being financed somewhere else,
+   * which is the fraud as it actually happens — the second financier is a different company,
+   * not a second row in the first one's table. `UniquenessRegistry` is append-only, so a
+   * non-zero answer here is a permanent public claim by someone.
+   *
+   * An unreachable registry does not block listing: the venue falls back to the guarantee it
+   * has always had. That is a real reduction in strength, which is why it is `checked: false`
+   * rather than a clean answer — see `services/uniqueness.ts`.
+   */
+  const claimed = await getUniquenessRegistry().lookup(hash);
+  if (claimedByAnother(claimed, null)) {
+    throw duplicateReceivable(hash);
+  }
 
   const row = await store.insertInvoice({
     sellerId: seller.id,

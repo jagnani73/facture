@@ -37,6 +37,11 @@ import {
   type HcsPublisher,
 } from '../src/services/hcs.js';
 import {
+  createDisabledUniquenessRegistry,
+  setUniquenessRegistry,
+  type UniquenessRegistry,
+} from '../src/services/uniqueness.js';
+import {
   setPrivyVerifier,
   type PrivyVerifier,
   type VerifiedSeller,
@@ -325,6 +330,8 @@ export interface HarnessOptions {
   arc?: ArcEscrow;
   /** Absent means no topic: refusals are recorded without a consensus copy. */
   hcs?: HcsPublisher;
+  /** Absent means no registry: uniqueness is the database's index alone, as today. */
+  uniqueness?: UniquenessRegistry;
 }
 
 /** What the stub verifier attests to when a test does not say otherwise. */
@@ -377,6 +384,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
   setPrivyVerifier(options.privy ?? stubPrivy());
   setArcEscrow(options.arc ?? createDisabledArcEscrow());
   setHcsPublisher(options.hcs ?? createDisabledHcsPublisher());
+  setUniquenessRegistry(options.uniqueness ?? createDisabledUniquenessRegistry());
   setNotifier(silentNotifier);
 
   initIssuanceQueue({ minIntervalMs: 0, maxAttempts: 3, backoffBaseMs: 1 });
@@ -417,6 +425,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
       setPrivyVerifier(undefined);
       setArcEscrow(undefined);
       setHcsPublisher(undefined);
+      setUniquenessRegistry(undefined);
       resetConfig();
     },
   };
