@@ -125,6 +125,67 @@ the seller 30,764,363 tinybars, which is the venue's cost rather than the buyer'
 Position afterwards, read from the security: seller `0`, buyer `12,459,995`. The seller sold
 out, which is what an all-or-nothing exit means.
 
+## First matured receivable — 2026-09-02
+
+MF-2046 matured and its holder was paid par, on chain. This is the leg the README calls
+load-bearing: without it the paper cannot legitimately change hands, because a second buyer
+would have no way to be paid.
+
+It ran in two acts, deliberately.
+
+**Maturity created an obligation, not a payment.** `POST /v1/invoices/:id/mature` wrote the
+settlement outcome, released the mandate's capital and created a Hedera Scheduled
+Transaction paying face value to whoever held the paper. The schedule sat on the ledger
+unsigned — one signature, the operator's on the `ScheduleCreate`, which does not satisfy a
+transfer debiting a different account. The cash leg reported `pending`, correctly.
+
+**Signing it was the payment.** The collection key signed, the schedule executed, and the
+holder was credited.
+
+|                   |                                                              |
+| ----------------- | ------------------------------------------------------------ |
+| invoice           | MF-2046, face $62,300, holder Harrow Point                   |
+| holder account    | `0.0.10314099`                                               |
+| schedule          | `0.0.10331573`                                               |
+| `ScheduleCreate`  | `0.0.10311549@1788337866.334186498`                          |
+| `ScheduleSign`    | `0.0.10331559@1788337932.208192528`                          |
+| executed at       | `1788337936.807617267`                                       |
+| executed transfer | `0.0.10311549@1788337866.334186498` (`scheduled: true`)      |
+| amount            | 6,230,000 tinybars — the face value under the declared scale |
+
+Balances either side of the signature, read from the mirror node:
+
+| account                   | before        | after         | delta      |
+| ------------------------- | ------------- | ------------- | ---------- |
+| collection `0.0.10331559` | 500,000,000   | 492,283,899   | -7,716,101 |
+| holder `0.0.10314099`     | 4,827,974,750 | 4,834,204,750 | +6,230,000 |
+
+The holder received exactly the face value. The collection account paid that plus 1,486,101
+tinybars of fees, which is the venue's cost and not the holder's.
+
+### The collection account
+
+| field       | value                                        |
+| ----------- | -------------------------------------------- |
+| account     | `0.0.10331559`                               |
+| EVM address | `0x54027f5e33f9ea9fb4f3ee7e1ce77b1908b7e9bf` |
+| key         | ECDSA, held in `facture-prep`, never in git  |
+| created by  | `0.0.10311549`, 5 HBAR                       |
+
+It exists because it must not be the operator. A `ScheduleCreateTransaction` executes the
+moment its required signatures are present and the operator signs the create, so a payout
+drawn on the operator would fire on the spot — reporting the debtor as having paid at the
+instant the receivable matured. Keeping the payer separate is what lets the obligation sit
+unsigned.
+
+### Idempotency, tested by accident
+
+Maturity was called **four times** on MF-2046 while the read-back was being built. The
+ledger records exactly one `on_time` outcome, the mandate's `allocated_minor` returned to
+zero once, Petra Foods Group's on-time count moved from 5 to 6 rather than to 9, and one
+schedule exists rather than four. The stored `trades.maturity_schedule_id` is what stops the
+second call arranging a second claim on the same face value.
+
 ## Debris on MF-2046
 
 Five settlement attempts were abandoned during debugging on 2026-09-01 before the trade above

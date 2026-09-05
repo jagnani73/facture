@@ -284,8 +284,19 @@ against it when the money is actually there.
   and are not collapsed.
 - **HBAR only, and no expiration time is set.** An HTS payout owes the holder an association step
   that does not exist yet, and long-term scheduled transactions are network-gated — the default
-  schedule lifetime applies. Both are stated in `services/schedule.ts`. **Untested against
-  testnet**: no schedule has been created for real yet.
+  schedule lifetime applies. Both are stated in `services/schedule.ts`.
+- **Whether the holder was paid is asked, never remembered.** `payoutStatus` reads the schedule
+  off the mirror node on every call, and both sides of the transfer come from the executed
+  transaction rather than from configuration or the buyer row — a buyer's Hedera account is on
+  file in either of its two forms. There is no "paid" flag this service could be wrong about.
+
+**This has run for real (2026-09-02).** MF-2046 matured, schedule `0.0.10331573` sat unsigned, the
+collection key signed it, and `0.0.10314099` was credited exactly 6,230,000 tinybars. The
+collection account is `0.0.10331559`, created precisely because it must not be the operator. Full
+record in [docs/deployments.md](./docs/deployments.md).
+
+Maturity was called four times during that work, and the ledger carries one outcome, one capital
+release, one rating tick and one schedule. Idempotency is not theoretical here.
 
 ## Cut list
 
