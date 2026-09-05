@@ -10,10 +10,16 @@
 
 ---
 
-> **Status: pre-build.** Nothing is deployed. There are no contract addresses, no demo, and no CI.
-> This README is the design as it stood going into [ETHOnline 2026](https://ethglobal.com/events/ethonline2026),
-> and it will be rewritten as things land. Sections describing behaviour are describing intent, not
-> something you can go and use.
+> **Status: running on testnet.** The five moves below have each happened on chain, once, for
+> real. A receivable was issued as an ATS zero-coupon bond, priced off a standing mandate,
+> checked against the security's own control list, settled delivery-versus-payment across two
+> chains, and matured — paying its holder par. Addresses, transaction ids and balances either
+> side of each of those are in [docs/deployments.md](./docs/deployments.md), which is written
+> so that every claim on this page can be checked somewhere that is not us.
+>
+> What that does **not** mean: this is a hackathon build on Hedera and Arc testnets, with a
+> seeded demo book behind it. Where a section describes behaviour the build does not have yet,
+> it says so in place rather than leaving you to find out.
 
 Factoring is bond pricing done over the phone. A business that is owed money and needs it now calls
 a factor, the factor prices the paper privately, and the business takes 2&ndash;5% off the face value
@@ -99,7 +105,9 @@ an exposure ceiling, which is how money-market desks have always quoted short pa
 priced by reading the curve where it sits.
 
 A quote is only worth something if it is firm, which means the capital behind a bid has to be
-committed rather than merely permitted. This is unresolved &mdash; see below.
+committed rather than merely permitted. Funding is what does that, and a mandate can only match up
+to its unallocated balance &mdash; so overcommitment has a structural answer rather than a patch.
+See _Buyers do not browse_ below.
 
 ### Match
 
@@ -126,12 +134,24 @@ receivable. DvP means it never has to.
 
 ### Mature
 
-The debtor pays and scheduled settlement routes to whoever holds the token **now**, not whoever
-bought it first.
+The debtor pays and settlement routes to whoever holds the token **now**, not whoever bought it
+first.
 
 This is not a lifecycle nicety. Without it the paper cannot legitimately change hands, because a
 second buyer would have no way to be paid &mdash; so it is load-bearing for the claim that this is a
 secondary market at all.
+
+The mechanism follows from something already decided elsewhere on this page: **the debtor has no
+wallet**, because confirmation is a link with one sentence and two buttons and a key to manage would
+undo that. So the payout cannot be a transfer the debtor signs. It is drawn instead on a collection
+account the venue operates, which is how a factoring house already collects and disburses.
+
+Maturity therefore produces an **obligation, not a payment**. It writes a Hedera Scheduled
+Transaction paying face value to the current holder, and leaves it unsigned on the ledger where that
+holder can read it. Signing it is a separate act &mdash; the venue's statement that the debtor's
+money actually arrived &mdash; and only then does the cash leg become a receipt. The venue cannot
+quietly collapse the two, because the account being debited is deliberately not the one that creates
+the schedule.
 
 ## One book, two lives
 
