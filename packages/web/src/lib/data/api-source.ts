@@ -279,7 +279,13 @@ function collapseRefusals(refusals: TradeProofResponse['refusals']): ProofRecord
   const byReason = new Map<string, ProofRecord['refusals'][number] & { times: number }>();
 
   for (const refusal of refusals) {
-    const key = `${refusal.mandateId} ${refusal.reasonCode} ${refusal.reasonText}`;
+    /*
+     * A separator that cannot occur inside any of the three operands, written as an
+     * escape. The same byte typed literally is what made this file read as binary to
+     * grep, `file` and every diff tool - an invisible character is a poor trade for a
+     * source file nothing can search.
+     */
+    const key = `${refusal.mandateId}\0${refusal.reasonCode}\0${refusal.reasonText}`;
     const seen = byReason.get(key);
     if (seen) {
       seen.times += 1;
