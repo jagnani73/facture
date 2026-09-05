@@ -53,19 +53,22 @@ repo in `facture-prep/BLOCKERS.md`.
 
 1. **Gas / per-invoice model.** Resolved — see the architecture decision above. No transaction
    needed; the answer was already in the deployed factory's history.
-2. **Arc "Launch on Mainnet" track eligibility. Researched 2026-09-02; still unresolved, and
-   the $5,000 is NOT to be counted.** The Continuity-only badge is genuinely absent from that
-   track — verified by counting the badge string across the whole prizes page, where it appears
-   on six other tracks and on none of Arc's three. One new piece of evidence cuts the other way
-   from the copy: the qualification requirements scope the Sept-30 mainnet bar explicitly "for
-   the Continuity Track", which is only meaningful if a non-Continuity path to the same prize
-   exists. But every "What We're Looking For" bullet still describes extending a live product,
-   so even a technically eligible from-scratch entrant would be judged against criteria written
-   for someone else. **There is no precedent**: this track format appears at neither HackMoney
-   2026 nor Cannes 2026, where Arc ran ordinary open build tracks. Ask Circle in the ETHGlobal
-   Discord sponsor channel; the question is drafted in `facture-prep/partner-research.md` §4.
-   Note Mand(ate), the prior art the README names, won an Arc track at HackMoney as a
-   from-scratch project — so from-scratch entrants are not categorically excluded by Arc.
+2. **Arc "Launch on Mainnet" track eligibility. RESOLVED 2026-09-02 — Circle confirmed a
+   from-scratch entrant is eligible.** The $5,000 track is open to this project. Do not
+   relitigate it from the page copy, which is what made it look closed: every "What We're
+   Looking For" bullet describes extending a live product, and only the absent Continuity-only
+   badge and a requirements clause scoping the Sept-30 mainnet bar explicitly "for the
+   Continuity Track" pointed the other way. The copy is written for one kind of entrant and
+   the eligibility is wider than the copy; Circle is the authority on that and has answered.
+
+   Two things that were true before the answer still are. **Arc's public mainnet lands
+   Sept 16, after submissions close**, so nothing in this project may depend on it — whatever
+   "push to mainnet" is judged on, it cannot be a mainnet transaction made before the
+   deadline. And the Arc leg here is deployed and idle: `MandateVault` and the payment-side
+   `DvpEscrow` are live on testnet and the Hedera book records the vault and chain id as
+   construction-time immutables, but **no USDC has crossed that link yet**. That gap is the
+   thing worth closing for this track, not the eligibility question.
+
 3. **Blocky402 facilitator.** `GET /supported` returns 200 and advertises `hedera:testnet` under
    x402 v2, scheme `exact`. Fee payer `0.0.7162784` is ECDSA and holds ~290,667 HBAR, so funding
    is not the risk. Read `extra.feePayer` at runtime, never hardcode it. **It remains a single
@@ -491,30 +494,57 @@ Two things this surfaced, neither fixed:
   viem `Address`. Harmless today — only `isIssued` reads it — and wrong the moment anything
   builds an EVM explorer link from it.
 
-### Open: Privy as the third partner integration
+### Resolved: Privy is onboarding, and only onboarding
 
-Researched 2026-09-02, **not decided**. Privy is an ETHOnline sponsor at $5,000, though its
-prize page still says "Prize details coming soon".
+**Decided and built 2026-09-02.** Privy signs a seller in by email and the wallet it makes is
+recorded against the business. It touches nothing in the settlement path, and that boundary is
+the decision — not a phase one.
 
-The reason to consider it is product, not badge. `schema.ts` already carries nullable
-`hederaAccountId` / `arcAddress` on `sellers` and `buyers`, with the comment _"May be a wallet
-made from an email address; the seller never needs to know."_ **Nothing populates them** — there
-is no seller/buyer auth anywhere in the repo. So this is greenfield work filling a seam that was
-deliberately left, not a replacement of anything running.
+`schema.ts` had carried nullable `hederaAccountId` / `arcAddress` on `sellers` since the first
+migration, with the comment _"May be a wallet made from an email address; the seller never needs
+to know."_ Nothing populated them and there was no seller auth anywhere. So this filled a seam
+that had been deliberately left, rather than replacing anything running.
 
-- **It is not whitelist-gated the way we feared.** Privy takes any EVM chain by
-  `defineChain` + custom RPC, so Hedera 296 and Arc 5042002 fit structurally, and its
-  `chain_type: 'ethereum'` wallets are **secp256k1**, which satisfies the ECDSA constraint.
-  Neither chain is named or tested by Privy, and no prior art for Privy+Hedera exists anywhere.
-- **It cannot sign native Hedera transactions** — `ScheduleSign`, `ContractExecuteTransaction`.
-  Its interface is EVM-shaped only. That is survivable because the operator signs those, and the
-  one thing a buyer's own key must sign is the x402 payload, which is `signTypedData`-shaped.
+- **The provider is mounted in the `(app)` group, never the root layout.** `/confirm/[token]`
+  sits outside that group because a debtor confirms with no wallet and no signup, and that is
+  load-bearing: give a customer a key to manage and the behavioural argument collapses. The
+  placement is what keeps auth away from them. Verified — the confirm page renders no sign-in
+  and no Privy iframe.
+- **`POST /v1/sellers` is idempotent on email because a login is only half a sign-in.** Privy
+  answers who a person is; only the venue can mint the UUID its routes are scoped by. Nothing
+  caches that id — it is recovered by asking again.
+- **No chains are declared to Privy, deliberately.** An EVM address is derived from the key, so
+  it is the same address everywhere, and the address is all this uses.
+
+**The correction that decided the scope.** The earlier note here said the one thing a user key
+must sign is the x402 payload, "which is `signTypedData`-shaped". **That is wrong.**
+`@x402/hedera`'s `ClientHederaSigner` builds and signs a **native Hedera `TransferTransaction`**
+serialised to base64, and the facilitator verifies it against the payer's on-chain account key
+from the mirror node. It is a protobuf body, not EIP-712 and not `eth_sendTransaction`, so a
+Privy signer cannot produce it directly. A custom signer over Privy's raw-hash signing might,
+but `personal_sign` prefixes EIP-191 and `signTypedData` is EIP-712 — either produces a
+signature Hedera rejects. Untested, and not on the path to anything this product needs.
+
+**The seller signs nothing today, and self-custody is not a plumbing change.** Operator and
+seller are the same account in the demo, and `createHoldByPartition` acts on the caller's own
+tokens, so the venue is the holder and places the hold itself. Moving sellers to self-custody
+would require ERC-1400 operator authorisation — a contract change plus a seller signature,
+sitting on the asset leg of every trade. Not for a hackathon.
+
 - **Do not touch `packages/agent/src/wallet.ts`.** Circle agent wallets serve a different actor
   solving a different problem, and already work.
-- Cost is $0 at this scale. Wiring is 1–2 days; **the risk is the half-day spike** proving a
-  Privy key can sign and broadcast against Hedera's JSON-RPC relay. If that fails, fall back to
-  a server-side secp256k1 keypair — the pattern the operator already uses — rather than fighting
-  an undocumented integration.
+- Cost is $0 at this scale. `@privy-io/react-auth@3` declares `react: '^18 || ^19'` and every
+  non-React peer is optional, so React 19 was never the risk it looked like. It adds ~3 kB to
+  shared JS.
+- **Known gap:** the business name is derived from the email domain because Privy cannot know
+  it and the venue requires one. Tolerable only because no screen renders it and the venue keeps
+  the first name it was given. Correcting it needs a route that can change it, which does not
+  exist.
+- **Open, and a real weakness:** the route has no authentication, which is why it refuses to
+  rebind a wallet address already on file. The Privy **app secret** is in
+  `packages/backend/.env` and nothing reads it. Verifying a Privy auth token server-side would
+  make the email a verified fact rather than a claim in a request body. That changes the route's
+  contract, so it is a decision rather than a cleanup.
 
 ## Cut list
 
