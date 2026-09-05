@@ -900,10 +900,32 @@ could not reach it.
   time. The boot log used to say this process spends nothing directly; that was true while the
   vault settled everything, and it is corrected rather than deleted.
 
-**Not yet run against the live facilitator.** Everything above is what the code does and what
-the payload decodes to, not a settlement record. The recipe it reproduces is proven —
-`facture-prep/x402-probe/settle-venue.mjs` closed 22 trades this way — but this agent has not
-made one.
+**It has run.** The agent read the book, priced it, armed a trade, signed the cash leg and
+settled — trade `c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d`, cash
+`0.0.7162784@1788449867.590233238`, asset `0.0.10311549@1788449868.676674741`, HCS sequence 24.
+The buyer's balance moved by exactly the 868,798 tinybars quoted and the facilitator paid the
+whole 258,441 fee, so "the buyer pays no gas" is now a reading off the chain rather than a claim
+about the library. Full record in [docs/deployments.md](./docs/deployments.md).
+
+Nothing was arranged to make it happen. The customer is UNRATED, which loses five of the seven
+mandates on rating; the sixth caps tenor at 45 days against a 47-day invoice. The one bid left
+is unescrowed, so the venue routes it to x402 by its own arithmetic.
+
+- **The venue client's timeout was shorter than the operation it invokes, and that is not a
+  slow-path problem.** Arming is two Hedera round trips and takes about fifteen seconds; the
+  single 10s budget aborted the client while the venue kept working, **and the trade was armed
+  anyway** — hold placed, capital allocated, nothing on the agent's side knowing. The next tick
+  tried to arm the same invoice and got a 409, which was the venue protecting the invoice
+  rather than a fault. `POST /v1/trades` now has its own budget (`FACTURE_API_TRADE_TIMEOUT_MS`,
+  60s) and an aborted trade request says the outcome is unknown. **The "a receipt timeout is
+  not a revert" rule generalises: a request timeout is not a rollback either.**
+- **The proof invoice is the bond issued by accident**, the one recorded as debris while testing
+  the duplicate check. It had a real instrument with no supply, an empty allowlist and no KYC,
+  so it was the only row that could carry this without anything being invented for it.
+- **`prepare-security.mjs` moved exactly one bid.** Before it, `mandatesBarredByInstrument: 1`
+  and no quote; after, one match at 1850 bps with the same six refusals underneath. That is the
+  compliance-aware pricing doing what it was built for, on a smaller scale than the MF-2052 run
+  that established it.
 
 ### The full sweep for mechanisms nobody calls — ten more, 2026-09-03
 

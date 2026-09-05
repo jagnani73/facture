@@ -744,3 +744,106 @@ The paper never left Hedera and the cash never left Arc. Nothing was wrapped and
 bridged. The buyer signed nothing for this trade — their mandate had already agreed to
 anything meeting its terms, which is what makes a standing bid firm — and the seller signed
 exactly once, to collect money already bound to their address.
+
+## The agent paid for a trade itself — 2026-09-03
+
+**`@facture/agent` completed an x402 payment on Hedera.** It read the book, priced it against
+its own mandate, armed the trade, signed the cash leg with the buyer's key, and settled. The
+Hedera **AI & Agentic Payments** track asks for an agent that completes a real paid request;
+this is that request.
+
+|            |                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------- |
+| invoice    | MF-2052 (the accidental one), `7d9ecd44-2a78-420e-bd9c-8c718caf0fc6`               |
+| customer   | Petra Foods Group (the accidental debtor), rated **UNRATED**, $8,900, 47 days      |
+| instrument | `0.0.10343726` / `0x9bd731f0f200c9834488bb04fcc03d33415e56bd`, ISIN `USP84OSPO8Q3` |
+| trade      | `c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d`                                             |
+| mandate    | `402cfa47…`, Harrow Point, 1850 bps — **the unescrowed one**                       |
+| priced at  | proceeds 868,798, discount 21,202                                                  |
+| payer      | `0.0.10314099`, the buyer's own Hedera account                                     |
+
+### Why this invoice, and why this rail
+
+Neither was arranged. The customer is **UNRATED**, so five of the seven mandates refuse on
+rating. Of the two with an UNRATED floor, `ac66e63d` caps tenor at 45 days and this invoice
+matures in 47, so it refuses on tenor. That leaves `402cfa47` alone, at 1850 bps — and
+`402cfa47` holds no capital in the Arc vault, so `chooseRail` sends it to x402.
+
+The invoice itself is the bond issued by accident while testing the duplicate check, recorded
+above as debris. It had a real instrument, no supply, an empty allowlist and no KYC, which made
+it the one row in the book that could carry this proof without anything being invented for it.
+
+### Preparing it, and what that proved on its own
+
+`prepare-security.mjs` ran the ten-step sequence against
+`0x9bd731f0f200c9834488bb04fcc03d33415e56bd`, all ten succeeding first time, and issued 890,000
+units. `totalSupply` read `0` immediately afterwards and 890,000 moments later, which is the
+relay lag recorded in CLAUDE.md behaving exactly as described.
+
+The quote either side of that is the compliance-aware pricing working, and it is worth keeping
+because it is a smaller version of the MF-2052 result from 2026-09-02:
+
+|                              | before preparation | after    |
+| ---------------------------- | ------------------ | -------- |
+| `mandatesConsidered`         | 7                  | 7        |
+| `mandatesMatching`           | 0                  | 1        |
+| `mandatesBarredByInstrument` | 1                  | 0        |
+| quote                        | `null`             | 1850 bps |
+
+Six mandates refuse either side and only the seventh moved, which is the point: preparing the
+instrument changed exactly the one bid the instrument was blocking, and no economics with it.
+
+### Both legs
+
+| leg   | transaction                                                           |
+| ----- | --------------------------------------------------------------------- |
+| cash  | `0.0.7162784@1788449867.590233238` — CRYPTOTRANSFER, SUCCESS          |
+| asset | `0.0.10311549@1788449868.676674741` — CONTRACTCALL, SUCCESS, hold `2` |
+
+Read off the mirror node rather than from the receipt. The cash transaction's transfer list is
+four entries, and two of them are the trade:
+
+```
+0.0.10311549   +868,798      the seller
+0.0.10314099   -868,798      the buyer
+0.0.7162784    -258,441      the facilitator, paying the fee
+0.0.802        +258,441
+```
+
+**The buyer paid the quoted proceeds and nothing else.** Its balance went 4,834,222,687 →
+4,833,353,889, a difference of exactly 868,798 tinybars, and the entire 258,441 fee was charged
+to the facilitator. That is the property `createPartiallySignedTransferTransaction` produces by
+setting the transaction id against `extra.feePayer`, and it is now visible on chain rather than
+argued from the library.
+
+The asset leg cost 445,892 gas and 49,048,120 tinybars, charged to the venue.
+
+Positions afterwards, read from the security: `totalSupply` 890,000, **seller 0, buyer
+890,000**. The seller sold out, which is what an all-or-nothing exit means.
+
+The settled match was committed to HCS topic `0.0.10342152` at **sequence 24**, consensus
+`1788449877.017792587`:
+
+```json
+{ "v": 1, "kind": "facture.match", "tradeId": "c0c8ed97…", "digest": "4784c4f3…029ba8e4" }
+```
+
+### It took three attempts, and the first two are the interesting part
+
+**The agent's venue client timed out at ten seconds while the venue was still working**, and
+the trade was armed anyway — trade `fff97c93`, hold `1`, capital allocated, compliance recorded
+as allowed. Nothing on the agent's side knew. The second attempt tried to arm the same invoice
+and was refused **409**, which was the venue protecting the invoice from being armed twice
+rather than a fault; that attempt is on the books as `c705a88d`, failed, with no hold.
+
+`fff97c93` was then unwound by hand, which released hold `1` and returned the capital, and the
+third run went through end to end.
+
+Two things came out of it. Arming is two Hedera round trips and takes about fifteen seconds, so
+`POST /v1/trades` now has its own timeout defaulting to 60 seconds while reads keep the shorter
+one. And an aborted trade request now says the venue may have armed it anyway, because
+reporting a timeout as a plain failure sends whoever reads the log looking for a bug instead of
+for the armed trade that needs settling.
+
+**So this invoice carries three trade rows: one unwound, one failed, and one settled.** Recorded
+rather than tidied away, for the same reason as the MF-2046 debris.
