@@ -256,6 +256,15 @@ export interface Store {
   // --- issuance and indexing ----------------------------------------------------
   saveIssuanceJob(patch: IssuanceJobPatch): Promise<IssuanceJobRow>;
   listUnfinishedIssuanceJobs(): Promise<IssuanceJobRow[]>;
+  /**
+   * Every invoice the book is currently showing as being added.
+   *
+   * Driven off `invoices.issuance_state` rather than the job table, because that column is
+   * what a page of the book renders and is therefore what a seller is actually being told.
+   * The two can disagree — a seeded row carries the projection with no job behind it — and in
+   * that disagreement the projection is the one with a person looking at it.
+   */
+  listInvoicesAwaitingIssuance(limit?: number): Promise<InvoiceRow[]>;
   getCursor(chain: string): Promise<string | null>;
   setCursor(chain: string, position: string): Promise<void>;
 }

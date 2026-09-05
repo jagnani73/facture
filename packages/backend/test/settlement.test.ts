@@ -14,9 +14,17 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { isinForInvoice } from '@facture/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO, seedId } from '../src/db/seed.js';
-import { createStoreIssuanceSink, IssuanceQueue } from '../src/services/issuance.js';
+import type { IssuanceJob } from '../src/services/issuance.js';
+import {
+  createStoreIssuanceSink,
+  initIssuanceQueue,
+  IssuanceQueue,
+  resumeIssuance,
+  symbolFor,
+} from '../src/services/issuance.js';
 import { EXPIRED_AFTER_SECONDS, settlementService } from '../src/services/settlement.js';
 import { call, createHarness, type Harness } from './helpers.js';
 
@@ -707,6 +715,149 @@ describe('an armed trade nobody pays for', () => {
     expect((await h.store.getTrade(tradeId))?.status).toBe('awaiting_payment');
     expect((await h.store.getMandate(mandateId))!.allocatedMinor).toBe(armedAllocation);
     expect(h.ats.released).toHaveLength(0);
+  });
+});
+
+/**
+ * Work queued before the process stopped.
+ *
+ * The durable `issuance_jobs` row existed and nothing ever read it: `enqueue` was only called
+ * when an invoice was created, so an invoice queued before a restart stayed queued forever.
+ * The book reported it as "being added", which to a seller is indistinguishable from issuance
+ * that is genuinely in progress — the work had simply been dropped.
+ */
+describe('resuming issuance after a restart', () => {
+  it('re-enqueues work that was queued before the process stopped', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2051'] ?? '';
+
+    /*
+     * The demo book seeds two invoices as `queued` with NO durable job behind them, which is
+     * precisely the disagreement this reads through: the projection says "being added" and the
+     * job table has never heard of them. Resuming from `issuance_jobs` alone would leave both
+     * saying that forever.
+     */
+    const deployed: string[] = [];
+    initIssuanceQueue({
+      minIntervalMs: 0,
+      maxAttempts: 2,
+      backoffBaseMs: 1,
+      sink: createStoreIssuanceSink(),
+      deploy: (job) => {
+        deployed.push(job.invoiceId);
+        return Promise.resolve({
+          securityId: '0.0.777777',
+          evmAddress: `0x${'cd'.repeat(20)}` as const,
+          transactionId: '0.0.5512@1756000400.000000001',
+          gasUsed: 6_978_091,
+        });
+      },
+    });
+
+    const resumed = await resumeIssuance();
+    expect(resumed).toBe(2);
+
+    /*
+     * Polls the STORE, not the queue's in-memory status. The queue marks a job issued before
+     * its sink write lands, so watching the queue and asserting on the row is a race the test
+     * would lose intermittently.
+     */
+    for (let i = 0; i < 400; i += 1) {
+      if ((await h.store.getInvoice(invoiceId))?.issuanceState === 'issued') break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+
+    expect(deployed).toContain(invoiceId);
+    expect((await h.store.getInvoice(invoiceId))?.issuanceState).toBe('issued');
+  });
+
+  it('deploys the instrument the seller was originally told about', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2051'] ?? '';
+    const invoice = await h.store.getInvoice(invoiceId);
+
+    const jobs: IssuanceJob[] = [];
+    initIssuanceQueue({
+      minIntervalMs: 0,
+      maxAttempts: 2,
+      backoffBaseMs: 1,
+      sink: createStoreIssuanceSink(),
+      deploy: (job) => {
+        jobs.push(job);
+        return Promise.resolve({
+          securityId: '0.0.777777',
+          evmAddress: `0x${'cd'.repeat(20)}` as const,
+          transactionId: '0.0.5512@1756000400.000000001',
+          gasUsed: 6_978_091,
+        });
+      },
+    });
+
+    await resumeIssuance();
+    for (let i = 0; i < 400; i += 1) {
+      if ((await h.store.getInvoice(invoiceId))?.issuanceState === 'issued') break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+
+    /*
+     * A resumed job has to rebuild the same instrument the original enqueue described. The
+     * ISIN is the invoice's own — deterministic from its uniqueness hash, which is what stops
+     * one receivable acquiring two instruments across a restart — and the symbol comes from
+     * the shared `symbolFor` rather than a second copy of the rule.
+     */
+    const resumedJob = jobs.find((j) => j.invoiceId === invoiceId);
+    expect(resumedJob).toBeDefined();
+    /*
+     * The invoice's own ISIN when it has one, and otherwise the same value derived from its
+     * uniqueness hash — `isinForInvoice` is deterministic, so a receivable queued before a
+     * restart cannot come back describing a different instrument. This seeded draft has no
+     * stored ISIN yet, which is exactly the case the fallback exists for.
+     */
+    expect(resumedJob?.isin).toBe(invoice?.isin ?? isinForInvoice(invoice?.uniquenessHash ?? '0x'));
+    expect(resumedJob?.symbol).toBe(symbolFor(invoice?.invoiceNumber ?? ''));
+    expect(resumedJob?.maturityAt.getTime()).toBe(invoice?.dueAt.getTime());
+    expect(resumedJob?.faceValue).toBe(invoice?.faceValue);
+  });
+
+  it('does not retry an issuance that already gave up', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2052'] ?? '';
+    /*
+     * `failed` has exhausted its attempts and its reason is usually deterministic —
+     * `onlyValidISIN` does not become valid on the seventh try. Resuming it on every restart
+     * would be a permanent retry loop against a testnet.
+     */
+    await h.store.updateInvoice(invoiceId, {
+      issuanceState: 'failed',
+      issuanceAttempts: 6,
+      issuanceError: 'CONTRACT_REVERT_EXECUTED: onlyValidISIN',
+    });
+
+    const deployed: string[] = [];
+    initIssuanceQueue({
+      minIntervalMs: 0,
+      maxAttempts: 2,
+      backoffBaseMs: 1,
+      sink: createStoreIssuanceSink(),
+      deploy: (job) => {
+        deployed.push(job.invoiceId);
+        return Promise.resolve({
+          securityId: '0.0.777777',
+          evmAddress: `0x${'cd'.repeat(20)}` as const,
+          transactionId: '0.0.5512@1756000400.000000001',
+          gasUsed: 6_978_091,
+        });
+      },
+    });
+
+    await resumeIssuance();
+    expect(deployed).not.toContain(invoiceId);
+  });
+
+  it('is a no-op when nothing was left queued', async () => {
+    for (const key of ['INV-2051', 'INV-2052']) {
+      await h.store.updateInvoice(h.seeded.invoiceIds[key] ?? '', { issuanceState: 'issued' });
+    }
+
+    initIssuanceQueue({ minIntervalMs: 0, maxAttempts: 2, backoffBaseMs: 1 });
+    expect(await resumeIssuance()).toBe(0);
   });
 });
 

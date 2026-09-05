@@ -750,6 +750,14 @@ export class MemoryStore implements Store {
       .map((j) => clone(j));
   }
 
+  async listInvoicesAwaitingIssuance(limit = 100): Promise<InvoiceRow[]> {
+    return [...this.invoices.values()]
+      .filter((i) => i.issuanceState === 'queued' || i.issuanceState === 'issuing')
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .slice(0, limit)
+      .map((i) => clone(i));
+  }
+
   async getCursor(chain: string): Promise<string | null> {
     return this.cursors.get(chain)?.cursor ?? null;
   }

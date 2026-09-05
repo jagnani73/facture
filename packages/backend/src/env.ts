@@ -49,7 +49,14 @@ export const envSchema = z
           'sign EVM transactions — provision an ECDSA key.',
       }),
     ATS_FACTORY_ID: ACCOUNT_ID.optional(),
-    ATS_REGULATION_TYPE: z.enum(['reg-d-506b', 'reg-d-506c', 'reg-s']).default('reg-d-506c'),
+    /**
+     * Reg S by default, which is the decision recorded in CLAUDE.md and what the live bond
+     * carries. Reg S is the only declaration that both permits international investors and
+     * carries no resale hold, and both are load-bearing: a holder relisting on day thirty
+     * contradicts a six-month hold, and the cross-chain argument depends on buyers who are
+     * not all American. All three require accreditation, so 506(c) buys nothing here.
+     */
+    ATS_REGULATION_TYPE: z.enum(['reg-d-506b', 'reg-d-506c', 'reg-s']).default('reg-s'),
     ISSUANCE_GAS_LIMIT: z.coerce.number().int().positive().default(10_000_000),
     ISSUANCE_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(4_000),
     ISSUANCE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(6),

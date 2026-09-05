@@ -63,45 +63,105 @@ import type { DeployedSecurity, IssuanceJob } from './issuance.js';
  * and it is the thing most likely to drift.
  */
 export const ATS_ABI = [
+  /*
+   * The real `deployBond`, transcribed from the deployed factory rather than from a doc.
+   *
+   * The previous shape here was a plausible-looking flattening of it and encoded to selector
+   * `0x58a038dd`, which the diamond does not have — so every call reverted with
+   * `FunctionNotFound(bytes4)` (`0x5416eb98`) after 45,540 gas. That failure is quiet in the
+   * worst way: it looks like a contract problem rather than an encoding one, and it means
+   * backend issuance had never once succeeded. {@link DEPLOY_BOND_SELECTOR} exists so the
+   * next drift of this kind is caught before a transaction is paid for.
+   */
   {
     type: 'function',
     name: 'deployBond',
     stateMutability: 'nonpayable',
     inputs: [
       {
-        name: 'security',
+        name: '_bondData',
         type: 'tuple',
         components: [
-          { name: 'isin', type: 'string' },
-          { name: 'name', type: 'string' },
-          { name: 'symbol', type: 'string' },
-          { name: 'decimals', type: 'uint8' },
-          { name: 'isWhiteList', type: 'bool' },
-          { name: 'isControllable', type: 'bool' },
-          { name: 'arePartitionsProtected', type: 'bool' },
-          { name: 'clearingActive', type: 'bool' },
-          { name: 'internalKycActivated', type: 'bool' },
-          { name: 'identityRegistry', type: 'address' },
-          { name: 'compliance', type: 'address' },
-          { name: 'regulationType', type: 'uint8' },
-          { name: 'regulationSubType', type: 'uint8' },
+          {
+            name: 'security',
+            type: 'tuple',
+            components: [
+              { name: 'resolver', type: 'address' },
+              { name: 'maxSupply', type: 'uint256' },
+              {
+                name: 'resolverProxyConfiguration',
+                type: 'tuple',
+                components: [
+                  { name: 'key', type: 'bytes32' },
+                  { name: 'version', type: 'uint256' },
+                ],
+              },
+              {
+                name: 'erc20MetadataInfo',
+                type: 'tuple',
+                components: [
+                  { name: 'name', type: 'string' },
+                  { name: 'symbol', type: 'string' },
+                  { name: 'isin', type: 'string' },
+                  { name: 'decimals', type: 'uint8' },
+                ],
+              },
+              {
+                name: 'rbacs',
+                type: 'tuple[]',
+                components: [
+                  { name: 'role', type: 'bytes32' },
+                  { name: 'members', type: 'address[]' },
+                ],
+              },
+              { name: 'externalPauses', type: 'address[]' },
+              { name: 'externalControlLists', type: 'address[]' },
+              { name: 'externalKycLists', type: 'address[]' },
+              { name: 'compliance', type: 'address' },
+              { name: 'identityRegistry', type: 'address' },
+              { name: 'arePartitionsProtected', type: 'bool' },
+              { name: 'isMultiPartition', type: 'bool' },
+              { name: 'isControllable', type: 'bool' },
+              { name: 'isWhiteList', type: 'bool' },
+              { name: 'clearingActive', type: 'bool' },
+              { name: 'internalKycActivated', type: 'bool' },
+              { name: 'erc20VotesActivated', type: 'bool' },
+            ],
+          },
+          {
+            name: 'bondDetails',
+            type: 'tuple',
+            components: [
+              { name: 'currency', type: 'bytes3' },
+              { name: 'nominalValue', type: 'uint256' },
+              { name: 'nominalValueDecimals', type: 'uint8' },
+              { name: 'startingDate', type: 'uint256' },
+              { name: 'maturityDate', type: 'uint256' },
+            ],
+          },
+          { name: 'proceedRecipients', type: 'address[]' },
+          { name: 'proceedRecipientsData', type: 'bytes[]' },
         ],
       },
       {
-        name: 'bond',
+        name: '_factoryRegulationData',
         type: 'tuple',
         components: [
-          { name: 'currency', type: 'bytes3' },
-          { name: 'nominalValue', type: 'uint256' },
-          { name: 'startingDate', type: 'uint256' },
-          { name: 'maturityDate', type: 'uint256' },
-          { name: 'couponFrequency', type: 'uint256' },
-          { name: 'couponRate', type: 'uint256' },
-          { name: 'firstCouponDate', type: 'uint256' },
+          { name: 'regulationType', type: 'uint8' },
+          { name: 'regulationSubType', type: 'uint8' },
+          {
+            name: 'additionalSecurityData',
+            type: 'tuple',
+            components: [
+              { name: 'countriesControlListType', type: 'bool' },
+              { name: 'listOfCountries', type: 'string' },
+              { name: 'info', type: 'string' },
+            ],
+          },
         ],
       },
     ],
-    outputs: [{ name: 'security', type: 'address' }],
+    outputs: [{ name: 'bondAddress_', type: 'address' }],
   },
   /**
    * The position size. `view`, so it is an `eth_call` over the relay and costs nothing.
@@ -203,6 +263,46 @@ const ZERO_ADDRESS: Address = '0x0000000000000000000000000000000000000000';
  * size of a position is read with `balanceOf`, never inferred from this constant.
  */
 const SECURITY_DECIMALS = 0;
+
+/**
+ * The Business Logic Resolver proxy every ATS security is deployed against, and the resolver
+ * configuration that selects the *bond* facet set.
+ *
+ * Both are properties of the deployed infrastructure rather than of this instrument, taken
+ * from the ATS deployment record and confirmed by a successful `deployBond` on this factory.
+ * Only version 1 is registered on this resolver.
+ */
+const BLR_PROXY_EVM: Address = '0xBA2D5FC2083A0b8f164c50e65d782087fBA18E0a';
+const BOND_CONFIG_KEY: Hex = `0x${'0'.repeat(63)}2`;
+const BOND_CONFIG_VERSION = 1n;
+
+/**
+ * AccessControl's `DEFAULT_ADMIN_ROLE`, which is 32 zero bytes.
+ *
+ * The factory requires at least one non-zero admin member: it grants itself the role for the
+ * duration of the deployment and renounces it before returning, so the address named here is
+ * the one left holding it afterwards.
+ */
+const DEFAULT_ADMIN_ROLE: Hex = `0x${'0'.repeat(64)}`;
+
+/**
+ * Reg S is scoped geographically rather than by accreditation, and this is that scope.
+ *
+ * `countriesControlListType: false` makes the list a BLOCK list — these countries are
+ * excluded — which is the opposite reading from `true`. Getting it backwards would publish an
+ * instrument offered *only* to sanctioned jurisdictions.
+ */
+const EXCLUDED_COUNTRIES = 'AF,CU,KP,IR,SY';
+
+/**
+ * The selector the deployed factory answers on, checked before anything is submitted.
+ *
+ * This exists because its absence cost every issuance this service ever attempted. A tuple
+ * that looks right but encodes to a different selector produces `FunctionNotFound` at
+ * execution — after the gas is spent, with a status that reads like a contract fault rather
+ * than a calldata one. Comparing the selector is free and catches the whole class.
+ */
+export const DEPLOY_BOND_SELECTOR = '0x29002951';
 
 export interface HoldRequest {
   readonly securityId: string;
@@ -360,39 +460,90 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
   return {
     async deployBond(job) {
       const regulation = REGULATIONS[config.regulation];
+      const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+
       const calldata = encodeFunctionData({
         abi: ATS_ABI,
         functionName: 'deployBond',
         args: [
           {
-            isin: job.isin,
-            name: job.name,
-            symbol: job.symbol,
-            decimals: SECURITY_DECIMALS,
-            isWhiteList: true,
-            isControllable: true,
-            arePartitionsProtected: false,
-            clearingActive: false,
-            /** The security's own Kyc facet, which is what the pre-match check reads. */
-            internalKycActivated: true,
-            identityRegistry: ZERO_ADDRESS,
-            compliance: ZERO_ADDRESS,
-            regulationType: regulation.regulationType,
-            regulationSubType: regulation.regulationSubType,
+            security: {
+              resolver: BLR_PROXY_EVM,
+              /*
+               * The receivable cannot represent more than itself. Face value in minor units
+               * is exactly what issuance mints, so capping supply there means the instrument
+               * structurally cannot be over-issued against the invoice behind it.
+               */
+              maxSupply: job.faceValue,
+              resolverProxyConfiguration: { key: BOND_CONFIG_KEY, version: BOND_CONFIG_VERSION },
+              erc20MetadataInfo: {
+                name: job.name,
+                symbol: job.symbol,
+                isin: job.isin,
+                decimals: SECURITY_DECIMALS,
+              },
+              rbacs: [
+                { role: DEFAULT_ADMIN_ROLE, members: [operatorEvmAddress(config.operatorKey)] },
+              ],
+              externalPauses: [],
+              externalControlLists: [],
+              externalKycLists: [],
+              /** Per-security `ControlList` and `Kyc`, never the ERC-3643 registry. */
+              compliance: ZERO_ADDRESS,
+              identityRegistry: ZERO_ADDRESS,
+              arePartitionsProtected: false,
+              isMultiPartition: false,
+              isControllable: true,
+              isWhiteList: true,
+              /*
+               * OFF. `clearingActive: true` blocks direct holds with `ClearingIsActivated()`,
+               * and a hold is the asset leg of every trade this venue settles — the probe
+               * bond had to have clearing deactivated afterwards to be tradeable at all.
+               */
+              clearingActive: false,
+              /** The security's own Kyc facet, which is what the pre-match check reads. */
+              internalKycActivated: true,
+              erc20VotesActivated: false,
+            },
+            bondDetails: {
+              currency: currencyBytes3(job.currency),
+              /*
+               * One unit is one minor unit of the invoice currency, so the nominal value of a
+               * unit is 1 with no decimals. The instrument's size lives in supply, not here.
+               */
+              nominalValue: 1n,
+              nominalValueDecimals: 0,
+              startingDate: nowSeconds,
+              maturityDate: BigInt(Math.floor(job.maturityAt.getTime() / 1000)),
+            },
+            proceedRecipients: [],
+            proceedRecipientsData: [],
           },
           {
-            currency: currencyBytes3(job.currency),
-            nominalValue: job.faceValue,
-            startingDate: BigInt(Math.floor(Date.now() / 1000)),
-            maturityDate: BigInt(Math.floor(job.maturityAt.getTime() / 1000)),
-            // Zero-coupon: no schedule, no rate, no first coupon date. The coupon-listing
-            // path in ATS also has a known regression, so there is nothing to lean on here.
-            couponFrequency: 0n,
-            couponRate: 0n,
-            firstCouponDate: 0n,
+            regulationType: regulation.regulationType,
+            regulationSubType: regulation.regulationSubType,
+            additionalSecurityData: {
+              countriesControlListType: false,
+              listOfCountries: EXCLUDED_COUNTRIES,
+              info: '',
+            },
           },
         ],
       });
+
+      /*
+       * Checked before a transaction is paid for. See {@link DEPLOY_BOND_SELECTOR}: the
+       * failure this guards against is indistinguishable from a contract fault once it has
+       * happened, and it silently defeated every issuance until it was found.
+       */
+      if (!calldata.startsWith(DEPLOY_BOND_SELECTOR)) {
+        throw upstreamUnavailable(
+          'Hedera',
+          `deployBond encodes to ${calldata.slice(0, 10)}, but the factory answers on ` +
+            `${DEPLOY_BOND_SELECTOR}. The ABI has drifted from the deployed contract; ` +
+            'nothing was submitted.',
+        );
+      }
 
       const receipt = await submit(factoryId, calldata, `deployBond ${job.invoiceId}`);
       const evmAddress = decodeAddress(receipt.returned);

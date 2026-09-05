@@ -17,6 +17,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { getStore } from '../db/store.js';
 import type { Logger } from '../logger.js';
+import { isinForInvoice } from '@facture/shared';
 import { rootLogger } from '../logger.js';
 import { getAtsAdapter } from './ats.js';
 
@@ -331,6 +332,114 @@ export function createStoreIssuanceSink(): IssuanceSink {
       });
     },
   };
+}
+
+/**
+ * The ticker an instrument carries. `FAC` plus the tail of the invoice number.
+ *
+ * Here rather than in the route because a resumed job has to produce the SAME symbol as the
+ * original enqueue did. Two copies of this rule would differ the first time one of them was
+ * tweaked, and the instrument would be named one thing before a restart and another after.
+ */
+export function symbolFor(invoiceNumber: string): string {
+  const cleaned = invoiceNumber.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return `FAC${cleaned.slice(-5)}`.slice(0, 8);
+}
+
+/**
+ * Everything `deployBond` needs, derived from the receivable it describes.
+ *
+ * Built in one place for the same reason the symbol lives here: the route builds this when an
+ * invoice is created and {@link resumeIssuance} builds it again after a restart, and a job
+ * that came back from the database differing in any field would deploy a different instrument
+ * from the one the seller was told about.
+ *
+ * The ISIN is taken from the invoice when it has one and derived from its uniqueness hash
+ * otherwise, which is the same value — `isinForInvoice` is deterministic, and that is what
+ * stops one receivable acquiring two instruments across a retry.
+ */
+export function issuanceJobFor(input: {
+  invoiceId: string;
+  invoiceNumber: string;
+  isin: string | null;
+  uniquenessHash: string;
+  regulationType: 'reg-d-506b' | 'reg-d-506c' | 'reg-s';
+  dueAt: Date;
+  faceValue: bigint;
+  currency: string;
+  sellerName: string;
+}): IssuanceJob {
+  return {
+    invoiceId: input.invoiceId,
+    isin: input.isin ?? isinForInvoice(input.uniquenessHash),
+    regulationType: input.regulationType,
+    maturityAt: input.dueAt,
+    faceValue: input.faceValue,
+    currency: input.currency,
+    name: `${input.sellerName} receivable ${input.invoiceNumber}`,
+    symbol: symbolFor(input.invoiceNumber),
+  };
+}
+
+/**
+ * Re-enqueue work that was queued before the process last stopped.
+ *
+ * Without this the durable `issuance_jobs` row is a record of something nobody will ever do
+ * again: `enqueue` was only ever called when an invoice was created, so an invoice queued
+ * before a restart stayed queued forever. The book reports it as "being added", which is
+ * indistinguishable to a seller from an issuance that is genuinely in progress — the work had
+ * simply been dropped on the floor.
+ *
+ * Deliberately not a retry of everything. A `failed` issuance has already exhausted its
+ * attempts and its reason is usually deterministic (`onlyValidISIN` does not become valid on
+ * the seventh try), so only `queued` and `issuing` work resumes. An invoice whose seller has
+ * since gone is skipped loudly rather than deploying an instrument for a receivable nobody
+ * owns.
+ *
+ * `enqueue` is idempotent per invoice, so calling this while something is already in flight
+ * is a no-op rather than a second deployment of the same receivable.
+ */
+export async function resumeIssuance(log = rootLogger): Promise<number> {
+  const store = getStore();
+
+  /*
+   * Read off the invoice projection, not the job table.
+   *
+   * `invoices.issuance_state` is what a page of the book renders, so it is what a seller is
+   * actually being told is in progress — and the two can disagree. A seeded row carries the
+   * projection with no job behind it, and resuming only from `issuance_jobs` would leave it
+   * saying "being added" forever, which is the exact bug this function exists to fix. In that
+   * disagreement the projection wins, because it is the one with a person looking at it.
+   */
+  const pending = await store.listInvoicesAwaitingIssuance();
+  if (pending.length === 0) return 0;
+
+  let resumed = 0;
+  for (const invoice of pending) {
+    const seller = await store.getSeller(invoice.sellerId);
+    if (!seller) {
+      log.warn('queued issuance has no seller, skipping', { invoiceId: invoice.id });
+      continue;
+    }
+
+    getIssuanceQueue().enqueue(
+      issuanceJobFor({
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        isin: invoice.isin,
+        uniquenessHash: invoice.uniquenessHash,
+        regulationType: invoice.regulationType,
+        dueAt: invoice.dueAt,
+        faceValue: invoice.faceValue,
+        currency: invoice.currency,
+        sellerName: seller.name,
+      }),
+    );
+    resumed += 1;
+  }
+
+  log.info('resumed issuance queued before restart', { resumed, found: pending.length });
+  return resumed;
 }
 
 let queue: IssuanceQueue | undefined;

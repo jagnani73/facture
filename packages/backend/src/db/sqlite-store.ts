@@ -820,6 +820,15 @@ export class SqliteStore implements Store {
       .orderBy(asc(issuanceJobs.queuedAt));
   }
 
+  async listInvoicesAwaitingIssuance(limit = 100): Promise<InvoiceRow[]> {
+    return this.#db
+      .select()
+      .from(invoices)
+      .where(inArray(invoices.issuanceState, ['queued', 'issuing']))
+      .orderBy(asc(invoices.createdAt))
+      .limit(limit);
+  }
+
   async getCursor(chain: string): Promise<string | null> {
     const [row] = await this.#db
       .select()

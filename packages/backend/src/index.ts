@@ -21,6 +21,7 @@ import {
   createStoreIssuanceSink,
   getIssuanceQueue,
   initIssuanceQueue,
+  resumeIssuance,
 } from './services/issuance.js';
 import { createLoggingNotifier, setNotifier } from './services/notifier.js';
 import { initScheduleAdapter } from './services/schedule.js';
@@ -95,6 +96,18 @@ function boot(): void {
     assetDecimals: env.X402_ASSET_DECIMALS,
     settlementScalePpm: env.X402_SETTLEMENT_SCALE_PPM,
     logger: log,
+  });
+
+  /*
+   * Work queued before the process last stopped.
+   *
+   * Deliberately after the server is configured and deliberately not awaited: resuming opens
+   * the database, and a service that refused to start because the database was briefly
+   * unreadable would fail exactly the health check that exists to say so. A failure here
+   * leaves the jobs where they are, which is the state they were already in.
+   */
+  void resumeIssuance(log).catch((err: unknown) => {
+    log.error('could not resume queued issuance', { err });
   });
 
   const server = serve({ fetch: createApp().fetch, port: env.PORT, hostname: env.HOST }, (info) => {

@@ -34,7 +34,7 @@ import {
   isWellFormedToken,
   mintConfirmationToken,
 } from '../services/confirmation.js';
-import { getIssuanceQueue } from '../services/issuance.js';
+import { getIssuanceQueue, issuanceJobFor } from '../services/issuance.js';
 import { getNotifier } from '../services/notifier.js';
 import { quoteEngine } from '../services/quote-engine.js';
 import { ratingService } from '../services/rating.js';
@@ -139,16 +139,19 @@ invoiceRoutes.post('/', async (c) => {
    * The response is 202 because the instrument does not exist yet, and saying otherwise
    * would be a claim the book would then have to maintain.
    */
-  const status = getIssuanceQueue().enqueue({
-    invoiceId: row.id,
-    isin,
-    regulationType: row.regulationType,
-    maturityAt: row.dueAt,
-    faceValue: row.faceValue,
-    currency: row.currency,
-    name: `${seller.name} receivable ${row.invoiceNumber}`,
-    symbol: symbolFor(row.invoiceNumber),
-  });
+  const status = getIssuanceQueue().enqueue(
+    issuanceJobFor({
+      invoiceId: row.id,
+      invoiceNumber: row.invoiceNumber,
+      isin,
+      uniquenessHash: row.uniquenessHash,
+      regulationType: row.regulationType,
+      dueAt: row.dueAt,
+      faceValue: row.faceValue,
+      currency: row.currency,
+      sellerName: seller.name,
+    }),
+  );
 
   return c.json(
     {
@@ -514,7 +517,3 @@ function confirmationSentence(
  * ATS wants the field. Kept deterministic in the invoice number so a retried issuance does
  * not produce a second name for the same paper.
  */
-function symbolFor(invoiceNumber: string): string {
-  const cleaned = invoiceNumber.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  return `FAC${cleaned.slice(-5)}`.slice(0, 8);
-}
