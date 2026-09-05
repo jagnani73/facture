@@ -9,8 +9,9 @@ live, it says so in place. Where the thing on screen is a fiction from the seede
 a receivable with a bond behind it, it says that too — a demo that blurs the two is worth less than
 one that does not, because the whole product claim is that a price can be checked.
 
-Budget about **twelve minutes** for the five moves, plus two for the proof view and two for the
-on-chain guarantees at the end. Staging is separate and is described last.
+Budget about **twelve minutes** for the five moves, plus two for the proof view, two for the
+on-chain guarantees at the end, and ninety seconds more if the agent is shown. Staging is separate
+and is described last.
 
 ---
 
@@ -27,7 +28,7 @@ Two processes, both already running in the sessions this was written in:
 
 The masthead says **Demo book · Sign in**, and that is the whole of the account model.
 
-- **Signed out** you are looking at the shared demo book: a seeded seller with 29 invoices,
+- **Signed out** you are looking at the shared demo book: a seeded seller with 30 invoices,
   settled trades and matured receivables in it. Nothing to create, nothing to fund, and it is
   labelled rather than implied.
 - **Sign in** with an email address and Privy makes a wallet. The venue reads the email out of a
@@ -60,14 +61,15 @@ curl http://localhost:8787/health
 
 ### What is real and what is seeded
 
-The book holds 29 invoices. **Four of them have an instrument that exists on Hedera:**
+The book holds 30 invoices. **Five of them have an instrument that exists on Hedera:**
 
-| invoice | security       | what it is                                           |
-| ------- | -------------- | ---------------------------------------------------- |
-| MF-2051 | `0.0.10331926` | its own bond, deployed by the venue. The clean one.  |
-| MF-2052 | `0.0.10331928` | its own bond, deployed by the venue.                 |
-| MF-2046 | `0.0.10316440` | the gas-probe bond, pointed at by hand. A stand-in.  |
-| MF-2052 | `0.0.10343726` | a **second** MF-2052, issued by accident. See below. |
+| invoice | security       | what it is                                              |
+| ------- | -------------- | ------------------------------------------------------- |
+| MF-2051 | `0.0.10331926` | its own bond, deployed by the venue. The clean one.     |
+| MF-2052 | `0.0.10331928` | its own bond, deployed by the venue.                    |
+| MF-2046 | `0.0.10316440` | the gas-probe bond, pointed at by hand. A stand-in.     |
+| MF-2061 | `0.0.10348484` | its own bond. The one that sold on the Arc rail.        |
+| MF-2052 | `0.0.10343726` | a **second** MF-2052. The one the agent bought. `sold`. |
 
 The other 25 carry security ids in the `0.0.67xxxxx` range that were never deployed —
 `https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.6751909` answers `Not found`. They
@@ -80,6 +82,12 @@ of each was created while testing the duplicate check: posting under a different
 a different customer, hence a different receivable, hence a legitimate listing. It is recorded in
 [deployments.md](./deployments.md) rather than deleted. If it comes up, that is the answer — and it
 is a fair illustration of what the uniqueness hash keys on.
+
+**That accident is now the agent's proof, and it reads `sold`.** It was the one row in the book with
+a real instrument and nothing else depending on it — no supply, an empty allowlist, no KYC — and its
+customer being `UNRATED` is what routed it to the single unescrowed mandate that would take it, and
+therefore to the x402 rail. `@facture/agent` bought it with the buyer's own Hedera key on
+2026-09-03, trade `c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d`. See _Move 4_.
 
 **Show MF-2051.** It was issued its own bond by the venue's own issuance queue, sold against a
 funded standing bid, and matured paying its holder par, with no stand-in anywhere in the chain of
@@ -108,7 +116,7 @@ onboarding work, so it is never on the critical path when money moves.
 **If you want to show it live** — `http://localhost:3000/book/new` adds an invoice and the venue
 answers `202`, because the instrument does not exist yet. The row appears immediately with a _being
 added_ pill and becomes quotable when `deployBond` lands, roughly 30–60 seconds later. That
-transaction is real: about 7.02M gas and 8 HBAR against the operator, which holds 881 HBAR.
+transaction is real: about 7.02M gas and 8 HBAR against the operator, which holds 858 HBAR.
 
 The cut list in `CLAUDE.md` calls live issuance staging rather than product, and it is right. Do
 this only if there is time to spare.
@@ -180,8 +188,8 @@ decides to sell rather than after, which is the correct place for it and also th
 cannot trigger it by clicking Sell today. It surfaces instead as `mandatesBarredByInstrument` on the
 quote response.
 
-That count reads `0` on every invoice in the book right now, because the two instruments that could
-bar a bid have both matured and the other 25 securities do not exist to be read. An unreadable
+That count reads `0` on every invoice in the book right now, because every instrument that could bar
+a bid has since matured or sold and the other 25 securities do not exist to be read. An unreadable
 instrument is deliberately not treated as a refusal — the gate is indeterminate, not negative, and
 letting a relay outage widen the whole curve was a bug that repriced MF-2041 from 800 to 1850 bps
 on its first live run.
@@ -213,13 +221,13 @@ buyer's capital is already posted.
 Both bodies carry `rail: { chosen, reason }`, so the answer to "why this one" is on the wire rather
 than inferred. `cashLeg.rail` says the same thing on the receipt, and the proof view prints it.
 
-**The demo book routes everything to the x402 rail, and that is worth saying out loud rather than
-letting someone discover it by clicking Sell.** The escrowed mandate quotes 850 bps, and every
-invoice in Move 2 is taken by a tighter Ashgrove bid that is not escrowed. To exercise the Arc rail
-you need a B-rated invoice the escrowed mandate wins — and the two that qualify carry the
-never-deployed `0.0.67xxxxx` security ids from the seeded fixtures, so they cannot settle either.
-**No trade has taken the Arc rail yet.** The rail is built, selected automatically and covered by
-tests; it has not carried a live trade.
+**Everything a judge can click in the demo book routes to the x402 rail, and that is worth saying
+out loud rather than letting someone discover it by clicking Sell.** The escrowed mandate quotes 850
+bps, and every invoice in Move 2 is taken by a tighter Ashgrove bid that is not escrowed. Exercising
+the Arc rail needs a B-rated invoice the escrowed mandate wins on merit — and every seeded one that
+qualifies carries a never-deployed `0.0.67xxxxx` security id, so it prices and settles nothing. The
+rail has carried a trade, on an invoice added to the book rather than seeded into it: MF-2061,
+below.
 
 On MF-2051 both legs are on chain and both can be checked without a browser:
 
@@ -272,6 +280,60 @@ Two operational facts a rehearsal has to include, both of which surprised us:
   nothing can be paid into the escrow and be unable to collect. `pnpm demo:reset` funds them.
 - **`reclaimPayout` is not wired.** A stranded lock returns its capital to the mandate only when
   someone calls it, and nothing in the backend does. That is an operator action.
+
+### The buyer on the other side can be an agent, and once was
+
+**`pnpm --filter @facture/agent start`** · about 90 seconds
+
+The desk that bought MF-2052 is a process, not a person at a screen. Start it and read the first log
+line rather than waiting for a tick:
+
+```
+pnpm --filter @facture/agent start
+```
+
+Two fields on that line are the ones to point at. `cashRails` says which rails this process can
+actually settle on — `["arc-vault", "x402-hedera"]` with a Hedera key configured, `["arc-vault"]`
+alone without one — and `x402Payer` names the account that would sign. Both are printed at boot for
+a reason: with no key the agent refuses every unescrowed bid and looks like a desk that simply found
+nothing to buy, which is the same log as half the book being unreachable.
+
+**It defaults to `AGENT_DRY_RUN=true`, so what you are watching is a decision and not a spend.** It
+reads the book, prices every row against its own mandates, and reports what it would take. Turning
+that off is not a verbosity setting: a live run signs and submits a transfer of the buyer's own HBAR
+for every trade the venue prices to the x402 rail, and nothing between the decision and consensus
+asks a second time. Say that out loud before anyone suggests flipping it during a demo.
+
+**The settled proof already exists and needs no live run.** On 2026-09-03 the agent armed and paid
+for the second MF-2052 by itself, at 1850 bps against Harrow Point's unescrowed mandate:
+
+| trade | `c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d`                                |
+| ----- | --------------------------------------------------------------------- |
+| cash  | `0.0.7162784@1788449867.590233238` — CRYPTOTRANSFER, SUCCESS          |
+| asset | `0.0.10311549@1788449868.676674741` — CONTRACTCALL, SUCCESS, hold `2` |
+| match | topic `0.0.10342152`, sequence 24                                     |
+
+```
+curl https://testnet.mirrornode.hedera.com/api/v1/transactions/0.0.7162784-1788449867-590233238
+```
+
+The transfer list is where to look. The buyer `0.0.10314099` paid exactly the 868,798 tinybars it
+was quoted, the seller received them, and the whole 258,441 fee went to the facilitator
+`0.0.7162784` — because the payload's transaction id is generated against the facilitator's account
+rather than the payer's.
+
+**Nothing about the invoice was arranged.** Its customer is `UNRATED`, which loses five of the seven
+mandates on rating; a sixth caps tenor at 45 days against a 47-day invoice; and the one bid left
+holds no capital in the vault, so `chooseRail` sent it to x402 by arithmetic rather than by
+configuration.
+
+Its proof view is `http://localhost:3000/proof/c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d`.
+
+**That invoice carries three trade rows, and only one settled.** The first run's client aborted at
+ten seconds while the venue was still arming — the hold was placed anyway and nothing on the agent's
+side knew — and the second was refused `409`, which was the venue protecting the invoice rather than
+a fault. The first was unwound by hand and `POST /v1/trades` now has its own 60-second budget. If a
+judge opens the trade list, that is the answer.
 
 ## Move 5 — Mature
 
@@ -397,6 +459,8 @@ http://localhost:3000/book/460311ff-60d4-54dc-93ce-d5ccbad98b24   MF-2048, unrat
 http://localhost:3000/mandates
 http://localhost:3000/proof/3d129208-a99e-4667-bc4a-1d7bc5a537eb  MF-2051, the clean lifecycle
 http://localhost:3000/proof/6f0654c7-99fc-4f4c-a4fb-d0e7d2626b2e  MF-2052, second clean lifecycle
+http://localhost:3000/proof/07c9b966-5192-46f4-ae90-b7dab62b11ad  MF-2061, the Arc rail
+http://localhost:3000/proof/c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d  MF-2052 again, bought by the agent
 http://localhost:3000/proof/85c8efbe-9940-4067-97f9-096f0576a377  MF-2046, the honest mess
 ```
 
@@ -441,11 +505,15 @@ browser in front of it.
 https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.10331926      MF-2051's bond
 https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.10331928      MF-2052's bond
 https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.10316440      the gas-probe bond
+https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.10348484      MF-2061's bond
+https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.10343726      the agent's MF-2052
 https://testnet.mirrornode.hedera.com/api/v1/schedules/0.0.10332092      MF-2051's payout
 https://testnet.mirrornode.hedera.com/api/v1/schedules/0.0.10331573      MF-2046's payout
 https://testnet.mirrornode.hedera.com/api/v1/transactions/0.0.10311549-1788340765-589124475
 https://testnet.mirrornode.hedera.com/api/v1/transactions/0.0.7162784-1788340765-029692827
 https://testnet.mirrornode.hedera.com/api/v1/transactions/0.0.10311549-1788340781-520345720
+https://testnet.mirrornode.hedera.com/api/v1/transactions/0.0.7162784-1788449867-590233238
+https://testnet.mirrornode.hedera.com/api/v1/topics/0.0.10342152/messages
 ```
 
 ---
@@ -497,13 +565,13 @@ confirmation the customer never gave is not something we could assert by setting
 ### Capital that is actually posted
 
 Vault [`0x217256d0fdf83ffd81bbc6884ad44f5c02501102`](https://testnet.arcscan.app/address/0x217256d0fdf83ffd81bbc6884ad44f5c02501102)
-on Arc holds **5 USDC** against Harrow Point's mandate, deposited by that buyer's own wallet. The
-mandates screen shows `Escrowed on Arc` on that bid and `Not escrowed` on the other.
+on Arc holds Harrow Point's mandate capital, deposited by that buyer's own wallet. The mandates
+screen shows `Escrowed on Arc` on that bid and `Not escrowed` on the other.
 
-Be precise about what this is: **capital backing a bid, and a rail that has not yet drawn on it.**
-`executePayout` is built and wired — `chooseRail` selects it, `registerMatch` binds the payee before
-delivery, and the whole path is covered by tests — but **no sale has yet paid a seller in USDC.**
-Those are different sentences and only the second one is a gap.
+Be precise about what this is: **capital backing a bid, and a rail that has drawn on it once.** 5
+USDC went in; MF-2061 took 0.014843 out through `executePayout`, and the balance reads 4.985157.
+That difference is the whole argument — a bid is firm because the money is already there, and the
+proof is that some of it has left.
 
 And five seeded mandates still quote against capital nobody posted; the funding check stops that
 growing rather than undoing it, which is why the screen labels each bid rather than claiming the

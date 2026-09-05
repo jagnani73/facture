@@ -169,7 +169,7 @@ The honest reason for two chains is not that it is clever. It is that **buyer ca
 where stablecoins live.** You do not ask a treasury desk to bridge onto Hedera to buy a $40k
 receivable. DvP means it never has to.
 
-Where the build actually is, in three parts, because they are three different claims.
+Where the build actually is, in four parts, because they are four different claims.
 
 **The cash leg has two rails, and the mandate decides which.** A bid whose capital is escrowed in
 `MandateVault` settles out of it, in USDC on Arc, and `POST /v1/trades` answers `200` with both legs
@@ -177,10 +177,10 @@ already done &mdash; **no challenge and no signature, because a funded mandate a
 anything meeting its terms. That is what "firm bid" means.** An unfunded bid gets the x402 exchange
 instead. Both answers carry the rail and the reason, so nothing is inferred.
 
-**The trades that have settled ran on Hedera.** Both took their payment over x402 on
-`hedera:testnet`, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
-The Hedera book's `cashLeg()` returns Arc's chain id and the vault address as immutables recorded at
-construction, so the cross-chain link cannot be redirected.
+**Five receivables have sold on chain, and four of them took their payment over x402 on
+`hedera:testnet`**, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
+The fifth is the paragraph below. The Hedera book's `cashLeg()` returns Arc's chain id and the vault
+address as immutables recorded at construction, so the cross-chain link cannot be redirected.
 
 **A sale has now been paid in USDC on Arc.** `MandateVault` held 5 USDC against one mandate,
 deposited by that buyer's own wallet; MF-2061 drew 0.014843 of it, the payout locked in
@@ -193,6 +193,18 @@ One consequence worth stating, because it surprised us: **the seller claims thei
 `DvpEscrow.claim` requires `msg.sender == beneficiary`, so a payout lands in an escrow lock rather
 than a wallet, and Arc gas is USDC &mdash; a seller holding none can be paid and be unable to
 collect.
+
+**One of those x402 payments was made by an agent rather than by a person.** `@facture/agent` read
+the book, priced it against its own mandate, armed the trade, signed the cash leg with the buyer's
+Hedera key and settled &mdash; trade `c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d`, cash
+`0.0.7162784@1788449867.590233238`, paper `0.0.10311549@1788449868.676674741`, and the match
+committed to topic [`0.0.10342152`](https://hashscan.io/testnet/topic/0.0.10342152) at sequence 24.
+The buyer paid the 868,798 tinybars it was quoted and nothing else: the entire 258,441 fee was
+charged to the facilitator, because the payload's transaction id is generated against the
+facilitator's account rather than the payer's. Nothing about the invoice was arranged for it: the
+customer is unrated, which loses five of the seven mandates outright, a sixth caps tenor at 45 days
+against a 47-day invoice, and the one bid left holds no vault capital &mdash; so the venue routed it
+to x402 by its own arithmetic rather than by configuration.
 
 ### Mature
 
@@ -393,12 +405,22 @@ Recorded here so they are not relitigated mid-build.
   `DvpEscrow` lock the seller opens with their own key inside 24 hours — the preimage is on the
   proof view, and it is not a credential, because `claim` checks the caller as well as the hash.
   Past that, cash-out rails are out of scope and are said plainly rather than mocked.
-- **Whether market-makers are visible.** They are real agents holding funded mandates on
-  policy-capped wallets, and they are presented as exactly that. Fake liquidity is the one thing that
-  would undo every argument above. In this build the agent runs against Circle developer-controlled
-  wallets and defaults to a dry run &mdash; it reads the book, prices it, reports what its mandates
-  would take, and arms nothing without being told to in so many words. The standing bids in the demo
-  book are seeded rows, not bids an agent wrote.
+- **Whether market-makers are visible.** They are real agents holding funded mandates, and they are
+  presented as exactly that. Fake liquidity is the one thing that would undo every argument above.
+
+  **What caps one is the mandate, and nothing else.** The agent will not bid past its mandate's
+  committed capital, and the venue enforces the same bound again when the trade is armed. **Circle
+  enforces no spending cap on this path and the product does not claim it does**: spending policies
+  are a mainnet Agent Wallets feature, Arc has no mainnet identifier there, and
+  developer-controlled wallets have no policy engine at all. A cap we wrote, described as a cap the
+  custodian holds, would be the same overclaim as fake liquidity one layer down.
+
+  The agent defaults to a dry run &mdash; it reads the book, prices it, and reports what its
+  mandates would take. Run live it does more than arm a trade: it holds the buyer's Hedera key and
+  signs a transfer of their own HBAR for every trade that prices to the x402 rail, and nothing
+  between that decision and consensus asks a second time. The standing bids in the demo book are
+  still seeded rows rather than bids an agent wrote &mdash; but one receivable in that book was
+  bought by the agent, with its own key, for real money.
 
 ## Prior art
 

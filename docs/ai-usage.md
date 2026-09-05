@@ -2,7 +2,7 @@
 
 ETHGlobal asks entrants to say which parts of a project were built with AI assistance and which
 files those were. This is that statement, reconstructed from the repository rather than from memory:
-70 commits, their messages, their diffs, and the two documents the work was steered by.
+95 commits, their messages, their diffs, and the two documents the work was steered by.
 
 The short version: **a model did nearly all of the typing, and a person made every decision the
 typing was constrained by.** That division is not a hedge. It is legible in the repo, because the
@@ -31,7 +31,7 @@ claim of hand-authorship, and this file exists so the choice does not amount to 
 
 ## Shape of the work
 
-70 commits, 2026-09-01 through 2026-09-03. Three days.
+95 commits, 2026-09-01 through 2026-09-03. Three days: 29, then 32, then 34.
 
 The first seven landed within 90 seconds of each other — a workspace scaffold, five package
 skeletons and the two steering documents, staged together rather than developed commit by commit.
@@ -40,16 +40,17 @@ landing, a live transaction failing, and a fix commit naming exactly what the fa
 
 | package              | tracked lines | what it is                                                 |
 | -------------------- | ------------- | ---------------------------------------------------------- |
-| `packages/backend`   | 24,174        | Hono venue, SQLite store, ATS/x402/schedule/chain adapters |
-| `packages/web`       | 14,196        | Next.js screens, one data seam over API or fixtures        |
-| `packages/contracts` | 9,292         | 19 Solidity files, Hardhat, deploy scripts                 |
-| `packages/agent`     | 4,481         | market-maker on Circle developer-controlled wallets        |
+| `packages/backend`   | 26,536        | Hono venue, SQLite store, ATS/x402/schedule/chain adapters |
+| `packages/web`       | 15,214        | Next.js screens, one data seam over API or fixtures        |
+| `packages/contracts` | 9,451         | 19 Solidity files, Hardhat, deploy scripts                 |
+| `packages/agent`     | 6,861         | market-maker on a Circle wallet and a Hedera key           |
 | `packages/shared`    | 4,075         | domain types, ISIN, pricing, state machines                |
-| docs and READMEs     | 4,196         | six READMEs, `CLAUDE.md`, `docs/`                          |
+| docs and READMEs     | 5,271         | six READMEs, `CLAUDE.md`, `docs/`                          |
 
-42 test files, 12,703 lines — 704 tests. Written in the same sessions as the code they cover.
-`packages/web` had no test runner at all until the third day; it was added specifically because
-`tsc --noEmit` cannot see a decoder reading the wrong field.
+47 test files, 15,034 lines. 812 of those tests run under vitest and the contracts package adds its
+own under Hardhat. Written in the same sessions as the code they cover. `packages/web` had no test
+runner at all until the third day; it was added specifically because `tsc --noEmit` cannot see a
+decoder reading the wrong field.
 
 ## What the human decided
 
@@ -134,7 +135,15 @@ store and its migrations, the 1,025-line seeded demo book, and the tests.
 render against the venue or against fixtures.
 
 **`packages/agent`** — the market maker, its Circle wallet client, its mandate pre-flight, and a
-logger with a secret redactor registered before the environment is parsed.
+logger with a secret redactor registered before the environment is parsed. `src/cash.ts` was added
+last and is the one file in this package that spends: it holds the buyer's Hedera key and signs the
+x402 cash leg, a native `TransferTransaction` whose transaction id is generated against the
+facilitator's account so the buyer pays the quoted proceeds and no gas. It signs without touching
+the network, which is what makes it testable: `freezeWith` wants only the node addresses an SDK
+client already knows, and `sign` is arithmetic, so a test decodes the signed bytes and checks them
+against the challenge. That mattered, because the failure on this rail is not an exception. A
+payload built from the wrong field is a valid signature over the wrong transfer, and the
+facilitator submits it.
 
 **The documentation**, including `docs/deployments.md`, the four package READMEs, and the upstream
 bug report in `docs/upstream/`. Every address and gas figure in the deployment record was read back
@@ -240,6 +249,38 @@ of the mechanism, it is a test that something reaches it.** Several of the fixes
   `/token/…` for what is a diamond **contract** — the mirror node 404s it — and the test asserted
   the URL contained `hashscan.io`, which every wrong HashScan URL also does.
 
+### Two more, found only by running the agent against the live venue
+
+Both were invisible to the test suite and to `tsc`, and neither is a bug in the sense of a wrong
+line. They are the same class as the table above, one turn further on.
+
+**A branch with a caller that could not reach it.** The agent was written to arm a trade, take the
+`402`, sign the challenge and settle. It never took a `402`. Its pre-flight refused any mandate
+whose capital was not escrowed on Arc — and the venue settles an escrowed mandate out of the vault,
+answering `200` with both legs already done. So every trade the agent was willing to arm went down
+the Arc branch, and the x402 branch was **unreachable by construction rather than by choice**.
+Nothing errored. The branch even had a log line describing the signature it was waiting for, and
+that line ran on the Arc path too, where nothing was waiting and the money had already moved. The
+fix was a gate that asks about both rails and takes either, and a refusal that names both halves,
+because a sentence naming only the vault sends the reader off to deposit USDC to fix a missing key.
+
+**A client that gave up while the venue was still working.** Arming is two Hedera round trips and
+takes about fifteen seconds; the agent's venue client had one timeout for everything and it
+defaulted to ten. So the client aborted — and **the trade was armed anyway.** Hold placed, capital
+allocated, the seller's paper committed, and nothing on the agent's side knew. The next tick tried
+the same invoice and got a `409`, which was the venue protecting it rather than a fault, and the log
+said "failed to act", which sends an operator looking for a bug instead of for the armed trade that
+needs settling. `POST /v1/trades` now has its own budget, and an aborted trade request says what is
+true: the outcome is unknown and the venue may have armed it. A read that aborts really did do
+nothing, and says so separately.
+
+The second one is a lesson `CLAUDE.md` had already recorded earlier the same day, about a different
+library: **a timeout is not a revert.** It says the client stopped waiting, never that the server
+stopped working, and code that reports one as a failure is asserting something it does not know.
+Written down once against viem's receipt wait on the Arc rail, then learned again from scratch
+against `fetch` in the agent, where the comment calls it a rollback rather than a revert and means
+the same thing.
+
 ### And one careless act, recorded rather than tidied away
 
 While testing the duplicate check the model posted an invoice under a slightly different debtor
@@ -265,7 +306,7 @@ whose job is to be checkable cannot have history quietly removed from underneath
 ## Reproducing this claim
 
 ```
-git log --format='%h %ad %s' --date=short          # 70 commits, three days
+git log --format='%h %ad %s' --date=short          # 95 commits, three days
 git log --stat cb9d567                             # the selector fix
 git show 7430e05                                   # README and CLAUDE.md, first commit of prose
 git show 9008136                                   # a mechanism with no caller, removed
