@@ -252,6 +252,39 @@ Two things follow. The live testnet contracts carry the old strings in their byt
 redeploying. And `ON_CHAIN_REASON_CODE` in `packages/agent/src/mandate.ts` still translates to the
 old names - it is now an identity map for the codes it covers, and should be retired or corrected.
 
+### Resolved: issuance works, and how it did not
+
+**Backend issuance had never once succeeded.** The `deployBond` tuple in `services/ats.ts` was
+a plausible flattening of the real one — it compiled, typechecked and produced calldata — and
+encoded to selector `0x58a038dd`, which the deployed diamond does not have. Every call reverted
+with `FunctionNotFound(0x5416eb98)` after 45,540 gas, a status that reads like a contract fault
+rather than a calldata one. Nothing could tell the difference, because a wrong selector is not
+a wrong type.
+
+- **The real selector is `0x29002951`**, and `DEPLOY_BOND_SELECTOR` is asserted before any
+  submission plus in `test/ats.test.ts`. That catches the whole class for free; its absence
+  cost every issuance this service ever attempted.
+- **The signature is `deployBond(_bondData, _factoryRegulationData)`** with a nested `security`
+  struct — resolver (`0xBA2D5FC2…`, the BLR proxy), `maxSupply`, the resolver proxy
+  configuration selecting the bond facet set (key `0x…02`, version 1), ERC-20 metadata, an
+  `rbacs` array the factory requires at least one admin member in, and the external
+  pause/control/KYC lists — beside a separate regulation struct carrying the country scope.
+- **`maxSupply` is the face value in minor units**, so an instrument structurally cannot be
+  over-issued against the invoice behind it.
+- **`clearingActive: false`.** True blocks direct holds with `ClearingIsActivated()`, and a hold
+  is the asset leg of every trade.
+- **The security id comes from the address the function RETURNED**, resolved through the mirror
+  node — never from `contractFunctionResult.contractId`, which is the contract that was
+  _called_ and recorded the factory as the instrument for every invoice. ATS does not deploy to
+  a long-zero address, so the number cannot be derived arithmetically.
+- **Issuance queued before a restart now resumes**, driven off `invoices.issuance_state` rather
+  than `issuance_jobs`. The projection is what the book renders and therefore what a seller is
+  being told, and the two can disagree — a seeded row carries the projection with no job behind
+  it. `failed` is not resumed: `onlyValidISIN` does not become valid on the seventh try.
+
+The venue has now issued `0.0.10331926` (MF-2051) and `0.0.10331928` (MF-2052) itself, at
+7,024,576 and 7,023,179 gas — inside the range measured from the factory's history.
+
 ### Resolved: the maturity payout rail
 
 **A debtor has no wallet, and that is load-bearing rather than missing.** Confirmation works

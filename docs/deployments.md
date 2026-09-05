@@ -93,6 +93,49 @@ So `security_id` on MF-2046 is a borrowed pointer, and three things follow:
   probe. Issuing MF-2046 its own bond is the fix; until then this is a known blemish, stated
   rather than papered over.
 
+## Instruments issued by the venue — 2026-09-02
+
+The first bonds deployed by Facture itself rather than by a probe script. Both went through
+the ordinary path: the issuance queue picked them up, paced them, and `deployBond` ran with
+the invoice's own derived ISIN and a name taken from the seller and the invoice number.
+
+| invoice | security       | EVM address                                  | ISIN           | gas       |
+| ------- | -------------- | -------------------------------------------- | -------------- | --------- |
+| MF-2051 | `0.0.10331926` | `0xb50567e02baaf768c834b0663f539db43d5b34b0` | `US0P7LQIQII6` | 7,024,576 |
+| MF-2052 | `0.0.10331928` | `0x1f2cf9c8f259291cb667cf24956a8e0150c8bc2e` | `USCY30T912O5` | 7,023,179 |
+
+Decoded from MF-2051's own calldata: name `Meridian Fabrication receivable MF-2051`, symbol
+`FACF2051`, ISIN `US0P7LQIQII6`, excluded countries `AF,CU,KP,IR,SY`, Reg S. Both gas figures
+land inside the 6,956,443–7,310,717 range measured from the factory's history, so the
+archaeology in CLAUDE.md holds for calls this service makes as well.
+
+### Why these are the first
+
+Backend issuance had never once succeeded. The `deployBond` tuple was a plausible flattening
+of the real one — it compiled, it typechecked, it produced calldata — and encoded to selector
+`0x58a038dd`, which the diamond does not have. Every call reverted with
+`FunctionNotFound(0x5416eb98)` after 45,540 gas, which reads like a contract fault rather than
+a calldata one. The real selector is `0x29002951`, and a test now asserts the encoding matches
+it without spending a transaction.
+
+Two failed attempts on the old encoding are on chain and cost 45,540 gas each:
+`0.0.10311549@1788339438.757403377` and `0.0.10311549@1788339442.795193807`.
+
+### Four orphan bonds
+
+Two rounds of deployment happened before the record was correct, and their bonds exist with
+nothing pointing at them. They are listed because a security with no owner is exactly the kind
+of thing that should not be discovered later by accident.
+
+| security       | EVM address                                  | why orphaned                    |
+| -------------- | -------------------------------------------- | ------------------------------- |
+| `0.0.10331886` | `0x966089c73a03943a4a80fae9e99c5610c3504bef` | recorded under the factory's id |
+| `0.0.10331888` | `0x4ffbc298a80319ecfa37bfd31ad6ef0962ea8ece` | recorded under the factory's id |
+
+Both were deployed correctly and are perfectly good instruments; only the id written against
+the invoice was wrong, so the invoices were re-issued once that was fixed and these were left
+behind. Roughly 16 HBAR of testnet gas.
+
 ## Accounts
 
 | role                   | id             | address                                      |
