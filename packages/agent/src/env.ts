@@ -51,6 +51,16 @@ const baseEnvSchema = z.object({
   // ── The venue ─────────────────────────────────────────────────────────────────────
   FACTURE_API_URL: z.string().url().default('http://localhost:8787'),
   FACTURE_API_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  /**
+   * The budget for `POST /v1/trades` alone, which is a different kind of call.
+   *
+   * Arming a trade is two Hedera round trips and took about fifteen seconds the first time
+   * it ran for real, so the ten seconds that suits every other route is not enough — the
+   * client gave up while the venue was still working and the trade was armed anyway. Kept
+   * separate rather than raising the shared budget, because a hung read should not stall
+   * the loop for a minute to accommodate a write.
+   */
+  FACTURE_API_TRADE_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   /** The buyer whose mandates this process operates. */
   AGENT_BUYER_ID: z.string().min(1, 'is required — the buyer whose mandates this agent operates'),
   /**

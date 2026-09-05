@@ -64,6 +64,7 @@ async function main(): Promise<void> {
   const venue = createVenueClient({
     baseUrl: env.FACTURE_API_URL,
     timeoutMs: env.FACTURE_API_TIMEOUT_MS,
+    tradeTimeoutMs: env.FACTURE_API_TRADE_TIMEOUT_MS,
   });
 
   /*

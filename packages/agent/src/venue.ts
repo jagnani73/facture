@@ -342,6 +342,20 @@ export interface VenueClientConfig {
   readonly baseUrl: string;
   /** Bounded so a hung venue cannot stall the loop indefinitely. */
   readonly timeoutMs?: number | undefined;
+  /**
+   * The budget for `POST /v1/trades`, which is a different kind of call from the rest.
+   *
+   * Reading the book is one database query. **Arming a trade is two Hedera round trips** —
+   * the compliance gate reads the instrument's own facets, then the hold is written and
+   * waited on — and it took about fifteen seconds the first time this ran for real. Under
+   * the ten-second budget that suits every other route, the client gave up while the venue
+   * was still working, so the x402 rail could not complete under its own default
+   * configuration.
+   *
+   * Two timeouts rather than one raised default, because a hung *read* should not stall the
+   * loop for a minute to accommodate a write.
+   */
+  readonly tradeTimeoutMs?: number | undefined;
   readonly fetch?: typeof globalThis.fetch | undefined;
 }
 
@@ -394,15 +408,17 @@ const X402_HEADERS = {
 export function createVenueClient(config: VenueClientConfig): VenueClient {
   const base = config.baseUrl.replace(/\/+$/, '');
   const timeoutMs = config.timeoutMs ?? 10_000;
+  const tradeTimeoutMs = config.tradeTimeoutMs ?? 60_000;
   const doFetch = config.fetch ?? globalThis.fetch;
 
   async function request(
     path: string,
     init: RequestInit = {},
+    budgetMs: number = timeoutMs,
   ): Promise<{ status: number; body: unknown; headers: Headers }> {
     const url = `${base}${path}`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), budgetMs);
     try {
       const response = await doFetch(url, {
         ...init,
@@ -427,7 +443,25 @@ export function createVenueClient(config: VenueClientConfig): VenueClient {
     } catch (cause) {
       if (cause instanceof VenueError) throw cause;
       const reason = cause instanceof Error ? cause.message : String(cause);
-      throw new VenueError(`${path} failed: ${reason}`, 0, undefined, path);
+      /*
+       * **A timeout is not a rollback**, and on this route it is not even a failure.
+       *
+       * Observed live: the client gave up at ten seconds, the venue kept working, and the
+       * trade was armed — hold placed, capital allocated, seller's paper committed — with
+       * nothing on this side knowing. The next tick tried to arm it again and was correctly
+       * refused with a 409, which is the venue protecting the invoice rather than a fault.
+       *
+       * So an aborted trade request says what is actually true: the outcome is unknown.
+       * Reporting it as a plain failure is what would make an operator go looking for the
+       * bug, rather than for the armed trade that needs settling or unwinding.
+       */
+      const aborted = controller.signal.aborted;
+      const detail =
+        aborted && path === '/v1/trades'
+          ? `${reason}. The venue may still have armed this trade — a timeout is not a ` +
+            'rollback. Check for a trade awaiting payment on this invoice before retrying.'
+          : reason;
+      throw new VenueError(`${path} failed: ${detail}`, 0, undefined, path);
     } finally {
       clearTimeout(timer);
     }
@@ -488,7 +522,11 @@ export function createVenueClient(config: VenueClientConfig): VenueClient {
     },
 
     async armTrade(input) {
-      const { status, body, headers } = await request('/v1/trades', tradeRequest(input));
+      const { status, body, headers } = await request(
+        '/v1/trades',
+        tradeRequest(input),
+        tradeTimeoutMs,
+      );
 
       /*
        * 402 is the success case, not a failure. The first half of the x402 exchange arms
@@ -531,13 +569,17 @@ export function createVenueClient(config: VenueClientConfig): VenueClient {
     },
 
     async settleTrade(input) {
-      const { status, body } = await request('/v1/trades', {
-        ...tradeRequest(input),
-        headers: {
-          'content-type': 'application/json',
-          [X402_HEADERS.signature]: encodeBase64Json(input.payment),
+      const { status, body } = await request(
+        '/v1/trades',
+        {
+          ...tradeRequest(input),
+          headers: {
+            'content-type': 'application/json',
+            [X402_HEADERS.signature]: encodeBase64Json(input.payment),
+          },
         },
-      });
+        tradeTimeoutMs,
+      );
       if (status < 200 || status >= 300) throw errorFrom(status, body, '/v1/trades');
 
       const parsed = parse(armedBodySchema, body, '/v1/trades');

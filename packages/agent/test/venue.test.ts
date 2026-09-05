@@ -530,3 +530,70 @@ describe('transport failures', () => {
     await expect(venue.mandates('buyer-1')).rejects.toMatchObject({ status: 0 });
   });
 });
+
+/**
+ * The budget for arming, and what a timeout on it means.
+ *
+ * Both of these come from the same live run. The client gave up at ten seconds, the venue
+ * kept working, and the trade was armed — hold placed, capital allocated, the seller's paper
+ * committed — with nothing on this side knowing. The next tick tried to arm the same invoice
+ * and was refused with a 409, which was the venue protecting the invoice rather than a fault.
+ */
+describe('the trade route has its own timeout', () => {
+  /** A fetch that never answers, and resolves only if the caller gives up first. */
+  const hangingFetch: typeof globalThis.fetch = (_input, init) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('This operation was aborted', 'AbortError'));
+      });
+    });
+
+  it('gives arming a longer budget than a read, rather than one shared number', async () => {
+    const venue = createVenueClient({
+      baseUrl: 'http://venue.test',
+      fetch: hangingFetch,
+      timeoutMs: 15,
+      tradeTimeoutMs: 10_000,
+    });
+
+    // The read gives up on its own short budget; the arm is still waiting on its longer one.
+    await expect(venue.quote('invoice-1')).rejects.toThrow(VenueError);
+
+    const armed = venue.armTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1' });
+    const raced = await Promise.race([
+      armed.then(() => 'settled').catch(() => 'gave up'),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 60)),
+    ]);
+    expect(raced).toBe('still waiting');
+  });
+
+  /*
+   * The message is the whole point. Reported as a plain failure, it sends an operator
+   * looking for a bug rather than for the armed trade that needs settling or unwinding.
+   */
+  it('says an aborted arm may have been armed anyway, because it has been', async () => {
+    const venue = createVenueClient({
+      baseUrl: 'http://venue.test',
+      fetch: hangingFetch,
+      tradeTimeoutMs: 10,
+    });
+
+    await expect(venue.armTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1' })).rejects.toThrow(
+      /may still have armed this trade/,
+    );
+    await expect(venue.armTrade({ invoiceId: 'invoice-1', quoteId: 'quote-1' })).rejects.toThrow(
+      /timeout is not a rollback/,
+    );
+  });
+
+  /* A read that times out really did do nothing, so it must not claim otherwise. */
+  it('does not say that about a read, which changes nothing when it aborts', async () => {
+    const venue = createVenueClient({
+      baseUrl: 'http://venue.test',
+      fetch: hangingFetch,
+      timeoutMs: 10,
+    });
+
+    await expect(venue.quote('invoice-1')).rejects.not.toThrow(/may still have armed/);
+  });
+});
