@@ -84,6 +84,19 @@ export interface MaturityPayoutReceipt {
   executed: boolean;
 }
 
+/** Whether an obligation has become a payment, read off the ledger rather than assumed. */
+export interface MaturityPayoutStatus {
+  executed: boolean;
+  /** Consensus time of the transfer, ISO. */
+  executedAt: string | null;
+  /** The executed transfer, `0.0.x@seconds.nanos`, for an explorer link. */
+  transactionId: string | null;
+  /** Which account the money actually left, read off the transfer rather than configured. */
+  payerAccountId: string | null;
+  /** Which account it arrived in, likewise read off the transfer. */
+  payeeAccountId: string | null;
+}
+
 export interface ScheduleAdapter {
   /**
    * Arrange the payout for a matured receivable.
@@ -94,7 +107,29 @@ export interface ScheduleAdapter {
    * Returning a fabricated schedule id would be worse than returning nothing.
    */
   schedulePayout(request: MaturityPayoutRequest): Promise<MaturityPayoutReceipt | null>;
+
+  /**
+   * Has the obligation been signed and executed?
+   *
+   * Asked rather than remembered. The signature happens outside this service — it is the
+   * venue's statement that the debtor's money arrived — so the only honest source for
+   * whether the holder has been paid is the ledger. The alternative is a flag this service
+   * sets when it *thinks* the payment happened, which is the kind of claim the proof view
+   * exists to avoid.
+   *
+   * Free: both reads are mirror-node queries, not paid SDK queries.
+   */
+  payoutStatus(scheduleId: string): Promise<MaturityPayoutStatus>;
 }
+
+/** Not executed, and not claiming to know otherwise. */
+const UNKNOWN_STATUS: MaturityPayoutStatus = {
+  executed: false,
+  executedAt: null,
+  transactionId: null,
+  payerAccountId: null,
+  payeeAccountId: null,
+};
 
 export interface ScheduleAdapterConfig {
   operatorId: string;
@@ -107,10 +142,95 @@ export interface ScheduleAdapterConfig {
   logger?: Logger;
 }
 
+/**
+ * Reads whether a schedule has executed, and what transfer it produced.
+ *
+ * Shared by the live and the disabled adapters on purpose: a schedule id recorded by an
+ * earlier run is still a real obligation on the ledger even if this deployment no longer
+ * has a collection account configured, and refusing to look it up would hide a payment that
+ * actually happened.
+ */
+async function readPayoutStatus(scheduleId: string): Promise<MaturityPayoutStatus> {
+  try {
+    const response = await fetch(`${hedera.mirrorNodeUrl}/api/v1/schedules/${scheduleId}`);
+    if (!response.ok) return UNKNOWN_STATUS;
+    const body: unknown = await response.json();
+    const executedAt = (body as { executed_timestamp?: unknown }).executed_timestamp;
+    if (typeof executedAt !== 'string' || executedAt === '') return UNKNOWN_STATUS;
+
+    /*
+     * The executed transfer carries the ScheduleCreate's own transaction id with
+     * `scheduled: true`, which the schedule record does not repeat — so it is looked up by
+     * the consensus timestamp the schedule reports. The id comes back dash-separated and
+     * every explorer here wants `0.0.x@seconds.nanos`.
+     */
+    const at = await fetch(`${hedera.mirrorNodeUrl}/api/v1/transactions?timestamp=${executedAt}`);
+    let transactionId: string | null = null;
+    let payerAccountId: string | null = null;
+    let payeeAccountId: string | null = null;
+    if (at.ok) {
+      const page: unknown = await at.json();
+      const first = (
+        page as {
+          transactions?: {
+            transaction_id?: unknown;
+            transfers?: { account?: unknown; amount?: unknown }[];
+          }[];
+        }
+      ).transactions?.[0];
+
+      const raw = first?.transaction_id;
+      if (typeof raw === 'string') {
+        const match = raw.match(/^(\d+\.\d+\.\d+)-(\d+)-(\d+)$/);
+        transactionId = match ? `${match[1]}@${match[2]}.${match[3]}` : raw;
+      }
+
+      /*
+       * Both sides of the payout, taken as the largest debit and the largest credit on the
+       * transfer. The scheduled transfer carries exactly those two — its fees are charged on
+       * the separate ScheduleSign — so this is not a heuristic over a busy transaction.
+       *
+       * Read off the ledger rather than taken from configuration or from the buyer row: a
+       * schedule created under an earlier collection account would otherwise be reported
+       * against the current one, and the payee is the account that was actually credited
+       * rather than whichever of its two Hedera forms happens to be on file.
+       */
+      let lowest = 0;
+      let highest = 0;
+      for (const entry of first?.transfers ?? []) {
+        const amount = typeof entry.amount === 'number' ? entry.amount : 0;
+        if (typeof entry.account !== 'string') continue;
+        if (amount < lowest) {
+          lowest = amount;
+          payerAccountId = entry.account;
+        }
+        if (amount > highest) {
+          highest = amount;
+          payeeAccountId = entry.account;
+        }
+      }
+    }
+
+    const [seconds, nanos] = executedAt.split('.');
+    const millis = Number(seconds) * 1000 + Math.floor(Number(nanos ?? 0) / 1_000_000);
+    return {
+      executed: true,
+      executedAt: new Date(millis).toISOString(),
+      transactionId,
+      payerAccountId,
+      payeeAccountId,
+    };
+  } catch {
+    // A mirror node that cannot be reached is not evidence a payout did not happen.
+    return UNKNOWN_STATUS;
+  }
+}
+
 /** No collection account, so no rail, and maturity says so rather than inventing one. */
 export function createDisabledScheduleAdapter(): ScheduleAdapter {
   return {
     schedulePayout: () => Promise.resolve(null),
+    payoutStatus: readPayoutStatus,
   };
 }
 
@@ -224,6 +344,8 @@ export function createScheduleAdapter(config: ScheduleAdapterConfig): ScheduleAd
         client.close();
       }
     },
+
+    payoutStatus: readPayoutStatus,
   };
 }
 

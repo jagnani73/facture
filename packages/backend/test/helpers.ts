@@ -68,6 +68,13 @@ export interface RecordingScheduleAdapter extends ScheduleAdapter {
   disabled: boolean;
   /** Set to make scheduling throw, which must not un-mature the receivable. */
   fails: string | undefined;
+  /**
+   * Schedule ids the fake ledger reports as executed.
+   *
+   * Execution is a thing that happens OUTSIDE this service — someone signs — so a test
+   * makes it happen by putting an id in here, never by asking the adapter to execute one.
+   */
+  executedSchedules: Set<string>;
 }
 
 /**
@@ -84,6 +91,27 @@ function createRecordingSchedule(): RecordingScheduleAdapter {
     scheduled: [],
     disabled: false,
     fails: undefined,
+    executedSchedules: new Set<string>(),
+
+    payoutStatus(scheduleId) {
+      return Promise.resolve(
+        adapter.executedSchedules.has(scheduleId)
+          ? {
+              executed: true,
+              executedAt: new Date('2026-09-02T08:32:16.807Z').toISOString(),
+              transactionId: '0.0.5512@1788337866.334186498',
+              payerAccountId: '0.0.5599',
+              payeeAccountId: '0.0.6098431',
+            }
+          : {
+              executed: false,
+              executedAt: null,
+              transactionId: null,
+              payerAccountId: null,
+              payeeAccountId: null,
+            },
+      );
+    },
 
     schedulePayout(request) {
       if (adapter.fails !== undefined) return Promise.reject(new Error(adapter.fails));

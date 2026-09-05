@@ -297,6 +297,61 @@ describe('the maturity payout rail', () => {
     expect(after).toBe(before - (trade?.proceedsMinor ?? 0n));
   });
 
+  it('reports the payment once the obligation has actually executed', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    const first = await settlementService.settleAtMaturity(invoiceId);
+    expect(first.cashLeg.state).toBe('pending');
+
+    // Someone signs. That happens outside this service, so the test makes it true of the
+    // ledger rather than asking the service to do it.
+    h.schedule.executedSchedules.add(first.payout?.scheduleId ?? '');
+
+    const after = await settlementService.settleAtMaturity(invoiceId);
+
+    expect(after.payout?.executed).toBe(true);
+    expect(after.payout?.executedTransactionId).toBe('0.0.5512@1788337866.334186498');
+    expect(after.cashLeg.state).toBe('settled');
+    expect(after.cashLeg.transaction).toBe('0.0.5512@1788337866.334186498');
+    expect(after.cashLeg.explorerUrl).toContain('0.0.5512@1788337866.334186498');
+  });
+
+  it('asks the ledger every time rather than remembering it was paid', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    const first = await settlementService.settleAtMaturity(invoiceId);
+    const scheduleId = first.payout?.scheduleId ?? '';
+
+    h.schedule.executedSchedules.add(scheduleId);
+    expect((await settlementService.settleAtMaturity(invoiceId)).cashLeg.state).toBe('settled');
+
+    /*
+     * A payout that stops reading as executed is not a case anyone expects, but the point
+     * is that nothing here caches the answer: the service holds no "paid" flag it could be
+     * wrong about, and the ledger is asked on every call.
+     */
+    h.schedule.executedSchedules.delete(scheduleId);
+    expect((await settlementService.settleAtMaturity(invoiceId)).cashLeg.state).toBe('pending');
+  });
+
+  it('names the account the money actually left, not the one configured', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    const first = await settlementService.settleAtMaturity(invoiceId);
+    h.schedule.executedSchedules.add(first.payout?.scheduleId ?? '');
+
+    const after = await settlementService.settleAtMaturity(invoiceId);
+
+    // Read off the executed transfer, so a schedule created under an earlier collection
+    // account is not reported against the current one.
+    expect(after.cashLeg.payer).toBe('0.0.5599');
+    expect(after.payout?.payerAccountId).toBe('0.0.5599');
+
+    /*
+     * And the payee likewise. A buyer's Hedera account is on file in either of its two
+     * forms — three of the seeded buyers carry `0.0.x` and one carries its EVM address —
+     * so the credited account is taken from the transfer rather than from the row.
+     */
+    expect(after.payout?.payeeAccountId).toBe('0.0.6098431');
+  });
+
   it('does not schedule a second obligation when maturity is observed twice', async () => {
     const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
 

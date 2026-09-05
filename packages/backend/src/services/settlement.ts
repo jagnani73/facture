@@ -128,7 +128,12 @@ export interface MaturityPayoutLeg {
   payerAccountId: string | null;
   payeeAccountId: string | null;
   amountMinor: string;
+  /** Read off the ledger on every call, never remembered — see `payoutStatus`. */
   executed: boolean;
+  /** When the holder was actually paid. Null until the collection key signs. */
+  executedAt: string | null;
+  /** The transfer that paid them, `0.0.x@seconds.nanos`. */
+  executedTransactionId: string | null;
   explorerUrl: string;
 }
 
@@ -789,6 +794,8 @@ export const settlementService: SettlementService = {
         payeeAccountId: holder?.hederaAccountId ?? null,
         amountMinor: payoutAmount.toString(10),
         executed: false,
+        executedAt: null,
+        executedTransactionId: null,
         explorerUrl: explorer.hederaSchedule(holderTrade.maturityScheduleId),
       };
     } else {
@@ -807,7 +814,12 @@ export const settlementService: SettlementService = {
            * that costs a duplicate obligation.
            */
           await store.updateTrade(holderTrade.id, { maturityScheduleId: receipt.scheduleId });
-          payout = { ...receipt, explorerUrl: explorer.hederaSchedule(receipt.scheduleId) };
+          payout = {
+            ...receipt,
+            executedAt: null,
+            executedTransactionId: null,
+            explorerUrl: explorer.hederaSchedule(receipt.scheduleId),
+          };
         }
       } catch (err) {
         payoutError = err instanceof Error ? err.message : String(err);
@@ -817,6 +829,27 @@ export const settlementService: SettlementService = {
           err,
         });
       }
+    }
+
+    /*
+     * Whether the holder has actually been paid is asked, not remembered.
+     *
+     * The signature that executes a payout happens outside this service — it is the venue's
+     * statement that the debtor's money arrived — so a flag set here would be this service
+     * guessing at a fact only the ledger holds. Asking on every call also means a maturity
+     * that was recorded before anyone signed reports the payment the moment it lands, with
+     * no reconciliation step and nothing to backfill.
+     */
+    if (payout !== null) {
+      const status = await getScheduleAdapter().payoutStatus(payout.scheduleId);
+      payout = {
+        ...payout,
+        executed: status.executed,
+        executedAt: status.executedAt,
+        executedTransactionId: status.transactionId,
+        payerAccountId: status.payerAccountId ?? payout.payerAccountId,
+        payeeAccountId: status.payeeAccountId ?? payout.payeeAccountId,
+      };
     }
 
     rootLogger.info('receivable matured', {
@@ -848,25 +881,28 @@ export const settlementService: SettlementService = {
           holderTrade.assetTxId === null ? null : explorer.hederaTx(holderTrade.assetTxId),
       },
       /*
-       * `pending`, with no transaction and no explorer link — and that stays true even when
-       * a payout was scheduled, because a schedule is an obligation rather than a payment.
-       * It executes when the collection key signs, which is the venue's statement that the
-       * debtor's money arrived; until then nobody has been paid and this leg must not say
-       * otherwise on the one screen whose whole job is to be checkable.
+       * `pending` until the payout has actually executed, and `settled` once it has.
        *
-       * What changed is that `pending` now has something behind it. `payout` carries the
-       * schedule id, so a holder can read the obligation on the mirror node instead of
-       * taking our word that they are owed something.
+       * A scheduled payout is an obligation, not a payment — it becomes one when the
+       * collection key signs, which is the venue's statement that the debtor's money
+       * arrived. So this leg follows the ledger rather than the schedule's existence:
+       * arranging a payout leaves it `pending` with a schedule id anyone can look up, and
+       * only an executed transfer turns it into a receipt with a transaction behind it.
+       *
+       * The distinction is the whole point on the one screen whose job is to be checkable.
        */
       cashLeg: {
         chain: challenge.accepted.network.startsWith('hedera') ? 'hedera' : 'arc',
         scheme: 'x402',
-        state: 'pending',
+        state: payout?.executed === true ? 'settled' : 'pending',
         asset: challenge.accepted.asset,
         amountMinor: invoice.faceValue.toString(10),
-        transaction: null,
-        payer: null,
-        explorerUrl: null,
+        transaction: payout?.executedTransactionId ?? null,
+        payer: payout?.executed === true ? payout.payerAccountId : null,
+        explorerUrl:
+          payout?.executedTransactionId === undefined || payout?.executedTransactionId === null
+            ? null
+            : explorer.hederaTx(payout.executedTransactionId),
       },
       payout,
       payoutError,
