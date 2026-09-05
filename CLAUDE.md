@@ -54,7 +54,8 @@ repo in `facture-prep/BLOCKERS.md`.
 1. **Gas / per-invoice model.** Resolved — see the architecture decision above. No transaction
    needed; the answer was already in the deployed factory's history.
 2. **Arc "Launch on Mainnet" track eligibility. RESOLVED 2026-09-02 — Circle confirmed a
-   from-scratch entrant is eligible.** The $5,000 track is open to this project. Do not
+   from-scratch entrant is eligible.** The track is open to this project — **$3,500, not
+   the $5,000 recorded here originally; corrected against the prizes page 2026-09-03.** Do not
    relitigate it from the page copy, which is what made it look closed: every "What We're
    Looking For" bullet describes extending a live product, and only the absent Continuity-only
    badge and a requirements clause scoping the Sept-30 mainnet bar explicitly "for the
@@ -643,6 +644,86 @@ no holdback.
 six. The book is the interesting one: it reads rating and confirmation _from the invoice
 registry_ rather than taking them as arguments, which is what makes its refusals mean
 anything, and that registry is now populated.
+
+### Resolved: two settlement rails, and one conversion between them
+
+**Decided 2026-09-03, and by the prize rules rather than by taste.** The Hedera
+**AI & Agentic Payments** track ($6,000) requires _"a live x402-gated service on Hedera…
+settled through the Blocky402 facilitator"_ plus an agent that completes a real paid request.
+`POST /v1/trades` is already exactly that. So replacing the x402 cash leg with an Arc payout —
+which the vault and escrow contracts were plainly written for — would forfeit a track, and the
+question of whether x402 stays is closed.
+
+**A funded mandate settles out of its escrow on Arc; an unfunded one settles pay-as-you-go
+over x402 on Hedera.** Five of seven seeded mandates are unfunded, so the second branch serves
+live data rather than a hypothetical. **Which rail settled a trade must be stated on the
+receipt and in the proof view, never inferred** — a branch that silently picks the old path
+means the old path is what gets demoed, which is now a $6,000 problem rather than an
+inelegance.
+
+**Prize amounts, corrected against the page.** Arc's mainnet track is **$3,500**, not the
+$5,000 recorded above; Arc totals $10,000 across four tracks, and *"Best DeFi/Onchain Finance
+Application"* asks for *"conditional payments, onchain automation or multi-step settlement"*,
+which describes vault → escrow → hashlock almost verbatim. **Privy is $5,000 across two
+tracks Facture fits unusually well** — both require _"at least one Privy control (policies,
+signers, key quorums, intents)"_, and email plus an address is not one, so that is the
+cheapest unclaimed money on the board. **Tokenization of Anything ($6,000) requires verified
+contracts on HashScan** — unconfirmed, and worth checking. Every track requires a public repo.
+
+### Resolved: one settlement conversion, in one place, with a direction
+
+**The Arc funding check compared USD cents against a USDC balance at 6 decimals, and passed
+by coincidence.** A mandate counted as holding $50,000.00 — 5,000,000 cents — was read as
+backed by 5,000,000 USDC minor units, which is 5 USDC. Identical digits, four orders of
+magnitude apart. `escrow.backed` inherited it, and the screen rendered the vault balance with
+the dollar formatter and reported 5 USDC as *"Backed by $50,000.00"*.
+
+- **The conversion already existed and was not found.** `x402.ts` derived it carefully and
+  wrote down why, having been caught once already by _"the same digits meaning a different
+  thing by accident"_. `arc.ts` was written afterwards, next to it, and did neither. So
+  `toSettlementAmount` now lives in `src/units.ts` and both rails import it: **a rule only one
+  caller can find is one the next rail gets wrong too.**
+- **Rounding has a direction, and it is not the same one for both uses.** A payment rounds
+  **down**, so a payer is never billed money the invoice does not owe. A collateral
+  requirement rounds **up**: at 1 ppm the granularity is a whole dollar, so rounding down
+  required zero USDC for anything under $1.00 and an empty vault backed it — the overclaim the
+  check exists to refuse, arriving through the rounding rather than the comparison.
+- **`X402_SETTLEMENT_SCALE_PPM` governs both rails despite the prefix**, deliberately: one
+  receivable has to cost the same money whichever way it settles, and a per-rail scale factor
+  is how two rails come to quote two prices for one invoice. Not renamed, for the reason
+  `DATABASE_URL` was not — a rename falls back to the default on every deployment still
+  setting the old name.
+- **The wire carries `depositedUsdcMinor` and `requiredUsdcMinor`**, because the defect was
+  two scales sharing one name, and the required figure is what makes the deposited one mean
+  anything. `formatUsdc` is a separate function from `formatMoney` rather than an option on
+  it: the two are never interchangeable and the failure is silent.
+
+Verified against the live vault: Harrow Point needs 0.05 USDC and holds 5, backed a hundred
+times over; the seeded mandates are correctly unbacked. The old comparison agreed on exactly
+one of them.
+
+### Resolved: the seller has an Arc address that can actually be paid
+
+**Meridian Fabrication's `arc_address` was invented**, like the seeded buyers' — and nothing
+on the settlement path read it, which is why it survived. `MandateVault` locks a payout
+claimable by the match's seller address and no other, so an invented one is a sale that
+settles, reports success and pays nobody until `reclaimPayout` returns the money to the buyer
+a day later.
+
+- **The correction needed no new key.** `sellers.hedera_account_id` already held the
+  operator's ECDSA alias, operator and seller are the same account here, and **an EVM address
+  is derived from the key rather than from a chain** — so one key controls the same address on
+  Arc as on Hedera. Derived from `HEDERA_OPERATOR_KEY` and checked, not assumed. This is the
+  same property that makes a Privy wallet usable, seen from the other end.
+- **A second divergence fell out of writing the invariant as a test.** The seed set
+  `hederaAccountId: '0.0.5512'` where the live database holds the alias — settlement resolves
+  a seller through `accountIdToEvmAddress`, and a fictional id becomes a long-zero address
+  holding nothing, so the row **had been corrected by hand and no migration recorded it**. A
+  fresh seed now produces a book that can settle. The seeded trades keep their fictional
+  `0.0.5512@…` refs: demo history that never happened is a different thing from who a party is.
+- **The web fixture book keeps its invented address**, deliberately. That book is fiction end
+  to end — fictional trades against securities never deployed — and putting one real address
+  into it would make the rest read as real.
 
 ## Cut list
 

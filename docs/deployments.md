@@ -519,3 +519,64 @@ One trap worth naming: `6e1470e5`'s asset transaction reads `SUCCESS` on chain w
 row says `failed`. An earlier version of this file cited that transaction pair as the first
 settled trade. It was the attempt before `c1bc54f`, and its recorded "unitsMinor does not track
 face value" gap was fixed by that commit. The settled trade is the one above.
+
+## The vault's units, and a seller who could not be paid — 2026-09-03
+
+Nothing new went on chain. Two things already on chain were being read wrongly, and both sat
+directly under the Arc payout leg.
+
+### `MandateVault` was read in the wrong units
+
+`balanceOf` answers in USDC ERC-20 minor units — 6 decimals. A mandate's committed capital is
+minor units of its own currency, 2 for USD. The funding check compared them directly.
+
+|                                       | value on chain / in the row | means             |
+| ------------------------------------- | --------------------------- | ----------------- |
+| `mandates.funded_minor` (`8b879d02…`) | `5000000`                   | **$50,000.00**    |
+| vault `balanceOf`                     | `5000000`                   | **5.000000 USDC** |
+
+`5000000 > 5000000` is false, so the deposit was accepted. Identical digits, four orders of
+magnitude apart. The mandates screen inherited it and reported the vault as holding
+`$50,000.00`.
+
+Read back through the fix, against the live vault:
+
+| mandate                  | committed   | needs     | vault holds | backed             |
+| ------------------------ | ----------- | --------- | ----------- | ------------------ |
+| Harrow Point `8b879d02…` | $50,000.00  | 0.05 USDC | 5 USDC      | **yes**, 100× over |
+| Harrow Point `402cfa47…` | $200,000.00 | 0.2 USDC  | 0           | no                 |
+| Ashgrove `8c6bc777…`     | $500,000.00 | 0.5 USDC  | 0           | no                 |
+
+The old comparison agreed on exactly one row, by coincidence. Also read from the vault while
+checking: `settlementToken` `0x3600…` (USDC), `paymentEscrow` `0x32e3511A2F…` — the deployed
+Arc escrow — and `attester` and `owner` both `0x46783EeC…`, the key in
+`ARC_SETTLEMENT_PRIVATE_KEY`. **Nothing needs redeploying for the payout leg.**
+
+### The seller's Arc address was invented
+
+`sellers.arc_address` was `0x2Ee0aB7c…`, fabricated exactly as the seeded buyers' were, and
+`0004` fixed the buyer side for the reason that was about to apply here: `MandateVault` locks
+a payout claimable by the match's seller address alone, so an invented one is a sale that
+settles, reports success and pays nobody until `reclaimPayout` returns the money a day later.
+
+It survived because **nothing on the settlement path read it** — the column is written by
+`POST /v1/sellers`, rendered, and paid to by nothing.
+
+No new key was needed. `HEDERA_OPERATOR_KEY` derives to
+`0x2Da63Ac0F6AE2C3059091d8DF38b3175a237ee71`, which is what `sellers.hedera_account_id`
+already held; one ECDSA key controls the same address on every EVM chain.
+
+|                                 | before        | after         |
+| ------------------------------- | ------------- | ------------- |
+| `sellers.arc_address` (live)    | `0x2Ee0aB7c…` | `0x2Da63Ac0…` |
+| `SELLER.hederaAccountId` (seed) | `0.0.5512`    | `0x2Da63Ac0…` |
+
+The seed's `0.0.5512` was a second divergence, found by writing the invariant as a test: the
+live row already held the alias, because settlement resolves a seller through
+`accountIdToEvmAddress` and a fictional id becomes a long-zero address holding nothing. The
+row **had been corrected by hand with no migration recording it**, so a fresh seed produced a
+book that could not settle.
+
+Migration `0005_meridian_real_arc_wallet` — a plain UPDATE, applied after a `VACUUM INTO`
+backup. Six migrations applied, `integrity_check` ok, `foreign_key_check` clean, 29 invoices
+and 27 trades intact.
