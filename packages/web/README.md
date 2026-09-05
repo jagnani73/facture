@@ -150,10 +150,18 @@ quietly reintroduces exactly the silent corruption the convention exists to prev
 
 ### The sale has five endings, and only one of them is a sale
 
-`POST /v1/trades` is one route carrying both halves of one x402 exchange, and it answers in
-five ways. Three of them were previously collapsed into "it worked" or "it failed", which
-made the screen claim things that had not happened. `SaleOutcome` in `src/lib/data/index.ts`
-names all five and `SellPanel` gives three of them their own panel.
+`POST /v1/trades` is one route carrying **two settlement rails**, and it answers in five
+ways. Three of them were previously collapsed into "it worked" or "it failed", which made the
+screen claim things that had not happened. `SaleOutcome` in `src/lib/data/index.ts` names all
+five and `SellPanel` gives three of them their own panel.
+
+`settled` is now reachable two ways, and the difference decides the sentence a seller reads.
+A funded mandate settles on the **first** call and comes back `200`; an unfunded one settles
+on the second, after the challenge. So `SaleOutcome.settled` carries `rail`, and it is not
+defaulted to x402 — asserting the wrong rail would describe a payment protocol that never
+ran, on the screen where a seller decides whether to trust the venue. A vault settlement also
+says that the proceeds are in an escrow the seller still has to claim, which the x402 sentence
+has no reason to mention.
 
 - **Settled.** Both legs. The only ending that is a sale, and the only one drawn in the
   positive colour.

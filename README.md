@@ -21,11 +21,12 @@
 > were not its to make.
 >
 > What that does **not** mean: this is a hackathon build on Hedera and Arc testnets, with a
-> seeded demo book behind it. The cash leg that has actually settled ran over x402 on Hedera,
-> in HBAR under a declared scale. Real USDC is escrowed on Arc — 5 of it, behind one mandate,
-> deposited by that buyer's own wallet — but it is capital backing a bid, not a leg that has
-> settled: no sale has yet paid its seller in USDC. Where a section describes behaviour the
-> build does not have yet, it says so in place rather than leaving you to find out.
+> seeded demo book behind it. The cash leg has two rails — a funded mandate settles out of its
+> Arc escrow in USDC, an unfunded one over x402 on Hedera in HBAR under a declared scale — and
+> **both trades that have actually settled took the second one.** Real USDC is escrowed on Arc,
+> 5 of it behind one mandate, deposited by that buyer's own wallet; the payout path that spends
+> it is built and tested, and no live trade has taken it yet. Where a section describes
+> behaviour the build does not have yet, it says so in place rather than leaving you to find out.
 
 Factoring is bond pricing done over the phone. A business that is owed money and needs it now calls
 a factor, the factor prices the paper privately, and the business takes 2&ndash;5% off the face value
@@ -168,19 +169,29 @@ The honest reason for two chains is not that it is clever. It is that **buyer ca
 where stablecoins live.** You do not ask a treasury desk to bridge onto Hedera to buy a $40k
 receivable. DvP means it never has to.
 
-Where the build actually is, in two parts, because they are different claims.
+Where the build actually is, in three parts, because they are three different claims.
 
-**The cash leg that has settled ran on Hedera.** Both completed trades took their payment over x402
-on `hedera:testnet`, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
+**The cash leg has two rails, and the mandate decides which.** A bid whose capital is escrowed in
+`MandateVault` settles out of it, in USDC on Arc, and `POST /v1/trades` answers `200` with both legs
+already done &mdash; **no challenge and no signature, because a funded mandate already said yes to
+anything meeting its terms. That is what "firm bid" means.** An unfunded bid gets the x402 exchange
+instead. Both answers carry the rail and the reason, so nothing is inferred.
+
+**The trades that have settled ran on Hedera.** Both took their payment over x402 on
+`hedera:testnet`, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
 The Hedera book's `cashLeg()` returns Arc's chain id and the vault address as immutables recorded at
 construction, so the cross-chain link cannot be redirected.
 
-**Real USDC is escrowed on Arc, and that is capital rather than a settled leg.** `MandateVault` holds
-5 USDC against one mandate, deposited by that buyer's own wallet, and the venue refuses to count a
-mandate as holding more than the vault does &mdash; `balanceOf` is a view, so checking costs nothing.
-The mandates screen says which bids are backed that way and which are not. **No sale has yet paid a
-seller in USDC**: `executePayout` is the half that is not built, so escrowed capital and a settled
-cash leg remain two different things on this page.
+**Real USDC is escrowed on Arc, and no sale has yet drawn on it.** `MandateVault` holds 5 USDC
+against one mandate, deposited by that buyer's own wallet, and the venue refuses to count a mandate
+as holding more than the vault does &mdash; `balanceOf` is a view, so checking costs nothing. The
+Arc payout path is built and tested end to end; what has not happened is a live trade taking it.
+Those are different statements, and only the second is a gap.
+
+One consequence worth stating, because it surprised us: **the seller claims their own payout.**
+`DvpEscrow.claim` requires `msg.sender == beneficiary`, so a payout lands in an escrow lock rather
+than a wallet, and Arc gas is USDC &mdash; a seller holding none can be paid and be unable to
+collect.
 
 ### Mature
 
@@ -377,8 +388,10 @@ Recorded here so they are not relitigated mid-build.
   can assert by setting one field. A uniqueness registry
   keyed on `hash(debtor, invoice number, amount)` means one receivable mints exactly one instrument,
   ever.
-- **What a seller does with the USDC.** Nothing, for now. Cash-out rails are out of scope and are
-  said plainly rather than mocked.
+- **What a seller does with the USDC.** Claims it, and then nothing. A vault payout lands in a
+  `DvpEscrow` lock the seller opens with their own key inside 24 hours — the preimage is on the
+  proof view, and it is not a credential, because `claim` checks the caller as well as the hash.
+  Past that, cash-out rails are out of scope and are said plainly rather than mocked.
 - **Whether market-makers are visible.** They are real agents holding funded mandates on
   policy-capped wallets, and they are presented as exactly that. Fake liquidity is the one thing that
   would undo every argument above. In this build the agent runs against Circle developer-controlled

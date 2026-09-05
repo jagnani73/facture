@@ -199,9 +199,27 @@ The compliance decision that _was_ made is on the proof view, under Move 5.
 
 ## Move 4 — Settle
 
-Delivery versus payment, one route, two halves of one x402 exchange. `POST /v1/trades` armed with
-`{invoiceId, quoteId}` answers `402` carrying the challenge; the buyer signs it and repeats the same
-request with a `PAYMENT-SIGNATURE` header, and that is the leg that moves money.
+Delivery versus payment, one route, **two rails**, and which one runs is decided by whether the
+buyer's capital is already posted.
+
+- **An unfunded mandate** gets the x402 exchange: `POST /v1/trades` with `{invoiceId, quoteId}`
+  answers `402` carrying the challenge, the buyer signs it and repeats the same request with a
+  `PAYMENT-SIGNATURE` header, and that is the leg that moves money.
+- **A mandate escrowed on Arc** answers **`200`, already settled**. There is no challenge because
+  there is nothing to sign: the buyer escrowed the capital and wrote the terms, so an invoice
+  meeting those terms is a trade they have already agreed to. Asking for a second consent is what
+  would make a standing bid not standing.
+
+Both bodies carry `rail: { chosen, reason }`, so the answer to "why this one" is on the wire rather
+than inferred. `cashLeg.rail` says the same thing on the receipt, and the proof view prints it.
+
+**The demo book routes everything to the x402 rail, and that is worth saying out loud rather than
+letting someone discover it by clicking Sell.** The escrowed mandate quotes 850 bps, and every
+invoice in Move 2 is taken by a tighter Ashgrove bid that is not escrowed. To exercise the Arc rail
+you need a B-rated invoice the escrowed mandate wins — and the two that qualify carry the
+never-deployed `0.0.67xxxxx` security ids from the seeded fixtures, so they cannot settle either.
+**No trade has taken the Arc rail yet.** The rail is built, selected automatically and covered by
+tests; it has not carried a live trade.
 
 On MF-2051 both legs are on chain and both can be checked without a browser:
 
@@ -230,13 +248,27 @@ curl https://testnet.mirrornode.hedera.com/api/v1/transactions/0.0.7162784-17883
 The buyer paid exactly the quoted proceeds and paid **no gas**. The facilitator `0.0.7162784` is
 the fee payer, read from its `GET /supported` at runtime rather than hardcoded.
 
-**One thing to state rather than let a judge discover.** The cash leg here settled in HBAR on
-Hedera, not in USDC on Arc. Face value in cents maps to tinybars 1:1 under a declared scale
-(`X402_SETTLEMENT_SCALE_PPM`), so $12,170.12 of proceeds is 1,217,012 tinybars. The Arc side —
-`MandateVault` and the payment-leg `DvpEscrow` — is deployed on Arc testnet and the Hedera book
-records the vault and Arc's chain id as construction-time immutables, so the cross-chain link is on
-chain and cannot be redirected. No USDC has moved across it. The DvP mechanism is real; the second
-chain is wired and not yet carrying the cash.
+**One thing to state rather than let a judge discover.** This trade settled in HBAR on Hedera, not
+in USDC on Arc, because it took the x402 rail. Face value in cents maps to tinybars 1:1 under a
+declared scale (`X402_SETTLEMENT_SCALE_PPM`), so $12,170.12 of proceeds is 1,217,012 tinybars.
+
+The Arc rail exists and the backend drives it: `chooseRail` reads the vault, `registerMatch` binds
+the payee and the price **on chain before delivery**, and `executePayout` moves the buyer's escrowed
+USDC into `DvpEscrow` locked for the seller. The ordering is chosen by which way a failure hurts —
+the cash commits into escrow before the paper moves, so a failed delivery leaves money that returns
+to the mandate rather than a buyer holding paper nobody paid for.
+
+**What has not happened is a trade taking it.** That is the precise claim: not "the rail is not
+built" and not "no USDC is on Arc" — 5 USDC is escrowed against Harrow Point's mandate, deposited by
+that buyer's own wallet. No sale has yet drawn on it.
+
+Two operational facts a rehearsal has to include, both of which surprised us:
+
+- **The seller claims their own payout.** `DvpEscrow.claim` requires `msg.sender == beneficiary`;
+  even the attester holding the public preimage is refused. Arc gas is USDC, so a seller holding
+  nothing can be paid into the escrow and be unable to collect. `pnpm demo:reset` funds them.
+- **`reclaimPayout` is not wired.** A stranded lock returns its capital to the mandate only when
+  someone calls it, and nothing in the backend does. That is an operator action.
 
 ## Move 5 — Mature
 
@@ -389,7 +421,8 @@ GET  /v1/mandates/exposure?buyerId=…
 POST /v1/mandates/:id/fund                     verified against the Arc vault
 POST /v1/mandates/:id/withdraw
 GET  /v1/mandates/:id/exposure
-POST /v1/trades                                arms on the first call, settles on the second
+POST /v1/trades                                settles outright on a funded mandate (200);
+                                               otherwise arms first (402), settles on the second
 POST /v1/trades/:id/unwind
 GET  /v1/trades?sellerId=…|buyerId=…
 GET  /v1/trades/:id
@@ -464,10 +497,16 @@ Vault [`0x217256d0fdf83ffd81bbc6884ad44f5c02501102`](https://testnet.arcscan.app
 on Arc holds **5 USDC** against Harrow Point's mandate, deposited by that buyer's own wallet. The
 mandates screen shows `Escrowed on Arc` on that bid and `Not escrowed` on the other.
 
-Be precise about what this is: **capital backing a bid, not a settled cash leg.** No sale has yet
-paid a seller in USDC — `executePayout` is the half that is not built. And five seeded mandates
-still quote against capital nobody posted; the funding check stops that growing rather than undoing
-it, which is why the screen labels each bid rather than claiming the book is uniformly backed.
+Be precise about what this is: **capital backing a bid, and a rail that has not yet drawn on it.**
+`executePayout` is built and wired — `chooseRail` selects it, `registerMatch` binds the payee before
+delivery, and the whole path is covered by tests — but **no sale has yet paid a seller in USDC.**
+Those are different sentences and only the second one is a gap.
+
+And five seeded mandates still quote against capital nobody posted; the funding check stops that
+growing rather than undoing it, which is why the screen labels each bid rather than claiming the
+book is uniformly backed. The screen now prints both figures — what the vault holds and what the
+mandate needs — because the check that compares them used to compare raw digits four orders of
+magnitude apart and agree with itself.
 
 ---
 

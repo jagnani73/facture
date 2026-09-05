@@ -3,13 +3,18 @@
 The API behind the book. Hono on Node, SQLite via Drizzle, Hedera for the paper and Arc
 for the cash.
 
-> **Status: implemented, undeployed.** Every route and service body is written and
-> exercised by tests — nothing returns `501` any more. The database is the one dependency
-> that is fully real: `pnpm db:migrate && pnpm db:seed` builds the whole demo book in a
-> file. What is _not_ done is the part that needs a chain: no ATS factory is configured and
-> no contract has been deployed. The two seams that reach one (`services/ats.ts`,
-> `services/compliance.ts`) fail loudly rather than simulating, which is why
-> `ATS_FACTORY_ID` being unset disables issuance instead of faking it.
+> **Status: deployed and settling.** Every route and service body is written and exercised
+> by tests, and the chain-facing half is live rather than pending: six contracts across
+> Hedera and Arc testnets, bonds issued by this service through the ATS factory, two
+> complete lifecycles settled and one receivable matured and paid. `pnpm db:migrate` builds
+> the schema; `db:seed` fills an **empty** database with the demo book and must not be run
+> against a populated one.
+>
+> The seams that reach a chain still fail loudly rather than simulating — `ATS_FACTORY_ID`
+> unset disables issuance instead of faking it, and `ARC_MANDATE_VAULT_ADDRESS` unset
+> disables the Arc settlement rail rather than pretending capital is escrowed. That is the
+> rule the whole service is built on, and it is why an unconfigured deployment is obviously
+> unconfigured.
 
 ## Running it
 
@@ -71,9 +76,11 @@ A **refusal is not an error.** A mandate that will not take a piece of paper is 
 in the `200` quote body with a reason in words and an HCS receipt reference, because
 telling a funder why they were not matched is a product output, not a failure.
 
-`POST /v1/trades` is **both halves of one x402 exchange**, not two routes. The first
-request arms the trade and answers `402` carrying `PAYMENT-REQUIRED`; the buyer signs the
-challenge and repeats the same request with `PAYMENT-SIGNATURE`, which is the leg that
+`POST /v1/trades` is **one route with two rails**, not two routes. A mandate escrowed on
+Arc settles outright and answers `200` with both legs done — no challenge, because a funded
+bid already agreed to anything meeting its terms. An unfunded one gets the x402 exchange: the
+first request arms the trade and answers `402` carrying `PAYMENT-REQUIRED`; the buyer signs
+the challenge and repeats the same request with `PAYMENT-SIGNATURE`, which is the leg that
 moves money. Splitting them would let a client execute a payment against a challenge it
 never received.
 
