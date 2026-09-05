@@ -475,7 +475,16 @@ export const refusalReceipts = sqliteTable(
       .notNull()
       .references(() => buyers.id),
 
-    /** e.g. `regulation_mismatch`, `rating_below_floor`, `tenor_exceeded`, `exposure_exhausted`. */
+    /**
+     * Shared's spelling, written through unchanged: `RATING_BELOW_MANDATE`,
+     * `TENOR_EXCEEDS_MANDATE`, `EXPOSURE_EXHAUSTED`, `DEBTOR_CONCENTRATION`,
+     * `NOT_KYC_VERIFIED`, `MANDATE_NOT_ACTIVE`, `INVOICE_NOT_CONFIRMED`.
+     *
+     * This column is what a funder reads back and what goes to HCS, so it is the side the
+     * contracts were renamed to match rather than the other way round. The examples here
+     * used to be the pre-rename snake_case vocabulary, which is the split surviving in the
+     * one place that is supposed to have settled it.
+     */
     reasonCode: text('reason_code').notNull(),
     /** The sentence the funder actually reads. */
     reasonText: text('reason_text').notNull(),

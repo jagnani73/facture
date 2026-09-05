@@ -53,10 +53,19 @@ repo in `facture-prep/BLOCKERS.md`.
 
 1. **Gas / per-invoice model.** Resolved — see the architecture decision above. No transaction
    needed; the answer was already in the deployed factory's history.
-2. **Arc "Launch on Mainnet" track eligibility.** Still open, but it is a prize question, not an
-   architectural one. The Continuity-only badge is _absent_ from that track, yet its copy reads
-   "Take a project you own — an existing MVP, open source repo, or live product", which a
-   from-scratch entrant cannot satisfy. Genuinely ambiguous; ask Circle before counting the $5,000.
+2. **Arc "Launch on Mainnet" track eligibility. Researched 2026-09-02; still unresolved, and
+   the $5,000 is NOT to be counted.** The Continuity-only badge is genuinely absent from that
+   track — verified by counting the badge string across the whole prizes page, where it appears
+   on six other tracks and on none of Arc's three. One new piece of evidence cuts the other way
+   from the copy: the qualification requirements scope the Sept-30 mainnet bar explicitly "for
+   the Continuity Track", which is only meaningful if a non-Continuity path to the same prize
+   exists. But every "What We're Looking For" bullet still describes extending a live product,
+   so even a technically eligible from-scratch entrant would be judged against criteria written
+   for someone else. **There is no precedent**: this track format appears at neither HackMoney
+   2026 nor Cannes 2026, where Arc ran ordinary open build tracks. Ask Circle in the ETHGlobal
+   Discord sponsor channel; the question is drafted in `facture-prep/partner-research.md` §4.
+   Note Mand(ate), the prior art the README names, won an Arc track at HackMoney as a
+   from-scratch project — so from-scratch entrants are not categorically excluded by Arc.
 3. **Blocky402 facilitator.** `GET /supported` returns 200 and advertises `hedera:testnet` under
    x402 v2, scheme `exact`. Fee payer `0.0.7162784` is ECDSA and holds ~290,667 HBAR, so funding
    is not the risk. Read `extra.feePayer` at runtime, never hardcode it. **It remains a single
@@ -110,13 +119,15 @@ Researched, not assumed. Violating these costs days.
   function for resale hold, accreditation or international investors, and `resaleHoldPeriod`
   appears nowhere in contract logic. Eligibility is enforced by `ControlList` and `Kyc`, as
   already decided below. None of it can revert a trade.
-- **Open: Reg S is probably the right declaration, not 506(c).** Per the deployed contract, Reg S
-  is the only one allowing international investors AND the only one without a 6mo–1yr resale
-  hold. Reg D declares a hold that contradicts a holder relisting on day 30, and bars the
-  international buyers the cross-chain argument depends on. The accreditation rationale for
-  506(c) does not survive contact with the source: all three are `ACCREDITATION_REQUIRED`.
-  Scope Reg S geographically with `AdditionalSecurityData.listOfCountries`. Reversible until the
-  first instrument is issued; changes the refusal copy.
+- **Settled: Reg S, not 506(c). No longer reversible — three instruments carry it.** Per the
+  deployed contract, Reg S is the only one allowing international investors AND the only one
+  without a 6mo–1yr resale hold. Reg D declares a hold that contradicts a holder relisting on
+  day 30, and bars the international buyers the cross-chain argument depends on. The
+  accreditation rationale for 506(c) does not survive contact with the source: all three are
+  `ACCREDITATION_REQUIRED`. Reg S is scoped geographically with
+  `AdditionalSecurityData.listOfCountries`, currently `AF,CU,KP,IR,SY`. The probe bond,
+  MF-2051 and MF-2052 all decode to `1/0` on chain, so this is now a fact about deployed paper
+  rather than a preference.
 - **`Loan`, `BondFixedRate` and `BondKpiLinkedRate` are not deployable.** They exist in the
   `SecurityType` enum with some backing domain data, but the shipped factory exposes only
   `deployBond` (always `BondVariableRate`), `deployEquity` and `deployDepositToken`. Ignore any
@@ -248,9 +259,21 @@ the same way. Codes with no off-chain counterpart (`MANDATE_UNKNOWN`, `INVOICE_U
 contract-side only. Changing one side without the other reintroduces the split; the reasoning is
 recorded at the top of `ReasonCodes.sol`.
 
-Two things follow. The live testnet contracts carry the old strings in their bytecode and need
-redeploying. And `ON_CHAIN_REASON_CODE` in `packages/agent/src/mandate.ts` still translates to the
-old names - it is now an identity map for the codes it covers, and should be retired or corrected.
+One thing follows: the live testnet contracts carry the old strings in their bytecode and need
+redeploying.
+
+**The note that used to stand here about `ON_CHAIN_REASON_CODE` was wrong in both halves, and
+is corrected rather than deleted because the wrong version was acted on.** It claimed the map
+"still translates to the old names" and was "now an identity map for the codes it covers" — a
+self-contradiction, and neither part true. `e6edbe6` corrected the values in the same commit
+that wrote the sentence. And it is not a full identity: seven codes map to themselves, two are
+`null`, and one is a real translation — `INELIGIBLE_JURISDICTION → CONTROL_LIST_BLOCKED`, which
+is **correct**, since the book does not decide jurisdiction (`AtsComplianceGate` does, from the
+instrument's own `ControlList`) and `ReasonCodes.sol` has no `INELIGIBLE_JURISDICTION` to be
+identical to. So the map stays: deleting it would delete the record of the only three places
+the two vocabularies do not line up. The seven identities are now compiler-enforced by
+`OnChainSpelling`, and a test reads `ReasonCodes.sol` itself — TypeScript cannot see a Solidity
+rename, which is the direction that could reopen the split.
 
 ### Resolved: issuance works, and how it did not
 
@@ -381,6 +404,99 @@ record in [docs/deployments.md](./docs/deployments.md).
 
 Maturity was called four times during that work, and the ledger carries one outcome, one capital
 release, one rating tick and one schedule. Idempotency is not theoretical here.
+
+### Resolved: the instrument's regulation comes from the invoice
+
+**MF-2052's row said Reg D 506(c) and its bond went out `1/0`, Reg S.** Found by decoding the
+deploy calldata off the mirror node, not by reading either side's code — neither side looked
+wrong on its own.
+
+`IssuanceJob.regulationType` was read off the invoice, carried through `issuanceJobFor` into the
+queue, and then **ignored**: `deployBond` took `config.regulation` instead. Anything created
+through the API agreed only because both came from `ATS_REGULATION_TYPE`; seeded rows carried a
+literal written before Reg S was settled, and did not. The wire reports this field per invoice,
+so the proof view described Reg S paper as Reg D.
+
+- **The job's value is what deploys now**, and `AtsAdapterConfig.regulation` is gone rather than
+  left as a second source. One place has to be wrong for the instrument to be wrong.
+- **A test pins each stored spelling to the enum pair the deployed factory checks** — Reg S
+  `1/0`, 506(b) `2/1`, 506(c) `2/2`. A wrong mapping is a valid-looking number declaring the
+  wrong offering, and a declaration is not something the venue can correct afterwards.
+- **Migration `0003` corrects the column default and the stored rows, and has NOT been applied
+  to `packages/backend/data/facture.db`.** Drizzle rebuilds the `invoices` table to change a
+  default, which is not something to run against live demo state mid-session. Until it runs,
+  seeded rows there still read Reg D while every deployed instrument is Reg S.
+
+This is the third field found plumbed to the edge and dropped, after the indexer cursor and the
+agent's translation table. Worth checking for directly rather than waiting to trip over.
+
+### Resolved: `/health` reports reachability, because nothing here indexes
+
+`/health` returned **503 from before the first settled trade**. `Indexer.advance()` was the only
+writer of a cursor and nothing ever called it, the seed persists `"0"`, so the lag printed as
+the whole chain height on both rails.
+
+**This build does not index, and that is not a gap.** The venue _originates_ its chain
+transactions rather than following a stream, so everything it stores is a transaction id or a
+consensus timestamp — identifiers, not resumable positions. The only position a settlement hook
+could record is a transaction the venue submitted itself, and `head − that` measures time since
+the last trade, not distance behind the chain; a quiet market would report degraded, which is
+the same lie inverted. So `advance()` was removed rather than left waiting for its loop.
+
+What is reported instead is per-rail reachability, which is a real dependency probe: Arc's RPC
+carries the cash leg, and Hedera's mirror node is what the compliance gate reads and what a
+payout's status is asked of. **The distinction the old cursor comment protected outlives the
+cursor** — "not asked yet" and "asked, no answer" must not render as the same thing — and is now
+an explicit `state` rather than an inference from a triple of nulls. A failed read builds a
+fresh row instead of spreading the last good one, so a stale head cannot ship under a fresh
+`lastPolledAt`. viem's 4-second block cache is off for that reason.
+
+### The web package has tests now
+
+vitest + jsdom, `vite-tsconfig-paths` so the `@/` alias comes from tsconfig rather than a second
+copy. CSS never runs, so Tailwind and PostCSS stay out of it. **Component and unit only — no
+browser or e2e harness**, deliberately.
+
+What it guards is the class `tsc --noEmit` cannot see: a decoder reading the wrong field is
+well-typed. `src/lib/api/contract.ts` is tested against its own stated rule — a decoder never
+guesses, and a field the screen would render must raise `unreadable` naming the path rather than
+default to a zero that looks like a price. `apiMarket` is deliberately uncovered and says why.
+
+Two things this surfaced, neither fixed:
+
+- **The proof view's "Transferred" row is dead on the live path.** The backend publishes
+  `assetLeg.unitsMinor` — with a comment saying it exists because a trade that moved one unit of
+  a face-value-many issuance is "the kind of claim a proof view exists to make impossible to
+  hide" — and the web decoder has no such field, so `apiProof` hardcodes `quantity: null` and the
+  row never renders. The fixture path shows it; the real one never does.
+- `readInvoice` maps a Hedera native id (`0.0.10331926`) into `instrumentAddress`, typed as a
+  viem `Address`. Harmless today — only `isIssued` reads it — and wrong the moment anything
+  builds an EVM explorer link from it.
+
+### Open: Privy as the third partner integration
+
+Researched 2026-09-02, **not decided**. Privy is an ETHOnline sponsor at $5,000, though its
+prize page still says "Prize details coming soon".
+
+The reason to consider it is product, not badge. `schema.ts` already carries nullable
+`hederaAccountId` / `arcAddress` on `sellers` and `buyers`, with the comment _"May be a wallet
+made from an email address; the seller never needs to know."_ **Nothing populates them** — there
+is no seller/buyer auth anywhere in the repo. So this is greenfield work filling a seam that was
+deliberately left, not a replacement of anything running.
+
+- **It is not whitelist-gated the way we feared.** Privy takes any EVM chain by
+  `defineChain` + custom RPC, so Hedera 296 and Arc 5042002 fit structurally, and its
+  `chain_type: 'ethereum'` wallets are **secp256k1**, which satisfies the ECDSA constraint.
+  Neither chain is named or tested by Privy, and no prior art for Privy+Hedera exists anywhere.
+- **It cannot sign native Hedera transactions** — `ScheduleSign`, `ContractExecuteTransaction`.
+  Its interface is EVM-shaped only. That is survivable because the operator signs those, and the
+  one thing a buyer's own key must sign is the x402 payload, which is `signTypedData`-shaped.
+- **Do not touch `packages/agent/src/wallet.ts`.** Circle agent wallets serve a different actor
+  solving a different problem, and already work.
+- Cost is $0 at this scale. Wiring is 1–2 days; **the risk is the half-day spike** proving a
+  Privy key can sign and broadcast against Hedera's JSON-RPC relay. If that fails, fall back to
+  a server-side secp256k1 keypair — the pattern the operator already uses — rather than fighting
+  an undocumented integration.
 
 ## Cut list
 

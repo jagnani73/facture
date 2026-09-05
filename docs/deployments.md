@@ -293,6 +293,58 @@ All ten transactions succeeded first time. Grants target the operator's **alias*
 long-zero address — to a Solidity mapping they are unrelated keys, and the venue calls from the
 alias.
 
+## A second clean lifecycle — MF-2052, 2026-09-02
+
+The same path again on the venue's other own-issued instrument, and worth recording separately
+because the interesting part happened before the trade did.
+
+MF-2052's bond existed, with supply, allowlist and KYC all empty. The book quoted **nothing**
+for it: `mandatesMatching: 0`, `mandatesBarredByInstrument: 3`, `quote: null`. That is the
+compliance-aware pricing from `4b90e1f` working — three funded bids passed every economic test
+and were dropped because the security does not permit their buyers, and the seller was told so
+instead of being shown a price nobody could take.
+
+`prepare-security.mjs` ran the ten-step sequence against
+`0x1f2cf9c8f259291cb667cf24956a8e0150c8bc2e`, all succeeding first time, and the same quote
+became:
+
+|                              | before preparation | after   |
+| ---------------------------- | ------------------ | ------- |
+| `mandatesConsidered`         | 7                  | 7       |
+| `mandatesMatching`           | 0                  | 3       |
+| `mandatesBarredByInstrument` | 3                  | 0       |
+| quote                        | `null`             | 850 bps |
+
+The four economic refusals — two `RATING_BELOW_MANDATE`, one `DEBTOR_CONCENTRATION`, one
+`TENOR_EXCEEDS_MANDATE` — are unchanged either side, which is the point: preparing the
+instrument moved exactly the bids the instrument was blocking.
+
+| step        |                                                                        |
+| ----------- | ---------------------------------------------------------------------- |
+| instrument  | `0.0.10331928`, ISIN `USCY30T912O5`, Petra Foods Group, face $8,900    |
+| supply      | 890,000 units to the seller                                            |
+| quoted      | 850 bps, 48 days, proceeds 880,051, discount 9,949                     |
+| asset leg   | hold `1`, 890,000 units, `0.0.10311549@1788345829.699348346`           |
+| cash leg    | x402 `exact`, `0.0.7162784@1788345825.712636474`, payer `0.0.10314099` |
+| maturity    | schedule `0.0.10332936`, signed `0.0.10331559@1788345863.327351895`    |
+| holder paid | `0.0.10314099` +890,000 tinybars — par                                 |
+
+Trade `6f0654c7-99fc-4f4c-a4fb-d0e7d2626b2e`. Balances either side of the signature: collection
+`0.0.10331559` 489,572,390 → 487,187,144 (-2,385,246), holder `0.0.10314099` 4,833,332,687 →
+4,834,222,687 (+890,000). The holder received exactly face; the 1,495,246 difference is the
+venue's fee, not the holder's.
+
+### The regulation on chain is Reg S, and the row said otherwise
+
+Decoding this bond's own `deployBond` calldata gives `regulationType 1, regulationSubType 0` —
+Reg S, as decided. The invoice row said `reg-d-506c`, because the job carried the row's value to
+the adapter and the adapter used a venue-wide config value instead. Fixed in `083a26d`; the
+column default and the stored rows are corrected by migration `0003`, **which has not been
+applied to `packages/backend/data/facture.db`** — drizzle rebuilds the `invoices` table to change
+a default, which is not an operation to run against live demo state mid-session. Until it runs,
+seeded rows on that database still read Reg D 506(c) while every instrument the venue has
+deployed is Reg S.
+
 ## Debris on MF-2046
 
 Five settlement attempts were abandoned during debugging on 2026-09-01 before the trade above
