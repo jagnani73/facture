@@ -610,6 +610,27 @@ describe('readTradeProof', () => {
   });
 
   /*
+   * The venue sends `unitsMinor` so a trade moving one unit of a face-value-many issuance
+   * cannot hide. This decoder simply did not declare the field, so it was dropped in
+   * silence for as long as anyone looked — the shape of failure a decoder test exists to
+   * catch, since a field missing from a type is not a type error anywhere.
+   */
+  it('reads how many units the asset leg moved', () => {
+    expect(
+      readTradeProof({ ...PROOF, assetLeg: { ...PROOF.assetLeg, unitsMinor: '890000' } }).assetLeg
+        .unitsMinor,
+    ).toBe(890_000n);
+    expect(readTradeProof(PROOF).assetLeg.unitsMinor).toBeNull();
+  });
+
+  it('refuses a unit count that is not a decimal string', () => {
+    const error = refusal(() =>
+      readTradeProof({ ...PROOF, assetLeg: { ...PROOF.assetLeg, unitsMinor: 890000 } }),
+    );
+    expect(error.detail).toContain('assetLeg.unitsMinor');
+  });
+
+  /*
    * The one documented exception to the "domain name and nothing else" rule: the backend
    * still spells these two with the old suffix and flags the rename as unmade. Both
    * spellings are read, because the rename can land on either side first.

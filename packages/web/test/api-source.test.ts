@@ -64,6 +64,7 @@ const proof = (over: Partial<TradeProofResponse> = {}): TradeProofResponse => ({
   assetLeg: {
     chain: 'hedera',
     holdId: '1',
+    unitsMinor: 890_000n,
     transactionId: null,
     consensusAt: null,
     explorerUrl: null,
@@ -207,6 +208,50 @@ describe('apiProof', () => {
    * hardcoded Arc would print an ArcScan link over a Hedera transaction id on the one page
    * whose entire job is being checkable somewhere else.
    */
+  /*
+   * The venue publishes `unitsMinor` so that a trade moving one unit of a face-value-many
+   * issuance cannot hide. Nothing here read it until 2026-09-02, so the row it feeds showed
+   * on the fixture path and never on the live one — the failure a decoder test exists for,
+   * since a field that is merely absent from a type is not a type error anywhere.
+   */
+  it('says how many units moved, and of which security', async () => {
+    answer(proof());
+    expect((await apiProof(TRADE_ID)).assetLeg.quantity).toBe('890,000 units of 0.0.10331926');
+  });
+
+  it('counts one unit in the singular, which is the case worth noticing', async () => {
+    answer(
+      proof({
+        assetLeg: {
+          chain: 'hedera',
+          holdId: '1',
+          unitsMinor: 1n,
+          transactionId: null,
+          consensusAt: null,
+          explorerUrl: null,
+        },
+      }),
+    );
+    expect((await apiProof(TRADE_ID)).assetLeg.quantity).toBe('1 unit of 0.0.10331926');
+  });
+
+  /** An unstated size is not a size of zero, and must not render as "0 units". */
+  it('says nothing about size when the venue did not', async () => {
+    answer(
+      proof({
+        assetLeg: {
+          chain: 'hedera',
+          holdId: '1',
+          unitsMinor: null,
+          transactionId: null,
+          consensusAt: null,
+          explorerUrl: null,
+        },
+      }),
+    );
+    expect((await apiProof(TRADE_ID)).assetLeg.quantity).toBeNull();
+  });
+
   it('takes the cash leg chain from the venue rather than assuming one', async () => {
     answer(proof());
     expect((await apiProof(TRADE_ID)).cashLeg.chain).toBe('hedera-testnet');
@@ -254,7 +299,13 @@ describe('apiProof', () => {
    */
   it('builds a security link only when there is a security to link to', async () => {
     answer(proof());
-    expect((await apiProof(TRADE_ID)).instrument.explorerUrl).toContain('/token/0.0.10331926');
+    /*
+     * `/contract/`, not `/token/`. An ATS security is a diamond, and HashScan's token page
+     * for one shows nothing — the mirror node 404s the same id under `/tokens/`. This is the
+     * fallback for when the venue sent no link of its own, so it has to agree with the one
+     * the venue builds rather than quietly differ from it.
+     */
+    expect((await apiProof(TRADE_ID)).instrument.explorerUrl).toContain('/contract/0.0.10331926');
 
     answer(
       proof({

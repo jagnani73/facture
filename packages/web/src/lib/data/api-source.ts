@@ -22,7 +22,7 @@
  * the seller was shown.
  */
 
-import type { Debtor, Invoice, Mandate } from '@/lib/domain';
+import type { Debtor, Invoice, Mandate, MinorUnits } from '@/lib/domain';
 import { ASSET_CHAIN, CHAINS, isQuotable, tenorDays } from '@/lib/domain';
 import type { Position } from '@/lib/pricing';
 import { api } from '@/lib/api/client';
@@ -275,6 +275,20 @@ const HEDERA = CHAINS[ASSET_CHAIN];
  * The first occurrence keeps its position, so the order the venue returned — which is the
  * order they were written — still reads top to bottom.
  */
+/**
+ * The asset leg's size, in the words the screen uses: how many units, of which security.
+ *
+ * A unit here is one minor unit of the invoice currency, so the count is the face value and
+ * never has a fractional part. `null` when the venue did not say — a transfer of an unstated
+ * size is not a transfer of zero, and this row exists precisely so that a trade moving one
+ * unit of a face-value-many issuance is impossible to miss.
+ */
+function transferredUnits(units: MinorUnits | null, securityId: string | null): string | null {
+  if (units === null) return null;
+  const counted = `${units.toLocaleString('en-US')} ${units === 1n ? 'unit' : 'units'}`;
+  return securityId === null ? counted : `${counted} of ${securityId}`;
+}
+
 function collapseRefusals(refusals: TradeProofResponse['refusals']): ProofRecord['refusals'] {
   const byReason = new Map<string, ProofRecord['refusals'][number] & { times: number }>();
 
@@ -327,8 +341,12 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
       issuedTxId: null,
       explorerUrl:
         proof.invoice.securityExplorerUrl ??
+        // `/contract/`, not `/token/`. An ATS security is a diamond the factory deployed and
+        // the mirror node 404s it as a token, so the old spelling was a dead link on the one
+        // screen that exists to be checked. The venue's own link is preferred; this is only
+        // the fallback for when it did not send one, and it has to agree with it.
         (proof.invoice.securityId
-          ? `${HEDERA.explorerUrl}/token/${proof.invoice.securityId}`
+          ? `${HEDERA.explorerUrl}/contract/${proof.invoice.securityId}`
           : null),
     },
     confirmation: proof.confirmation,
@@ -336,7 +354,7 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
     assetLeg: {
       from: null,
       to: null,
-      quantity: null,
+      quantity: transferredUnits(proof.assetLeg.unitsMinor, proof.invoice.securityId),
       transactionId: proof.assetLeg.transactionId,
       holdId: proof.assetLeg.holdId,
       consensusAt: proof.assetLeg.consensusAt,

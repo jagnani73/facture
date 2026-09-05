@@ -1001,6 +1001,16 @@ export interface TradeProofResponse {
   assetLeg: {
     chain: 'hedera';
     holdId: string | null;
+    /**
+     * How many units actually moved.
+     *
+     * The venue publishes this precisely so that a trade moving one unit of a
+     * face-value-many issuance cannot hide, which makes it the last field on this screen
+     * that should have been going unread — and it was, until 2026-09-02. The backend sent
+     * it, nothing here declared it, so the row it feeds rendered on the fixture path and
+     * never on the live one.
+     */
+    unitsMinor: MinorUnits | null;
     transactionId: string | null;
     consensusAt: string | null;
     explorerUrl: string | null;
@@ -1168,6 +1178,7 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
     assetLeg: {
       chain: 'hedera',
       holdId: readOptionalString(field(assetLeg, 'holdId'), `${path}.assetLeg.holdId`),
+      unitsMinor: readOptionalMoney(field(assetLeg, 'unitsMinor'), `${path}.assetLeg.unitsMinor`),
       transactionId: readOptionalString(
         field(assetLeg, 'transactionId'),
         `${path}.assetLeg.transactionId`,
