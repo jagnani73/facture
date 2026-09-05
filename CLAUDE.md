@@ -495,7 +495,7 @@ Two things this surfaced, neither fixed:
   viem `Address`. Harmless today — only `isIssued` reads it — and wrong the moment anything
   builds an EVM explorer link from it.
 
-### Resolved: Privy is onboarding, and only onboarding
+### Resolved: Privy is onboarding, and one signature after the trade
 
 **Decided and built 2026-09-02.** Privy signs a seller in by email and the wallet it makes is
 recorded against the business. It touches nothing in the settlement path, and that boundary is
@@ -930,6 +930,57 @@ Its first run fixed the live blocker — the seller held **zero** USDC on Arc, a
 `DvpEscrow.claim` is beneficiary-only while Arc gas is USDC — and registered Harrow Point's
 second mandate, which closes the `registerMandate` finding above: that function had no caller,
 so no mandate created through the API could ever be escrowed.
+
+### Corrected: Privy signs exactly one thing, and it is not the cash leg
+
+**The "onboarding and only onboarding" boundary above was drawn for a reason that does not
+cover the Arc rail, and it has moved by exactly one transaction (2026-09-03).**
+
+The reason still stands where it was aimed: a Privy signer **cannot** produce the x402 cash
+leg, which is a native Hedera `TransferTransaction` and not EIP-712 or `eth_sendTransaction`.
+Nothing about that changed.
+
+What changed is that a second cash rail exists. A sale settled out of the buyer's escrow does
+not pay the seller's wallet — it opens a `DvpEscrow` lock, and **`claim` checks
+`msg.sender == beneficiary`**, which `MandateVault.test.ts` asserts by refusing the attester
+while it holds the public preimage. So the venue cannot collect for a seller under any
+circumstances, and the only key that can is the one Privy made at sign-in.
+
+- **Arc is now declared to Privy; Hedera still is not.** The old comment refused to declare
+  chains because the app transacted from no wallet. It transacts from one now, on one chain,
+  for one call. Hedera stays undeclared because nothing a Privy signer produces is useful
+  there.
+- **The seller still signs nothing to sell.** Not to list, not to be matched, not to settle —
+  the venue holds the paper and places the hold. They sign only to collect money already bound
+  to their address on chain, after the trade is done. That is the boundary the original
+  decision was protecting, and it is intact.
+- **Neither the preimage nor the escrow address is a credential.** `claim` needs the caller as
+  well as the hash, and the escrow writes the preimage to storage in the clear the moment
+  anyone claims. Publishing both is what makes the payout claimable at all; withholding the
+  first once already cost a payout.
+- **The button renders for nobody else**, and each refusal is a separate fact: a claimed or
+  refunded lock, a missing preimage or escrow address, a wallet that is not the beneficiary.
+  Offering a claim that reverts is worse than offering none.
+
+This also satisfies the Privy tracks' "at least one Privy control" requirement — but the
+reason to build it is that a seller could not otherwise be paid, and the requirement is
+downstream of that.
+
+### Contracts are verified on Sourcify
+
+`pnpm --filter @facture/contracts verify`. All seven read `match: null` before it; HashScan's
+badge is a Sourcify lookup, so publishing there is what lights it, and the Tokenization track
+asks for exactly that. Confirmed in a browser: HashScan renders `UniquenessRegistry ·
+VERIFIED`. **Sourcify indexes Arc testnet too**, which was not expected.
+
+Two traps worth keeping. **`server-verify.hashscan.io` is retired** — it answers 308 to
+`sourcify.dev/server` and drops the path, so a direct query returns a bare `Cannot GET /` that
+reads like a broken endpoint. And **Hardhat 3 prefixes source names with `project/`**, which
+Sourcify matches exactly, so `contracts/Foo.sol:Foo` matches nothing.
+
+No `hardhat-verify` plugin: a new dependency here brings an unapproved build script that
+breaks `pnpm -r`, and Sourcify's v2 API takes the standard JSON `artifacts/build-info` already
+holds.
 
 ## Cut list
 
