@@ -27,7 +27,7 @@ import {
 } from '../src/services/issuance.js';
 import { ratingService } from '../src/services/rating.js';
 import { EXPIRED_AFTER_SECONDS, settlementService } from '../src/services/settlement.js';
-import { call, createHarness, type Harness } from './helpers.js';
+import { call, createHarness, listInvoice, type Harness } from './helpers.js';
 
 let h: Harness;
 
@@ -800,6 +800,8 @@ describe('the whole position', () => {
    */
   async function arm(invoiceLabel = 'INV-2041') {
     const invoiceId = h.seeded.invoiceIds[invoiceLabel] ?? '';
+    // A sale needs an offer, and the seeded book is confirmed rather than listed.
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const armed = await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId },
@@ -856,6 +858,7 @@ describe('the whole position', () => {
 
   it('refuses a seller who holds nothing, rather than transferring zero units', async () => {
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const invoice = await h.store.getInvoice(invoiceId);
     h.ats.balances.set(invoice?.securityId ?? '', 0n);
 
@@ -878,6 +881,7 @@ describe('the whole position', () => {
 describe('the half-settled state', () => {
   it('is reported loudly and is not unwound, because the payment really happened', async () => {
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId },
@@ -906,6 +910,7 @@ describe('the half-settled state', () => {
 describe('unwinding', () => {
   it('is safe to call twice', async () => {
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const armed = await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId },
@@ -935,6 +940,7 @@ describe('POST /v1/trades/:id/unwind', () => {
    */
   async function arm(): Promise<{ tradeId: string; mandateId: string; proceeds: bigint }> {
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const armed = await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId },
@@ -1011,6 +1017,7 @@ describe('an armed trade nobody pays for', () => {
 
   async function arm(): Promise<{ tradeId: string; mandateId: string; proceeds: bigint }> {
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const armed = await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId },

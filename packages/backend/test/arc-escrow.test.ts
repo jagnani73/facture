@@ -103,8 +103,16 @@ describe('funding with a vault configured', () => {
     expect(res.body.escrowVerified).toBe(true);
   });
 
-  /* The whole point: a claim about someone else's ledger is not capital. */
-  it('refuses to count more than the vault holds', async () => {
+  /*
+   * The whole point, kept: a claim about someone else's ledger is not capital.
+   *
+   * It is now kept by the state rather than by a refusal. The commitment is recorded — so the
+   * buyer does not have to re-state an amount they have already given once their deposit
+   * lands — and the mandate sits in `funding`, which is not a status the book quotes. What
+   * must never happen is a bid on the curve backed by a request body, and that is what
+   * `quoting: false` is asserting.
+   */
+  it('parks an unbacked funding rather than putting it on the curve', async () => {
     // One USDC minor unit short of backing $50,000.00.
     h = await createHarness({ arc: stubVault(needs(5_000_000n) - 1n) });
     const id = await draftMandate();
@@ -113,8 +121,11 @@ describe('funding with a vault configured', () => {
       body: { amountMinor: '5000000', escrowRef: '0xdeadbeef' },
     });
 
-    expect(res.status).toBe(400);
-    expect(res.body.detail).toContain('the vault holds');
+    expect(res.status).toBe(200);
+    expect(res.body.mandate.status).toBe('funding');
+    expect(res.body.quoting).toBe(false);
+    expect(res.body.escrow.state).toBe('short');
+    expect(res.body.message).toContain('the vault holds');
 
     const after = await call(
       h.app,
@@ -122,8 +133,61 @@ describe('funding with a vault configured', () => {
       `/v1/mandates?buyerId=${h.seeded.buyerIds['BUY-ASHGROVE']}`,
     );
     const mandate = after.body.mandates.find((m: { id: string }) => m.id === id);
-    expect(mandate.committed).toBe('0');
+    expect(mandate.committed).toBe('5000000');
     expect(mandate.quoting).toBe(false);
+  });
+
+  /*
+   * The other half of the same rule, and the one that makes the state worth having: funding
+   * again is how a parked bid gets re-checked, and it goes live the moment the money is there.
+   */
+  it('promotes a parked bid once the deposit lands', async () => {
+    let deposited = 0n;
+    h = await createHarness({
+      arc: fakeArcEscrow({
+        depositedFor: () => Promise.resolve(deposited),
+        buyerOf: () => Promise.resolve('0x1c755e95cb11e5d5af498bb0ea595b56e1adb035'),
+      }),
+    });
+    const id = await draftMandate();
+
+    const parked = await call(h.app, 'POST', `/v1/mandates/${id}/fund`, {
+      body: { amountMinor: '5000000', escrowRef: '0xdeadbeef' },
+    });
+    expect(parked.body.mandate.status).toBe('funding');
+
+    deposited = needs(5_000_000n);
+
+    // Zero more capital: the amount was already committed, and what changed is the vault.
+    const live = await call(h.app, 'POST', `/v1/mandates/${id}/fund`, {
+      body: { amountMinor: '0', escrowRef: '0xdeadbeef' },
+    });
+
+    expect(live.status).toBe(200);
+    expect(live.body.mandate.status).toBe('active');
+    expect(live.body.mandate.committed).toBe('5000000');
+    expect(live.body.quoting).toBe(true);
+  });
+
+  /*
+   * An indeterminate answer must not make a bid firm. The parallel is the compliance gate
+   * rather than the settlement rail: a bid going live is a price appearing on the curve, and
+   * a price must never move on a read that failed.
+   */
+  it('does not go live on a vault that could not be read', async () => {
+    h = await createHarness({
+      arc: fakeArcEscrow({ depositedFor: () => Promise.reject(new Error('rpc down')) }),
+    });
+    const id = await draftMandate();
+
+    const res = await call(h.app, 'POST', `/v1/mandates/${id}/fund`, {
+      body: { amountMinor: '5000000', escrowRef: '0xdeadbeef' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.mandate.status).toBe('funding');
+    expect(res.body.escrow.state).toBe('unreadable');
+    expect(res.body.escrowVerified).toBe(false);
   });
 
   /*
@@ -141,20 +205,29 @@ describe('funding with a vault configured', () => {
     });
     expect(first.status).toBe(200);
 
+    /*
+     * Refused rather than parked, and that is the one case that still is: the first funding
+     * made this bid firm, and the machine has no `active -> funding` to demote it into. So
+     * there is nowhere to put an unverifiable top-up except on the curve, which is exactly
+     * what must not happen.
+     */
     const second = await call(h.app, 'POST', `/v1/mandates/${id}/fund`, {
       body: { amountMinor: '3000000', escrowRef: '0xtwo' },
     });
     expect(second.status).toBe(400);
+    expect(second.body.detail).toContain('the vault holds');
   });
 
-  it('refuses everything when the vault holds nothing', async () => {
+  it('quotes nothing when the vault holds nothing', async () => {
     h = await createHarness({ arc: stubVault(0n) });
     const id = await draftMandate();
 
     const res = await call(h.app, 'POST', `/v1/mandates/${id}/fund`, {
       body: { amountMinor: '1', escrowRef: '0xdeadbeef' },
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    expect(res.body.mandate.status).toBe('funding');
+    expect(res.body.quoting).toBe(false);
   });
 });
 
@@ -208,6 +281,7 @@ describe('which bids are backed', () => {
 
     const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
     expect(mandate.escrow).toEqual({
+      state: 'backed',
       checked: true,
       depositedUsdcMinor: '50000',
       requiredUsdcMinor: '50000',
@@ -263,6 +337,9 @@ describe('which bids are backed', () => {
       amount: 5_000_000n,
       escrowRef: 'escrow:seeded',
       at: new Date(),
+      // Firm without the vault having been asked, which is exactly the state a seeded
+      // mandate is in — and the point of the case: `active` does not imply `backed`.
+      firm: true,
     });
 
     const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
@@ -280,6 +357,7 @@ describe('which bids are backed', () => {
 
     const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
     expect(mandate.escrow).toEqual({
+      state: 'unreadable',
       checked: true,
       depositedUsdcMinor: null,
       requiredUsdcMinor: '0',
@@ -293,6 +371,7 @@ describe('which bids are backed', () => {
 
     const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
     expect(mandate.escrow).toEqual({
+      state: 'not-required',
       checked: false,
       depositedUsdcMinor: null,
       requiredUsdcMinor: '0',
@@ -515,10 +594,13 @@ describe('opening a mandate cash leg', () => {
       body: { amountMinor: '5000000', escrowRef: '0xdeadbeef' },
     });
 
-    // This request cannot succeed — the deposit had to come first and could not have — but the
-    // next one can, and the refusal says which of the two problems the buyer has.
-    expect(res.status).toBe(400);
-    expect(res.body.detail).toContain('can be funded');
+    // This bid cannot go live — the deposit had to come first and could not have — but the
+    // next call can put it there, and the message says which of the two problems the buyer
+    // has. Being told only "the vault holds 0" sends them to look at their wallet instead of
+    // at the registration that was never written.
+    expect(res.status).toBe(200);
+    expect(res.body.mandate.status).toBe('funding');
+    expect(res.body.message).toContain('can be funded');
     expect(registered).toEqual([{ mandateUuid: mandate.id, buyer: HARROW_ARC }]);
   });
 });
@@ -538,6 +620,7 @@ describe('closing a mandate cash leg', () => {
       amount: committedMinor,
       escrowRef: 'escrow:test',
       at: new Date(),
+      firm: true,
     });
     return id;
   }

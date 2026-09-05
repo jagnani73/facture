@@ -217,6 +217,8 @@ export interface BookRow {
   readonly tenorDays: number;
   readonly status: InvoiceStatus;
   readonly quotable: boolean;
+  /** Offered for sale by its seller. Quotable is a weaker fact — see `toBookRow`. */
+  readonly listed: boolean;
   readonly issued: boolean;
 }
 
@@ -737,6 +739,16 @@ function toBookRow(row: z.infer<typeof bookRowSchema>): BookRow | null {
     tenorDays: row.tenorDays ?? tenorDaysBetween(row.dueAt),
     status,
     quotable: QUOTABLE_INVOICE_STATUSES.includes(status),
+    /*
+     * Quotable and sellable are not the same permission, and the venue draws the line.
+     *
+     * A confirmed invoice carries a live price — that is what makes the book render one
+     * beside every green line — but only a `listed` one has been offered for sale, and the
+     * venue refuses to arm anything else. Listing is the seller's act and this is the buyer's
+     * side, so there is nothing for the agent to do about it but wait; knowing before arming
+     * turns a 409 into a skipped row with a reason.
+     */
+    listed: status === 'listed',
     /*
      * Issuance is paced and off the critical path, so an invoice is quotable before its ATS
      * bond exists. The agent may price it, but a trade against it would be refused as

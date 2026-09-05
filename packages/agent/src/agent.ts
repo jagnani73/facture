@@ -480,6 +480,16 @@ export function createMarketMaker(config: AgentConfig, deps: AgentDeps): MarketM
       return stop({ ...base, quoteId: null, armedStatus: null, skippedReason: 'issuance_pending' });
     }
 
+    if (!row.listed) {
+      /*
+       * Priced but not offered. The venue quotes a confirmed invoice and sells only a listed
+       * one, and listing is the seller's act — so this is not something a buyer can fix, and
+       * arming would come back 409. The bid stays interested; the row is skipped with the
+       * reason, exactly as an unissued one is.
+       */
+      return stop({ ...base, quoteId: null, armedStatus: null, skippedReason: 'not_listed' });
+    }
+
     const live = await venue.quote(acceptance.invoiceId);
     if (live.quoteId === null || live.proceeds === null) {
       return stop({ ...base, quoteId: null, armedStatus: null, skippedReason: 'no_live_quote' });

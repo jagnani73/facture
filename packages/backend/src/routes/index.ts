@@ -3,6 +3,7 @@
  *
  *   seller   /v1/sellers               sign in by email, record the wallet made from it
  *   seller   /v1/invoices              create, list, get, request confirmation
+ *   seller   /v1/invoices/:id/list     offer it into the book; /delist takes it back off
  *   debtor   /v1/confirm/:token        public, token-authenticated, no wallet, no signup
  *   seller   /v1/invoices/:id/quote    the price that is already there
  *   buyer    /v1/mandates              post, fund, list, withdraw, exposure

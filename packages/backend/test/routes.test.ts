@@ -14,7 +14,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
 import { settlementService } from '../src/services/settlement.js';
 import { X402_HEADERS } from '../src/services/x402.js';
-import { call, createHarness, createRefusingGate, type Harness, type JsonBody } from './helpers.js';
+import {
+  call,
+  createHarness,
+  createRefusingGate,
+  listInvoice,
+  type Harness,
+  type JsonBody,
+} from './helpers.js';
 
 let h: Harness;
 
@@ -403,6 +410,8 @@ describe('mandates', () => {
 describe('POST /v1/trades — cross-chain DvP', () => {
   async function armTrade(invoiceLabel = 'INV-2041') {
     const invoiceId = h.seeded.invoiceIds[invoiceLabel] ?? '';
+    // A sale needs an offer, and the seeded book is confirmed rather than listed.
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const armed = await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId, maxSlippageBps: 25 },
@@ -482,6 +491,7 @@ describe('POST /v1/trades — cross-chain DvP', () => {
     });
 
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const res = await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId },
@@ -499,6 +509,7 @@ describe('POST /v1/trades — cross-chain DvP', () => {
     h = await createHarness({ settleFails: 'INSUFFICIENT_PAYER_BALANCE' });
 
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const before = await h.store.getMandate(h.seeded.mandateIds['MND-01'] ?? '');
     await call(h.app, 'POST', '/v1/trades', { body: { invoiceId, quoteId: quote.body.quoteId } });
@@ -529,6 +540,9 @@ describe('POST /v1/trades — cross-chain DvP', () => {
   });
 
   it('rejects a quote from another invoice', async () => {
+    // Both listed, so what this refuses is the mismatched quote and not the missing offer.
+    await listInvoice(h.app, h.seeded.invoiceIds['INV-2041'] ?? '');
+    await listInvoice(h.app, h.seeded.invoiceIds['INV-2044'] ?? '');
     const quote = await call(
       h.app,
       'GET',
@@ -642,6 +656,7 @@ describe('trades and the proof view', () => {
 
   it('never synthesises a link whose identifier is null', async () => {
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const armed = await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId },

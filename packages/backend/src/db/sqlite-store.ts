@@ -41,6 +41,14 @@
 import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, notInArray, or } from 'drizzle-orm';
 import { conflict, duplicateReceivable, notFound } from '../errors.js';
 import type { Database } from './index.js';
+import {
+  fundingHops,
+  statusAfterAllocate,
+  statusAfterRelease,
+  statusAfterWithdraw,
+  transitionTo,
+  walkMandateStatus,
+} from './status.js';
 import type {
   BuyerRow,
   ConfirmationRequestRow,
@@ -354,10 +362,22 @@ export class SqliteStore implements Store {
           .get();
         if (!request) throw new Error('requestConfirmation returned no row');
 
+        /*
+         * The status moves only when it actually moves.
+         *
+         * Re-sending a link to a debtor who has not answered is the ordinary case — a lost
+         * email, a link that expired — and it used to write `awaiting_confirmation` over
+         * `awaiting_confirmation`, which is a self-edge the invoice machine refuses. The
+         * supersession above is what a re-request really does, and it is untouched: the
+         * previous link is invalidated in this same transaction whether the status moves or
+         * not, so a stale link still fails as superseded rather than silently working.
+         */
         const updated = tx
           .update(invoices)
           .set({
-            status: 'awaiting_confirmation',
+            ...(invoice.status === 'awaiting_confirmation'
+              ? {}
+              : { status: transitionTo(invoice.status, 'awaiting_confirmation') }),
             confirmationTokenHash: input.tokenHash,
             confirmationRequestedAt: input.requestedAt,
             confirmationExpiresAt: input.expiresAt,
@@ -502,12 +522,20 @@ export class SqliteStore implements Store {
           );
         }
 
+        /*
+         * `draft -> funding -> active`, one hop at a time, and only as far as the money has
+         * actually got. The old write set `active` unconditionally, which performed
+         * `draft -> active` (an edge the machine refuses, because an unfunded bid must not
+         * become firm without escrow beginning) and `active -> active` on every top-up.
+         */
+        const status = walkMandateStatus(row.status, fundingHops(row, funded, input.firm));
+
         const updated = tx
           .update(mandates)
           .set({
             fundedMinor: funded,
             escrowRef: input.escrowRef,
-            status: 'active',
+            ...(status === row.status ? {} : { status }),
             updatedAt: input.at,
           })
           .where(eq(mandates.id, input.mandateId))
@@ -541,11 +569,14 @@ export class SqliteStore implements Store {
         }
 
         const funded = row.fundedMinor - wanted;
+        // `null` when the mandate is not emptied, and the status is then left out of the
+        // patch entirely rather than written back as itself — see `db/mandate-status.ts`.
+        const status = statusAfterWithdraw(row, funded);
         const updated = tx
           .update(mandates)
           .set({
             fundedMinor: funded,
-            status: funded === 0n ? 'withdrawn' : row.status,
+            ...(status === null ? {} : { status }),
             updatedAt: input.at,
           })
           .where(eq(mandates.id, input.mandateId))
@@ -572,11 +603,12 @@ export class SqliteStore implements Store {
         }
 
         const allocated = row.allocatedMinor + amount;
+        const status = statusAfterAllocate(row, allocated);
         const updated = tx
           .update(mandates)
           .set({
             allocatedMinor: allocated,
-            status: allocated >= row.fundedMinor ? 'exhausted' : row.status,
+            ...(status === null ? {} : { status }),
             updatedAt: new Date(),
           })
           .where(eq(mandates.id, mandateId))
@@ -595,12 +627,12 @@ export class SqliteStore implements Store {
         if (!row) throw notFound(`Mandate ${mandateId}`);
 
         const allocated = max0(row.allocatedMinor - amount);
+        const status = statusAfterRelease(row, allocated);
         const updated = tx
           .update(mandates)
           .set({
             allocatedMinor: allocated,
-            status:
-              row.status === 'exhausted' && allocated < row.fundedMinor ? 'active' : row.status,
+            ...(status === null ? {} : { status }),
             updatedAt: new Date(),
           })
           .where(eq(mandates.id, mandateId))

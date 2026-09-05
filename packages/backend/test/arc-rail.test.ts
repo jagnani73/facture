@@ -19,7 +19,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { call, createHarness, fakeArcEscrow, type Harness } from './helpers.js';
+import { call, createHarness, fakeArcEscrow, listInvoice, type Harness } from './helpers.js';
 import { MARKET_NOW_ISO, marketNow } from '../src/db/seed.js';
 import { usdcRequiredFor, type ArcEscrow } from '../src/services/arc.js';
 
@@ -76,6 +76,8 @@ function vault(overrides: Partial<ArcEscrow> = {}) {
 
 async function arm(invoiceLabel = 'INV-2041') {
   const invoiceId = h.seeded.invoiceIds[invoiceLabel] ?? '';
+  // A sale needs an offer, and the seeded book is confirmed rather than listed.
+  await listInvoice(h.app, invoiceId);
   const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
   const armed = await call(h.app, 'POST', '/v1/trades', {
     body: { invoiceId, quoteId: quote.body.quoteId },
@@ -279,6 +281,7 @@ describe('when a vault settlement goes wrong', () => {
     h = await createHarness({ arc: escrow });
 
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     // The mandate is named on the quote itself, not at the top of the response. Reading the
     // wrong path here silently compares an absent mandate with itself and passes.
@@ -328,6 +331,7 @@ describe('when a vault settlement goes wrong', () => {
     h = await createHarness({ arc: escrow });
 
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const armed = await call(h.app, 'POST', '/v1/trades', {
       body: { invoiceId, quoteId: quote.body.quoteId },
@@ -359,6 +363,7 @@ describe('when a vault settlement goes wrong', () => {
 
     // Price the invoice first, so the pre-existing binding can name what this trade expects.
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     const price = priceOf(BigInt(quote.body.quote.proceeds as string));
 
@@ -441,6 +446,7 @@ describe('when a vault settlement goes wrong', () => {
     h = await createHarness({ arc: escrow });
 
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
     // The mandate is named on the quote itself, not at the top of the response. Reading the
     // wrong path here silently compares an absent mandate with itself and passes.

@@ -248,6 +248,7 @@ describe('allocation is bounded without a row lock', () => {
       amount: funded,
       escrowRef: 'escrow-1',
       at: new Date(),
+      firm: true,
     });
     return mandate.id;
   }
@@ -299,6 +300,89 @@ describe('allocation is bounded without a row lock', () => {
     const released = await store.release(id, 999_999_999n);
     expect(released.allocatedMinor).toBe(0n);
     expect(released.status).toBe('active');
+  });
+});
+
+/*
+ * The mandate lifecycle against the real engine.
+ *
+ * `db/status.ts` decides the hops for both stores, but the two build their patches
+ * differently — this one omits the column when nothing moved, the memory one assigns the
+ * current value back — and the whole point of the change is that a status column records
+ * transitions rather than rewrites. `status` is TEXT with no enum behind it, so nothing but
+ * these assertions would notice a wrong value going in.
+ */
+describe('funding moves through the states, in SQL', () => {
+  async function draftMandate(): Promise<string> {
+    const buyer = await store.insertBuyer({ name: 'Fenwick', email: 'c@fenwick.test' });
+    const mandate = await store.insertMandate({
+      buyerId: buyer.id,
+      ratingFloor: 'C',
+      maxTenorDays: 120,
+      annualisedYieldBps: 1_400,
+      currency: 'USD',
+      exposureLimitMinor: 10_000_000n,
+    });
+    return mandate.id;
+  }
+
+  it('parks an unbacked funding in funding, and promotes it when it is backed', async () => {
+    const id = await draftMandate();
+
+    const parked = await store.fundMandate({
+      mandateId: id,
+      amount: 5_000_000n,
+      escrowRef: 'escrow-1',
+      at: new Date(),
+      firm: false,
+    });
+    expect(parked.status).toBe('funding');
+    expect(parked.fundedMinor).toBe(5_000_000n);
+
+    const live = await store.fundMandate({
+      mandateId: id,
+      amount: 0n,
+      escrowRef: 'escrow-1',
+      at: new Date(),
+      firm: true,
+    });
+    expect(live.status).toBe('active');
+    expect(live.fundedMinor).toBe(5_000_000n);
+  });
+
+  it('never writes draft straight to active', async () => {
+    const id = await draftMandate();
+
+    const funded = await store.fundMandate({
+      mandateId: id,
+      amount: 5_000_000n,
+      escrowRef: 'escrow-1',
+      at: new Date(),
+      firm: true,
+    });
+
+    // Both hops happen, and the machine checked each: `draft -> funding -> active`.
+    expect(funded.status).toBe('active');
+  });
+
+  /*
+   * The backstop, and the limit of it. `funding -> exhausted` is not an edge, so an
+   * allocation that would move the status of a parked bid is refused outright rather than
+   * quietly writing a status the machine has no path to. A *partial* allocation moves no
+   * status and is not caught here — what keeps a parked bid out of a match is that pricing
+   * selects `active` alone, which `test/lifecycle.test.ts` asserts directly.
+   */
+  it('refuses an allocation that would move a funding mandate to exhausted', async () => {
+    const id = await draftMandate();
+    await store.fundMandate({
+      mandateId: id,
+      amount: 5_000_000n,
+      escrowRef: 'escrow-1',
+      at: new Date(),
+      firm: false,
+    });
+
+    await expect(store.allocate(id, 5_000_000n)).rejects.toThrow(/cannot go from funding/);
   });
 });
 

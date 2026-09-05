@@ -14,12 +14,20 @@ import { MANDATE_STATUSES } from '@facture/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getStore } from '../db/store.js';
-import { badRequest, notFound } from '../errors.js';
+import { badRequest, notFound, upstreamUnavailable } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
-import { ensureMandateRegistered, getArcEscrow, releaseMandateCapital } from '../services/arc.js';
+import {
+  backingMakesBidFirm,
+  backingWasRead,
+  ensureMandateRegistered,
+  getArcEscrow,
+  readMandateBacking,
+  releaseMandateCapital,
+  type MandateBacking,
+} from '../services/arc.js';
 import { settlementService } from '../services/settlement.js';
 import { readJson, readParams, readQuery } from '../validate.js';
-import { money, moneyString, wireMandate } from '../wire.js';
+import { money, moneyString, moneyStringOrZero, wireMandate } from '../wire.js';
 
 const uuidParam = z.object({ id: z.uuid() });
 
@@ -44,7 +52,15 @@ const createMandateBody = z.object({
 });
 
 const fundMandateBody = z.object({
-  amountMinor: moneyString,
+  /**
+   * Additional capital to commit. **Zero is allowed here and nowhere else money is parsed.**
+   *
+   * A mandate parked in `funding` is promoted by calling this route again once the deposit
+   * lands, and that re-check must not cost the buyer a second commitment — asking them to
+   * add another cent to be told their existing capital is now backed would be an amount the
+   * book then quotes and the vault never received.
+   */
+  amountMinor: moneyStringOrZero,
   /** Escrow reference for the deposit, so funding is provable in the proof view. */
   escrowRef: z.string().min(1).max(200),
 });
@@ -164,52 +180,24 @@ mandateRoutes.get('/', async (c) => {
    * accuse a funded buyer of quoting on nothing.
    */
   const escrow = getArcEscrow();
-  const deposits = new Map<string, bigint | null>();
-  if (escrow.enabled) {
-    await Promise.all(
-      rows.map(async (row) => {
-        try {
-          deposits.set(row.id, await escrow.depositedFor(row.id));
-        } catch {
-          deposits.set(row.id, null);
-        }
-      }),
-    );
-  }
+  // Paired with its row as it is read, so every mandate has a backing by construction. A
+  // lookup that could miss would need an `escrow: null` meaning nothing that any client parses.
+  const priced = await Promise.all(
+    rows.map(async (row) => ({
+      row,
+      backing: await readMandateBacking(escrow, row.id, row.fundedMinor, row.currency),
+    })),
+  );
 
   return c.json({
-    mandates: rows.map((row) => {
-      const deposited = deposits.get(row.id);
-      const required = escrow.requiredFor(row.fundedMinor, row.currency);
-      return {
-        ...wireMandate(row),
-        /** Only an active mandate quotes; `funding` is not yet firm. */
-        quoting: row.status === 'active',
-        operator,
-        debtorExposure: renderExposure(exposure.get(row.id) ?? {}),
-        /**
-         * Whether this bid is backed by capital anyone can verify, and how much.
-         *
-         * `backed` is deliberately not `deposited > 0`: a mandate counted as holding more
-         * than the vault does is exactly the overclaim the funding check refuses, and a
-         * partially-backed bid must not read as a funded one.
-         *
-         * Both figures are USDC ERC-20 minor units (6dp) and the field names say so, because
-         * the defect this replaced was two scales sharing one name. `requiredUsdcMinor` is
-         * what makes them comparable — it is the mandate's own committed capital put through
-         * the same conversion the cash leg settles through, so the comparison is like with
-         * like. Rendering either as the mandate's currency is off by four orders of
-         * magnitude, which is what the screen was doing.
-         */
-        escrow: {
-          checked: escrow.enabled && deposited !== undefined,
-          depositedUsdcMinor:
-            deposited === undefined || deposited === null ? null : money(deposited),
-          requiredUsdcMinor: money(required),
-          backed: deposited !== undefined && deposited !== null && deposited >= required,
-        },
-      };
-    }),
+    mandates: priced.map(({ row, backing }) => ({
+      ...wireMandate(row),
+      /** Only an active mandate quotes; `funding` is not yet firm. */
+      quoting: row.status === 'active',
+      operator,
+      debtorExposure: renderExposure(exposure.get(row.id) ?? {}),
+      escrow: wireBacking(backing),
+    })),
   });
 });
 
@@ -281,7 +269,27 @@ mandateRoutes.get('/exposure', async (c) => {
   });
 });
 
-/** Escrow the capital. This is the moment the bid becomes firm. */
+/**
+ * Escrow the capital. This is the moment the bid becomes firm — or starts trying to.
+ *
+ * **Funding is two states, not one write.** The mandate machine says so: `draft -> funding` is
+ * where "escrow of `totalCommitted` begins", and `funding -> active` is where "escrow
+ * confirmed. Only now is the quote firm." This route used to collapse both into a single
+ * `status: 'active'`, performing an edge the machine refuses and leaving `funding` written by
+ * nothing anywhere in the repo — the same defect as `listed`, in the other lifecycle.
+ *
+ * So an unbacked funding is now **recorded and parked**, not refused. The invariant it used to
+ * protect — unbacked capital never quotes — is kept by the state instead of by the 400, and
+ * kept better: the buyer's commitment is on file, and when their deposit lands a second call to
+ * this route promotes the mandate rather than asking them to re-state an amount they already
+ * gave. `listQuotableMandates` selects `active` alone, so a `funding` mandate prices nothing.
+ *
+ * **The one case still refused is a top-up of a bid that is already firm.** There is nowhere to
+ * park that: the machine has no `active -> funding` on purpose — topping up a live bid raises
+ * its capital in place and does not make it provisional again — so the only alternative to
+ * refusing would be an `active` mandate quoting against capital the vault does not hold, which
+ * is the overclaim this check has always existed to refuse.
+ */
 mandateRoutes.post('/:id/fund', async (c) => {
   const { id } = readParams(c, uuidParam);
   const body = await readJson(c, fundMandateBody);
@@ -300,10 +308,11 @@ mandateRoutes.post('/:id/fund', async (c) => {
    *
    * The escrow provider is `MandateVault` on Arc, and its `balanceOf` is a view — so this
    * costs no key, no gas and no signature, and the venue simply asks the chain how much is
-   * actually there. Funding is refused when it would count capital the vault does not hold.
-   * With no vault configured the read is unavailable rather than zero, `enabled` is how the
-   * two are told apart, and the response says which happened so that "escrowed" is never an
-   * assumption a reader has to make.
+   * actually there. A commitment the vault does not cover is parked in `funding` and does not
+   * quote; only a top-up of an already-firm bid is refused outright, for want of anywhere to
+   * park it. With no vault configured the read is unavailable rather than zero, `state` is
+   * how the two are told apart, and the response says which happened so that "escrowed" is
+   * never an assumption a reader has to make.
    */
   const escrow = getArcEscrow();
 
@@ -316,39 +325,43 @@ mandateRoutes.post('/:id/fund', async (c) => {
    * a contract error and who is then told by the check below only that "the vault holds 0" —
    * true, and silent about the reason it could never have held anything else.
    *
-   * It cannot make THIS request succeed: the deposit had to precede the funding call, and it
-   * could not have. What it does is make the next one possible.
+   * It cannot put THIS bid on the curve: the deposit had to precede the funding call, and it
+   * could not have. What it does is make the next one possible — and the commitment is
+   * recorded meanwhile, so the buyer deposits and funds again rather than starting over.
    */
   const buyer = await store.getBuyer(existing.buyerId);
   const registration = await ensureMandateRegistered(escrow, id, buyer?.arcAddress ?? null);
 
-  if (escrow.enabled) {
-    const deposited = await escrow.depositedFor(id);
-    const wouldBeCommitted = existing.fundedMinor + body.amountMinor;
-    /*
-     * Converted before it is compared. The vault answers in USDC minor units at 6 decimals
-     * and a mandate is written in its own currency's minor units at 2, so the two are not
-     * the same number even when they read as one — $50,000.00 and 5 USDC are both
-     * `5000000`, and comparing them directly is how a mandate came to be counted as backed
-     * by ten-thousandth of its capital.
-     */
-    const required = escrow.requiredFor(wouldBeCommitted, existing.currency);
+  /*
+   * Converted before it is compared, and in one place. The vault answers in USDC minor units
+   * at 6 decimals and a mandate is written in its own currency's minor units at 2, so the two
+   * are not the same number even when they read as one — $50,000.00 and 5 USDC are both
+   * `5000000`, and comparing them directly is how a mandate came to be counted as backed by a
+   * ten-thousandth of its capital. `readMandateBacking` is that comparison; this route and the
+   * list screen used to each carry their own copy of it, facing opposite directions.
+   */
+  const wouldBeCommitted = existing.fundedMinor + body.amountMinor;
+  const backing = await readMandateBacking(escrow, id, wouldBeCommitted, existing.currency);
+  const firm = backingMakesBidFirm(backing);
 
-    if (required > deposited) {
-      throw badRequest(
-        `This mandate would be counted as holding ${wouldBeCommitted} ${existing.currency} ` +
-          `minor units, which needs ${required} USDC minor units on Arc, but the vault holds ` +
-          `${deposited}. Capital has to arrive on Arc before the book will quote against it — ` +
-          'a bid backed by a request body is not a firm bid. ' +
-          /*
-           * Why the deposit could not have landed, when that is the reason. An empty vault
-           * against an unregistered mandate is not a buyer who forgot to send money; it is a
-           * buyer whose transaction reverted, and saying only "the vault holds 0" would send
-           * them to look at their wallet instead of at the registration.
-           */
-          registration.detail,
-      );
-    }
+  /*
+   * A bid that is already firm has nowhere to be parked, so an unverifiable top-up is refused
+   * rather than recorded — see the note on this route. `bad_request` for capital that is short
+   * (the buyer can fix that by depositing) and `upstream_unavailable` for a vault that would
+   * not answer (nobody can fix that by trying harder, only by trying again), because the two
+   * ask for different things from the reader.
+   */
+  const alreadyFirm = existing.status === 'active' || existing.status === 'exhausted';
+  if (!firm && alreadyFirm) {
+    /*
+     * Why the deposit could not have landed, when that is the reason. An empty vault against
+     * an unregistered mandate is not a buyer who forgot to send money; it is a buyer whose
+     * transaction reverted, and saying only "the vault holds 0" would send them to look at
+     * their wallet instead of at the registration.
+     */
+    throw backing.state === 'unreadable'
+      ? upstreamUnavailable('The Arc mandate vault', `${backing.detail} ${registration.detail}`)
+      : badRequest(`${backing.detail} ${registration.detail}`);
   }
 
   const mandate = await store.fundMandate({
@@ -356,6 +369,7 @@ mandateRoutes.post('/:id/fund', async (c) => {
     amount: body.amountMinor,
     escrowRef: body.escrowRef,
     at: new Date(),
+    firm,
   });
 
   return c.json({
@@ -366,8 +380,26 @@ mandateRoutes.post('/:id/fund', async (c) => {
      * Whether the amount above was checked against capital that actually exists, or merely
      * recorded. A reader must not have to infer which, so it is stated rather than implied
      * by the presence of an escrow reference.
+     *
+     * The narrow question, not `escrow.enabled`: a vault that is configured but would not
+     * answer verified nothing, and saying otherwise is the overclaim in its quietest form.
      */
-    escrowVerified: escrow.enabled,
+    escrowVerified: backingWasRead(backing),
+    /** What stands behind the commitment, in the vault's own units. See `escrow` on `GET /`. */
+    escrow: wireBacking(backing),
+    /**
+     * Why the bid is or is not on the curve, in words.
+     *
+     * A mandate left in `funding` is not a failure and does not come back as one, so the
+     * status code cannot carry this — the buyer has to be told the difference between "your
+     * bid is live" and "your bid is recorded and waiting for your deposit", and told what to
+     * do about the second.
+     */
+    message:
+      mandate.status === 'active'
+        ? 'This bid is on the curve.'
+        : `${backing.detail} This bid is recorded and is not quoting; fund it again once the ` +
+          `deposit has landed and it will go live. ${registration.detail}`,
     /** Whether the mandate's cash leg exists on Arc, which is what makes a deposit possible. */
     escrowRegistration: registration,
   });
@@ -471,6 +503,32 @@ mandateRoutes.get('/:id/exposure', async (c) => {
       }))
       .sort((a, b) => (BigInt(a.committed) < BigInt(b.committed) ? 1 : -1)),
   });
+});
+
+/**
+ * Whether a bid is backed by capital anyone can verify, and how much.
+ *
+ * `backed` is deliberately not `deposited > 0`: a mandate counted as holding more than the
+ * vault does is exactly the overclaim the funding check refuses, and a partially-backed bid
+ * must not read as a funded one.
+ *
+ * Both figures are USDC ERC-20 minor units (6dp) and the field names say so, because the defect
+ * this replaced was two scales sharing one name. `requiredUsdcMinor` is what makes them
+ * comparable — it is the mandate's own committed capital put through the same conversion the
+ * cash leg settles through, so the comparison is like with like. Rendering either as the
+ * mandate's currency is off by four orders of magnitude, which is what the screen was doing.
+ *
+ * `state` is the field a reader should use for anything other than "is it backed": it tells an
+ * empty vault from an unreadable one from a deployment that has no vault at all, and those
+ * three used to be one `false`.
+ */
+const wireBacking = (backing: MandateBacking) => ({
+  state: backing.state,
+  checked: backing.checked,
+  depositedUsdcMinor:
+    backing.depositedUsdcMinor === null ? null : money(backing.depositedUsdcMinor),
+  requiredUsdcMinor: money(backing.requiredUsdcMinor),
+  backed: backing.backed,
 });
 
 /** Exposure maps carry `bigint` values, which `JSON.stringify` throws on. */

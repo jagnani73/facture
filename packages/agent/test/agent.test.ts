@@ -96,6 +96,7 @@ const row = (over: Partial<BookRow> = {}): BookRow => ({
   tenorDays: 60,
   status: 'listed',
   quotable: true,
+  listed: true,
   issued: true,
   ...over,
 });
@@ -582,6 +583,25 @@ describe('what the agent will not touch', () => {
     expect(venue.armed).toHaveLength(0);
     expect(venue.quoteCalls).toHaveLength(0);
     expect(report.taken[0]?.skippedReason).toBe('issuance_pending');
+  });
+
+  /*
+   * Quotable and sellable are different permissions, and the venue draws the line. A
+   * confirmed invoice carries a price the agent can read and refuses to be armed until its
+   * seller offers it, so this is a wait rather than a refusal — and it is a wait a buyer can
+   * do nothing about, which is why the row is skipped rather than attempted and 409'd.
+   */
+  it('skips a priced invoice its seller has not offered for sale', async () => {
+    const venue = fakeVenue({ book: [row({ status: 'confirmed', listed: false })] });
+    const report = await createMarketMaker(config({ dryRun: false }), {
+      venue,
+      wallet: fakeWallet(USDC(50_000)),
+      logger,
+    }).tick();
+
+    expect(venue.armed).toHaveLength(0);
+    expect(venue.quoteCalls).toHaveLength(0);
+    expect(report.taken[0]?.skippedReason).toBe('not_listed');
   });
 
   it('skips a mandate that is not denominated in the settlement asset', async () => {

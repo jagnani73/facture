@@ -18,6 +18,7 @@ import {
   formatMinorUnits,
   INVOICE_STATUSES,
   isinForInvoice,
+  transitionInvoice,
   uniquenessHash,
   type Currency,
 } from '@facture/shared';
@@ -369,6 +370,204 @@ invoiceRoutes.post('/:id/confirmation-request', async (c) => {
        */
       link: getConfig().isProduction ? null : link,
     },
+  });
+});
+
+/**
+ * Offer it into the book.
+ *
+ * **Listing is an act the seller takes, and until this route existed it was not one.** The
+ * invoice machine has carried `confirmed -> listed` and `listed -> confirmed` since the first
+ * commit; nothing but the seed had ever written `listed`, so the secondary market the README's
+ * argument rests on had a table row and no code, and "the seller offered this for sale" was
+ * indistinguishable from "the customer confirmed it".
+ *
+ * The distinction is not cosmetic. A confirmed invoice is *quotable* — that is what makes the
+ * book render a live price beside every green line the moment it loads. A listed invoice is
+ * *sellable*. Those are different permissions and they are now different states.
+ *
+ * Nothing is written to chain here. `InvoiceRegistry.list` publishes the invoice's terms and
+ * runs at issuance, where it belongs: it is the venue saying this receivable exists, not the
+ * seller saying they will part with it. Do not move it here — it would then be gated on a
+ * seller action and a buyer could no longer read the terms of paper that has not been offered.
+ */
+invoiceRoutes.post('/:id/list', async (c) => {
+  const { id } = readParams(c, uuidParam);
+  const store = getStore();
+
+  const invoice = await store.getInvoice(id);
+  if (!invoice) throw notFound(`Invoice ${id}`);
+
+  /*
+   * Listing what is already listed is not a failure worth showing a seller, so it answers
+   * 200 having written nothing — the same call twice from a double-clicked button, or a
+   * retry after a dropped connection, is not somebody doing anything wrong. It matches how
+   * `POST /:id/confirmation-request` treats a repeat, and it is also the only shape that
+   * does not perform `listed -> listed`, which the machine refuses.
+   */
+  if (invoice.status === 'listed') {
+    return c.json({
+      invoice: wireInvoice(invoice),
+      listed: true,
+      alreadyListed: true,
+      message: 'This invoice is already on the book.',
+    });
+  }
+
+  /*
+   * `sold -> listed` is a legal edge and this route deliberately does not perform it.
+   *
+   * That edge is the **secondary market** — a holder relisting seasoned paper — and it is the
+   * one thing in the lifecycle with no code behind it: settlement resolves "the holder" as the
+   * newest settled trade and releases exactly one mandate's capital at maturity, which is
+   * correct only while a receivable has been sold once. Opening the edge here would let a
+   * sale be armed against paper the seller no longer holds, and the refusal would arrive from
+   * `balanceOf` as "holds no units" rather than as the missing feature it is.
+   *
+   * A guard at the call site rather than a hole in the table, for the same reason the
+   * instrument check below is one: the edge is right, and this venue cannot yet honour it.
+   */
+  if (invoice.status === 'sold') {
+    throw conflict(
+      'conflict',
+      'This invoice has been sold. Relisting seasoned paper is the secondary market, and ' +
+        'this venue does not settle a resale yet — the holder, not the original seller, ' +
+        'would be the one offering it.',
+    );
+  }
+
+  /*
+   * The lifecycle decides, not a hand-written list of statuses here. `settlement.ts` already
+   * guards its own transition this way and for the same reason: a copied set of statuses is
+   * how the machine and the product come to disagree, and this is the disagreement being
+   * closed rather than a new one being opened.
+   *
+   * Checked before the instrument, deliberately, and the other way round from `prepareTrade`.
+   * There the invoice is known to be sellable and issuance is the only thing that can still be
+   * catching up; here the commonest refusal is a customer who has not answered yet, and
+   * telling that seller "its instrument has not been deployed" would send them to wait on the
+   * wrong thing.
+   */
+  const move = transitionInvoice(invoice.status, 'listed');
+  if (!move.ok) {
+    throw conflict(
+      invoice.status === 'draft' || invoice.status === 'awaiting_confirmation'
+        ? 'invoice_not_confirmed'
+        : 'conflict',
+      invoice.status === 'draft' || invoice.status === 'awaiting_confirmation'
+        ? 'Your customer has not confirmed this invoice yet. Confirmation is what removes the ' +
+            'dispute risk a buyer would otherwise hold back against, so nothing is sellable ' +
+            'without it.'
+        : move.error.reason,
+    );
+  }
+
+  /*
+   * The instrument has to exist before the paper can be delivered, and the machine says so in
+   * its own comment: it is a guard at the call site rather than a state, because issuance is
+   * paced and an invoice can sit confirmed-but-not-yet-issued for minutes. Reported as
+   * `issuance_pending` rather than as a failure, matching `prepareTrade` — this is a wait,
+   * not a refusal.
+   */
+  if (invoice.securityId === null || invoice.securityEvmAddress === null) {
+    throw conflict(
+      'issuance_pending',
+      'This invoice is still being added to the market — its instrument has not been ' +
+        'deployed yet. It will be listable as soon as it lands.',
+    );
+  }
+
+  const updated = await store.updateInvoice(id, { status: move.value });
+
+  return c.json({
+    invoice: wireInvoice(updated),
+    listed: true,
+    alreadyListed: false,
+    message: 'This invoice is on the book and can be sold at the price beside it.',
+  });
+});
+
+/**
+ * Take it back off the book.
+ *
+ * `listed -> confirmed`, which is the seller withdrawing an offer rather than anybody
+ * disputing anything — the invoice stays confirmed, stays quotable, and keeps its price. A
+ * customer retracting their acknowledgement is the other edge (`listed -> disputed`) and is
+ * not this: a re-listed invoice must not look identical to a clean one.
+ */
+invoiceRoutes.post('/:id/delist', async (c) => {
+  const { id } = readParams(c, uuidParam);
+  const store = getStore();
+
+  /*
+   * Give back the capital of anything that expired before deciding whether this invoice is
+   * mid-sale. A trade nobody paid for would otherwise block a withdrawal for ever, which is
+   * a seller unable to take back an offer because of a fill that never happened.
+   */
+  await settlementService.reclaimExpired();
+
+  const invoice = await store.getInvoice(id);
+  if (!invoice) throw notFound(`Invoice ${id}`);
+
+  /*
+   * An offer someone is in the middle of filling cannot be withdrawn.
+   *
+   * This is the guard that makes `confirmed -> sold` actually unreachable rather than merely
+   * unusual. Arming requires `listed`, but the x402 rail leaves a gap between the challenge
+   * and the signature: delist in that window and the buyer's payment would write `sold` onto
+   * a `confirmed` invoice — the forbidden edge, arriving by the back door, on a trade whose
+   * cash had already moved. The way out of an armed trade is `POST /v1/trades/:id/unwind`,
+   * which releases the hold and the capital; this route does not reach around it.
+   */
+  const armed = (await store.listTrades({ invoiceId: id, limit: 50 })).find(
+    (trade) => trade.status === 'preparing' || trade.status === 'awaiting_payment',
+  );
+  if (armed !== undefined) {
+    throw conflict(
+      'conflict',
+      `A buyer has armed a trade against this invoice and is settling it (trade ${armed.id}). ` +
+        'Withdrawing the offer now would take it off the book underneath a payment already ' +
+        'in flight — unwind the trade first if it should not go through.',
+    );
+  }
+
+  // Symmetric with listing, and for the same reason: a seller pressing this twice has not
+  // done anything wrong, and `confirmed -> confirmed` is not a transition.
+  if (invoice.status === 'confirmed') {
+    return c.json({
+      invoice: wireInvoice(invoice),
+      listed: false,
+      alreadyDelisted: true,
+      message: 'This invoice is not on the book.',
+    });
+  }
+
+  const move = transitionInvoice(invoice.status, 'confirmed');
+  if (!move.ok) {
+    throw conflict(
+      'conflict',
+      invoice.status === 'sold'
+        ? 'This invoice has been sold. Taking it back off the book is not a status change; ' +
+            'it would have to reverse two settled legs on two chains, which is an unwind of ' +
+            'the trade rather than a delisting.'
+        : move.error.reason,
+    );
+  }
+
+  const updated = await store.updateInvoice(id, { status: move.value });
+
+  return c.json({
+    invoice: wireInvoice(updated),
+    listed: false,
+    alreadyDelisted: false,
+    /*
+     * Said explicitly because the seller is likely to expect the opposite. Withdrawing an
+     * offer does not withdraw the price — the book still quotes a confirmed invoice, which
+     * is what lets a seller see what they would get before deciding to offer it again.
+     */
+    message:
+      'This invoice is off the book. It is still confirmed, so it still carries a price; ' +
+      'it just cannot be sold until you list it again.',
   });
 });
 

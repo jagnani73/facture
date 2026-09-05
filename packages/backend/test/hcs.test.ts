@@ -14,7 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
-import { call, createHarness, type Harness } from './helpers.js';
+import { call, createHarness, listInvoice, type Harness } from './helpers.js';
 import {
   canonicalise,
   canonicaliseMatch,
@@ -299,6 +299,7 @@ describe('the receipt a funder reads', () => {
     });
 
     const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    await listInvoice(h.app, invoiceId);
     const quote = await call(
       h.app,
       'GET',

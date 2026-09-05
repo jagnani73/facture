@@ -848,6 +848,153 @@ export async function ensureMandateRegistered(
   }
 }
 
+/**
+ * Whether a mandate's committed capital is actually posted in the vault.
+ *
+ * **One reader for a comparison that had two.** `GET /v1/mandates` computed
+ * `deposited >= required` inline and `POST /:id/fund` computed `required > deposited` a hundred
+ * lines away, and the pair is exactly the shape that produced the defect they were both written
+ * to close — a rule only one caller can find is one the next caller gets wrong. The promotion
+ * from `funding` to `active` is now a third reader, so the comparison lives here.
+ *
+ * Flat and stated rather than inferred, for the same reason {@link MandateRegistration} is:
+ * "the vault holds nothing", "we could not ask" and "there is no vault to ask" are three
+ * different facts about a bid, and collapsing them is how a screen comes to tell a buyer their
+ * capital is escrowed when no vault exists.
+ */
+export interface MandateBacking {
+  /**
+   * - `not-required` — no vault on this deployment. There is nothing to verify, so nothing
+   *   is claimed either: {@link MandateBacking.backed} stays false.
+   * - `backed` — the vault holds at least what this commitment needs.
+   * - `short` — the vault holds less. The buyer's deposit has not landed, or not all of it.
+   * - `unreadable` — the vault could not be read. Not the same as empty, and must not render
+   *   as it: one accuses a funded buyer of quoting on nothing.
+   */
+  state: 'not-required' | 'backed' | 'short' | 'unreadable';
+  /**
+   * Whether there was a vault to ask at all.
+   *
+   * Deliberately NOT "and it answered": `checked: true` with a null balance is the wire's
+   * existing encoding of "we could not read it", and the distinction the web contract draws
+   * off it — an unreadable vault must never render as an empty one — is the whole reason the
+   * field exists. {@link backingWasRead} is the narrower question.
+   */
+  checked: boolean;
+  /** USDC ERC-20 minor units (6dp) the vault holds, or null when it did not answer. */
+  depositedUsdcMinor: bigint | null;
+  /** USDC ERC-20 minor units (6dp) this commitment needs. Comparable with the above, only. */
+  requiredUsdcMinor: bigint;
+  /**
+   * Verified backing, and nothing weaker.
+   *
+   * Deliberately false for `not-required` as well as for `unreadable`. A deployment with no
+   * vault may still let a bid quote — see {@link backingMakesBidFirm} — but it may never say
+   * the capital is escrowed, which is the overclaim a discarded `escrowVerified` flag once put
+   * in front of every buyer.
+   */
+  backed: boolean;
+  /** One sentence naming what happened, for a refusal or a status response. */
+  detail: string;
+}
+
+/**
+ * Ask the vault what stands behind a commitment.
+ *
+ * Never throws: an unreadable vault is an answer (`unreadable`), not a failure, because every
+ * caller has something better to do with it than 500 — the list screen renders it, the funding
+ * route leaves the mandate in `funding`, and a retry is all it takes.
+ */
+export async function readMandateBacking(
+  vault: ArcEscrow,
+  mandateUuid: string,
+  committedMinor: bigint,
+  currency: string,
+): Promise<MandateBacking> {
+  const requiredUsdcMinor = vault.requiredFor(committedMinor, currency);
+
+  if (!vault.enabled) {
+    return {
+      state: 'not-required',
+      checked: false,
+      depositedUsdcMinor: null,
+      requiredUsdcMinor,
+      backed: false,
+      detail:
+        'ARC_MANDATE_VAULT_ADDRESS is not set, so there is no vault to verify this against ' +
+        'and the funding is recorded rather than escrowed.',
+    };
+  }
+
+  let deposited: bigint;
+  try {
+    deposited = await vault.depositedFor(mandateUuid);
+  } catch (err) {
+    return {
+      state: 'unreadable',
+      checked: true,
+      depositedUsdcMinor: null,
+      requiredUsdcMinor,
+      backed: false,
+      detail:
+        `The Arc vault could not be read (${messageOf(err)}), so whether this capital is ` +
+        'posted is unknown rather than absent.',
+    };
+  }
+
+  if (deposited >= requiredUsdcMinor) {
+    return {
+      state: 'backed',
+      checked: true,
+      depositedUsdcMinor: deposited,
+      requiredUsdcMinor,
+      backed: true,
+      detail: `The vault holds ${deposited} USDC minor units against the ${requiredUsdcMinor} this bid needs.`,
+    };
+  }
+
+  return {
+    state: 'short',
+    checked: true,
+    depositedUsdcMinor: deposited,
+    requiredUsdcMinor,
+    backed: false,
+    detail:
+      `This mandate would be counted as holding ${committedMinor} ${currency} minor units, ` +
+      `which needs ${requiredUsdcMinor} USDC minor units on Arc, but the vault holds ` +
+      `${deposited}. Capital has to arrive on Arc before the book will quote against it — a ` +
+      'bid backed by a request body is not a firm bid.',
+  };
+}
+
+/**
+ * Whether this backing lets a bid go firm — which is a weaker claim than {@link
+ * MandateBacking.backed} and must stay a separate question.
+ *
+ * A deployment with no vault promotes straight through, because there is nothing to verify and
+ * refusing would stop a venue that never escrows from trading at all. That is the same trade
+ * `chooseRail` makes for an absent vault, and the same one `services/uniqueness.ts` makes when
+ * its registry is down: a second protection being unconfigured is not a reason to stop the first
+ * one working.
+ *
+ * `unreadable` deliberately does NOT promote. The parallel is the compliance gate rather than
+ * the rail: an indeterminate answer must not move a price, and a bid going firm is a price
+ * appearing on the curve. A retry is cheap; a quote nobody can honour is not.
+ */
+export const backingMakesBidFirm = (backing: MandateBacking): boolean =>
+  backing.state === 'not-required' || backing.state === 'backed';
+
+/**
+ * Whether the vault actually answered, as against there being none or it being unreachable.
+ *
+ * The narrow reading of {@link MandateBacking.checked}, and the one a funding response means
+ * by "verified": a configured vault that timed out verified nothing. Stated as a predicate over
+ * `state` rather than inferred from a null balance, because inferring it is how "we could not
+ * ask" and "nobody posted this" became the same value in the first place.
+ */
+export const backingWasRead = (backing: MandateBacking): boolean =>
+  backing.state === 'backed' || backing.state === 'short';
+
 /** What became of the real USDC behind a withdrawal from the book. */
 export interface CapitalRelease {
   /**

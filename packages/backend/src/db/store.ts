@@ -114,6 +114,16 @@ export interface FundMandateInput {
   readonly amount: MinorUnits;
   readonly escrowRef: string;
   readonly at: Date;
+  /**
+   * Whether this funding may make the bid firm — i.e. whether the mandate lands in `active`
+   * or stops at `funding`.
+   *
+   * The store never asks a chain, so the caller answers it. `services/arc.ts` is where the
+   * question is decided (`backingMakesBidFirm`), and it is deliberately NOT the same question
+   * as "is the capital escrowed": a deployment with no vault has nothing to verify and goes
+   * firm anyway, while a vault that could not be read does not.
+   */
+  readonly firm: boolean;
 }
 
 export interface WithdrawInput {

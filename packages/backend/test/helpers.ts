@@ -497,6 +497,22 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type JsonBody = { [key: string]: any };
 
+/**
+ * Offer an invoice into the book, which every sale now needs.
+ *
+ * Arming a trade requires `listed`, and the seeded book is mostly `confirmed` — that is the
+ * distinction being tested elsewhere rather than an inconvenience here: a confirmed invoice is
+ * quotable and a listed one is sellable. Tests that are about settlement rather than about
+ * listing go through this, and it asserts its own success so a broken listing route surfaces
+ * as a failure in the listing tests instead of as a puzzling 409 in twenty settlement ones.
+ */
+export async function listInvoice(app: Harness['app'], invoiceId: string): Promise<void> {
+  const res = await call(app, 'POST', `/v1/invoices/${invoiceId}/list`);
+  if (res.status !== 200) {
+    throw new Error(`could not list ${invoiceId}: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+}
+
 /** `fetch` against the app under test, with JSON in and out. */
 export async function call(
   app: Harness['app'],

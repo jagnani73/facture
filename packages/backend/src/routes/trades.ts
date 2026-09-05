@@ -123,6 +123,29 @@ async function prepareTrade(
     );
   }
 
+  /*
+   * The seller has to have offered it. Beside the issuance check and before the quote, for the
+   * same reason that one is: this is a fact about the invoice, and a seller who has not listed
+   * is better told so than told their quote does not exist.
+   *
+   * **Quoting a confirmed invoice is not the same permission as selling one, and the split is
+   * deliberate.** `QUOTABLE_INVOICE_STATUSES` still holds `confirmed` and `listed`, so every
+   * confirmed line on the book carries a live price the moment the screen loads — that
+   * instant indicative price is the product. What binds at `listed` is the offer: a price is
+   * something the venue shows, and listing is the seller saying they will take it. Widening
+   * quoting to require a listing would make the book render empty until a seller clicked
+   * through every row; narrowing selling to accept `confirmed` is what made
+   * `confirmed -> sold` an edge this service performed on every trade while the lifecycle
+   * refused it.
+   */
+  if (invoice.status !== 'listed') {
+    throw conflict(
+      'conflict',
+      `This invoice is ${invoice.status} and has not been offered for sale. The price beside ` +
+        'it is what the book would pay; listing it is what makes that an offer you can fill.',
+    );
+  }
+
   const accepted = await store.getQuote(body.quoteId);
   if (!accepted || accepted.invoiceId !== invoice.id) {
     throw notFound(`Quote ${body.quoteId} for invoice ${body.invoiceId}`);

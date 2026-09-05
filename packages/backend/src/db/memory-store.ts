@@ -40,6 +40,14 @@ import type {
   SettlementOutcomeRow,
   TradeRow,
 } from './schema.js';
+import {
+  fundingHops,
+  statusAfterAllocate,
+  statusAfterRelease,
+  statusAfterWithdraw,
+  transitionTo,
+  walkMandateStatus,
+} from './status.js';
 import type {
   ConfirmationDecisionInput,
   ConfirmationLookup,
@@ -347,9 +355,20 @@ export class MemoryStore implements Store {
     };
     this.confirmations.set(request.id, request);
 
+    /*
+     * The status moves only when it actually moves.
+     *
+     * Re-sending a link to a debtor who has not answered is the ordinary case — a lost email,
+     * a link that expired — and it used to write `awaiting_confirmation` over
+     * `awaiting_confirmation`, which is a self-edge the invoice machine refuses. The
+     * supersession above is what a re-request really does, and it is untouched.
+     */
     const next: InvoiceRow = {
       ...invoice,
-      status: 'awaiting_confirmation',
+      status:
+        invoice.status === 'awaiting_confirmation'
+          ? invoice.status
+          : transitionTo(invoice.status, 'awaiting_confirmation'),
       confirmationTokenHash: input.tokenHash,
       confirmationRequestedAt: input.requestedAt,
       confirmationExpiresAt: input.expiresAt,
@@ -470,11 +489,17 @@ export class MemoryStore implements Store {
       );
     }
 
+    /*
+     * `draft -> funding -> active`, one hop at a time, and only as far as the money has
+     * actually got. The old write set `active` unconditionally, which performed
+     * `draft -> active` (an edge the machine refuses, because an unfunded bid must not become
+     * firm without escrow beginning) and `active -> active` on every top-up.
+     */
     const next: MandateRow = {
       ...row,
       fundedMinor: funded,
       escrowRef: input.escrowRef,
-      status: 'active',
+      status: walkMandateStatus(row.status, fundingHops(row, funded, input.firm)),
       updatedAt: input.at,
     };
     this.mandates.set(next.id, next);
@@ -496,10 +521,12 @@ export class MemoryStore implements Store {
     }
 
     const funded = row.fundedMinor - wanted;
+    // `null` when the mandate is not emptied, and the status is then left alone rather than
+    // written back as itself — see `db/status.ts`.
     const next: MandateRow = {
       ...row,
       fundedMinor: funded,
-      status: funded === 0n ? 'withdrawn' : row.status,
+      status: statusAfterWithdraw(row, funded) ?? row.status,
       updatedAt: input.at,
     };
     this.mandates.set(next.id, next);
@@ -522,7 +549,7 @@ export class MemoryStore implements Store {
     const next: MandateRow = {
       ...row,
       allocatedMinor: allocated,
-      status: allocated >= row.fundedMinor ? 'exhausted' : row.status,
+      status: statusAfterAllocate(row, allocated) ?? row.status,
       updatedAt: this.#now(),
     };
     this.mandates.set(next.id, next);
@@ -536,7 +563,7 @@ export class MemoryStore implements Store {
     const next: MandateRow = {
       ...row,
       allocatedMinor: allocated,
-      status: row.status === 'exhausted' && allocated < row.fundedMinor ? 'active' : row.status,
+      status: statusAfterRelease(row, allocated) ?? row.status,
       updatedAt: this.#now(),
     };
     this.mandates.set(next.id, next);
