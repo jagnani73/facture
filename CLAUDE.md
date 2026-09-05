@@ -813,7 +813,7 @@ look for the caller before trusting the mechanism.
   to Arc on a timer for a case that needs judgement about whether the seller simply has not
   claimed yet. **It is an operator action, and the code no longer claims otherwise.**
 
-### The agent measures in the wrong unit, and checks the wrong pot
+### Resolved: the agent measures in the wrong unit, and checks the wrong pot
 
 **The note that escrowing capital "starved" the agent was wrong**, and it was acted on. Before
 the deposit the wallet held 6 USDC — $6.00 at par — still four orders of magnitude short of a
@@ -827,8 +827,76 @@ measuring in the wrong unit** — the same defect as the Arc funding check, in a
 Underneath that is a larger one: the agent checks its **Circle wallet**, and that wallet pays
 for neither rail. The Arc rail is paid by the vault; the x402 rail needs a Hedera key the
 Circle wallet does not have and cannot produce. The wallet's real job is funding the vault.
-But that same check is the only spending cap the agent has, and Circle enforces none — so
-removing it is not free, and the fix is a decision rather than a patch.
+**Decided and built.** `checkMandateEscrowed` replaces `checkWalletFunded` and compares no
+amounts at all: `backed` is measured against the mandate's WHOLE committed capital, so a
+backed bid covers anything `decide` already found headroom for — which is what keeps a second
+copy of the venue's ppm scale out of that package. `WALLET_BALANCE_SHORT` became
+`MANDATE_NOT_ESCROWED`, with three answers rather than two, because an unreadable vault is not
+an unbacked one. The cap survives: it is the mandate's committed capital, enforced by `decide`
+here and by the venue again at arm time. The last look before arming was deleted rather than
+ported — re-reading the vault per invoice is a mandates fetch per row, and the venue re-decides
+the rail anyway. Verified live: the agent takes 2 invoices where it took 0.
+
+### The full sweep for mechanisms nobody calls — ten more, 2026-09-03
+
+A systematic pass over every export, interface member, column, env var, contract function and
+wire field, asking only "what calls this outside its own tests". Nine had been found
+one at a time; this found **ten more at once**, which says the pattern was never a run of bad
+luck. Ranked by the claim each one falsely supports, not by how odd the code looks.
+
+**Two are fixed in this commit** because they were actively false to a user:
+
+- **`escrowVerified` was published and discarded.** The venue answers it so a reader need not
+  infer whether funding was checked against the vault or merely believed — and the web threw
+  it away and told every buyer _"The capital is escrowed, so the bid is firm"_, with no vault
+  configured, against a browser-generated reference string. The overclaim every other piece
+  of that feature exists to prevent, at the one place a human reads the result.
+- **Two agent log lines described a spend that does not exist** — see the agent section above.
+
+**The rest stand, and are worth knowing before trusting the claim beside them:**
+
+1. **`ArcEscrow.registerMandate` has no caller.** The vault refuses a deposit against an
+   unregistered mandate, so **no mandate created through `POST /v1/mandates` can ever be
+   escrowed** — its key is `keccak256(uuid)` and nothing registers it. The one working
+   mandate was registered by hand with a raw transaction. The Arc rail is real and has no
+   on-ramp.
+2. **`SettlementOutcome: 'default'` is never produced** and no route writes
+   `invoices.status = 'defaulted'`. So the permanent-rating-mark story has no code path, and
+   worse: maturing an overdue unpaid receivable records it as **`late`**, which is a default
+   written into the ledger as a payment.
+3. **`MandateVault.executeRelease` has no caller and is not even in `VAULT_ABI`.** "Withdraw
+   unallocated capital" decrements a SQLite row; real USDC in the vault has no path out of it
+   in this repo. Migration `0004` fixed a buyer's address _for this call_.
+4. **`@facture/shared/state` is an entire unused module** — both machines, every guard.
+   Status changes go through unguarded `updateInvoice({ status })`, so nothing validates a
+   lifecycle transition and `IllegalTransition` cannot be constructed at runtime.
+5. **`listed` is an unreachable invoice status.** Only the seed writes it, so the secondary
+   market the README's argument rests on has a table row and no code — which
+   `settlement.ts` already concedes in a comment.
+6. **`ArcEscrow.buyerOf` is called by nothing, not even a test.** It is the one check that
+   would have caught the invented-address problem `0004` fixed by hand.
+7. **The agent's entire money-moving surface has no caller** — `transferUsdc`,
+   `executeContract`, every wallet-set method. `AGENT_WALLET_SET_ID` is parsed and read by
+   nothing. `executeContract` is also the only way the agent could ever deposit into the
+   vault, which is the other half of (1).
+8. **`InvoiceRegistry.lookup` is never called.** The venue publishes terms and confirmations
+   to chain and never reads them back — write-only, unlike `UniquenessRegistry`, whose read
+   is what makes its refusal real.
+9. **`settlement_outcomes` is a write-only table.** Its header calls it the append-only fact
+   behind the `debtors` accumulator, and the counters are incremented in place and cannot be
+   rebuilt, because nothing can read the facts.
+10. **`invoices.regulation_type` never reaches the proof screen.** `api-source.ts` hardcodes
+    `regulation: null`, so the Reg S declaration renders only from fixtures.
+
+Also dead, lower stakes: `Store.getCursor`/`setCursor` and `indexer_cursors` (residue of the
+removed indexer), `InvoiceRegistry.setRating` / `amendDueDate`, and a tail of unused helpers
+across all five packages. **`arc.ts` claims `PAYMENT_LOCK_DURATION` is "read from the deployed
+contract" — it is not in the ABI and never read**; the 24-hour figure is prose beside a
+hardcoded constant.
+
+The lesson stands and is now quantified: **nineteen mechanisms in this repo have a definition,
+documentation, and no caller.** Look for the caller before believing the comment — including
+comments written in this file.
 
 ## Cut list
 
