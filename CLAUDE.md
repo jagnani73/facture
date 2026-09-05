@@ -233,13 +233,24 @@ data)` mints, and costs ~465k gas. Holder and receiver must both be allowlisted 
 - Circle's balance response carries the same USDC **twice** — native at 18 decimals and
   ERC-20 at 6. Select by contract address; picking wrong is a factor of a trillion.
 
-### Open: two refusal vocabularies
+### Resolved: one refusal vocabulary
 
-The contracts say `RATING_BELOW_FLOOR`, `TENOR_ABOVE_CEILING`, `INSUFFICIENT_UNALLOCATED`,
-`DEBTOR_LIMIT_EXCEEDED`. `@facture/shared` and the backend say `RATING_BELOW_MANDATE`,
-`TENOR_EXCEEDS_MANDATE`, `EXPOSURE_EXHAUSTED`, `DEBTOR_CONCENTRATION`. Same four decisions,
-two sets of names. The proof view would show one name on-chain and another in the API for a
-single refusal, which undercuts "every refusal names its reason". Pick one.
+**The contracts moved to `@facture/shared`.** Shared is frozen, it is what the backend records to
+HCS, and it is what a funder reads, so it is the authority. `ReasonCodes.sol` now spells every code
+that also exists off-chain exactly as shared spells it: `RATING_BELOW_MANDATE`,
+`TENOR_EXCEEDS_MANDATE`, `EXPOSURE_EXHAUSTED`, `DEBTOR_CONCENTRATION` and `NOT_KYC_VERIFIED` (was
+`KYC_NOT_GRANTED`), beside `MANDATE_NOT_ACTIVE` and `INVOICE_NOT_CONFIRMED`, which already matched.
+The paired custom errors moved with them - `RatingBelowMandate`, `TenorExceedsMandate`,
+`ExposureExhausted`, `DebtorConcentration` - so the strict path and the event path name a refusal
+the same way. Codes with no off-chain counterpart (`MANDATE_UNKNOWN`, `INVOICE_UNKNOWN`,
+`INVOICE_ALREADY_ALLOCATED`, `INVOICE_MATURED`, `CONTROL_LIST_BLOCKED`, `INSTRUMENT_PAUSED`,
+`COMPLIANCE_PROBE_FAILED`, `NO_GATE_CONFIGURED`, `SETTLEMENT_TIMEOUT`) are venue-internal and stay
+contract-side only. Changing one side without the other reintroduces the split; the reasoning is
+recorded at the top of `ReasonCodes.sol`.
+
+Two things follow. The live testnet contracts carry the old strings in their bytecode and need
+redeploying. And `ON_CHAIN_REASON_CODE` in `packages/agent/src/mandate.ts` still translates to the
+old names - it is now an identity map for the codes it covers, and should be retired or corrected.
 
 ## Cut list
 

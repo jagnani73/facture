@@ -111,15 +111,15 @@ overcommitment across mandates is structurally impossible rather than policed.
 
 Matching checks, in order, each with its own error type and its own reason code:
 
-| #   | Check                            | Error                                                                | Reason code                               |
-| --- | -------------------------------- | -------------------------------------------------------------------- | ----------------------------------------- |
-| 1   | mandate known and active         | `MandateUnknown` / `MandateNotActive`                                | `MANDATE_UNKNOWN` / `MANDATE_NOT_ACTIVE`  |
-| 2   | invoice known, confirmed, unsold | `InvoiceUnknown` / `InvoiceNotConfirmed` / `InvoiceAlreadyAllocated` | `INVOICE_*`                               |
-| 3   | rating ≥ floor                   | `RatingBelowFloor`                                                   | `RATING_BELOW_FLOOR`                      |
-| 4   | tenor ≤ ceiling                  | `TenorAboveCeiling` / `InvoiceMatured`                               | `TENOR_ABOVE_CEILING` / `INVOICE_MATURED` |
-| 5   | unallocated ≥ price              | `InsufficientUnallocated`                                            | `INSUFFICIENT_UNALLOCATED`                |
-| 6   | per-debtor exposure              | `DebtorLimitExceeded`                                                | `DEBTOR_LIMIT_EXCEEDED`                   |
-| 7   | instrument eligibility           | `NotEligible`                                                        | whatever the gate returned                |
+| #   | Check                            | Error                                                                | Reason code                                 |
+| --- | -------------------------------- | -------------------------------------------------------------------- | ------------------------------------------- |
+| 1   | mandate known and active         | `MandateUnknown` / `MandateNotActive`                                | `MANDATE_UNKNOWN` / `MANDATE_NOT_ACTIVE`    |
+| 2   | invoice known, confirmed, unsold | `InvoiceUnknown` / `InvoiceNotConfirmed` / `InvoiceAlreadyAllocated` | `INVOICE_*`                                 |
+| 3   | rating ≥ floor                   | `RatingBelowMandate`                                                 | `RATING_BELOW_MANDATE`                      |
+| 4   | tenor ≤ ceiling                  | `TenorExceedsMandate` / `InvoiceMatured`                             | `TENOR_EXCEEDS_MANDATE` / `INVOICE_MATURED` |
+| 5   | unallocated ≥ price              | `ExposureExhausted`                                                  | `EXPOSURE_EXHAUSTED`                        |
+| 6   | per-debtor exposure              | `DebtorConcentration`                                                | `DEBTOR_CONCENTRATION`                      |
+| 7   | instrument eligibility           | `NotEligible`                                                        | whatever the gate returned                  |
 
 Eligibility is last because it is the only external call: common refusals stay cheap, and every
 state read a decision depends on has already happened before control leaves the contract.
@@ -282,9 +282,12 @@ intermediary the venue exists to remove.
   matching compares with `>=`, and `Unrated == 0` makes an unrated debtor the _worst_ bucket, so an
   uninitialised slot can never present as investment grade.
 - `contracts/libraries/ReasonCodes.sol` — the refusal vocabulary. `bytes32` short strings rather
-  than an enum so a gate can surface a code the venue did not compile in.
+  than an enum so a gate can surface a code the venue did not compile in. Every code that also
+  exists off-chain is spelled exactly as `@facture/shared` spells it, so one decision reads the same
+  in the `MatchRefused` event as it does in the API and on the HCS receipt; renaming one side alone
+  splits it in two again.
 - `contracts/interfaces/IInvoiceRegistry.sol` — the seam onto invoice truth. The book _reads_ facts
-  rather than accepting them as arguments; "rating below floor" only means something if the rating
+  rather than accepting them as arguments; "rating below mandate" only means something if the rating
   is not supplied by the party who wants the match to succeed. `InvoiceRegistry.sol` is the
   production implementation; the mock beside it is test-only and deliberately unpermissioned.
 - `contracts/interfaces/ats/IAtsFacets.sol` — the three ATS selectors the gate probes, and nothing

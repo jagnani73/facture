@@ -32,6 +32,18 @@ pragma solidity ^0.8.24;
  *      `AtsComplianceGate`, which surfaces refusals originating inside a third-party diamond) can
  *      introduce a code the venue did not compile in, without a redeploy and without colliding.
  *      They are human-readable under `bytes32ToString` and stable forever once emitted.
+ *
+ *      ONE VOCABULARY ACROSS BOTH LAYERS. Every code below that also exists off-chain is spelled
+ *      *identically* to the `RefusalCode` union in the shared package (`packages/shared`):
+ *      `RATING_BELOW_MANDATE`, `TENOR_EXCEEDS_MANDATE`, `EXPOSURE_EXHAUSTED`,
+ *      `DEBTOR_CONCENTRATION`, `NOT_KYC_VERIFIED`, `MANDATE_NOT_ACTIVE`, `INVOICE_NOT_CONFIRMED`.
+ *      That is deliberate, not incidental. One decision has to read the same in the `MatchRefused`
+ *      event, in the API and on the HCS receipt, because the venue's claim is that every refusal
+ *      names its reason - and a proof view showing the chain saying one word and the API another
+ *      disproves exactly what it is there to demonstrate. The shared package is the authority:
+ *      renaming a code on one side without the other reintroduces the split. The codes with no
+ *      off-chain counterpart (`MANDATE_UNKNOWN`, `INVOICE_UNKNOWN`, `INVOICE_ALREADY_ALLOCATED`,
+ *      `INVOICE_MATURED`, and the remaining gate- and settlement-side codes) are named here alone.
  */
 library ReasonCodes {
     // --- no refusal -------------------------------------------------------------------------
@@ -63,25 +75,25 @@ library ReasonCodes {
     bytes32 internal constant INVOICE_ALREADY_ALLOCATED = "INVOICE_ALREADY_ALLOCATED";
 
     /// @notice The debtor's earned rating sits below the mandate's floor.
-    bytes32 internal constant RATING_BELOW_FLOOR = "RATING_BELOW_FLOOR";
+    bytes32 internal constant RATING_BELOW_MANDATE = "RATING_BELOW_MANDATE";
 
     /// @notice Days to maturity exceed the mandate's ceiling.
-    bytes32 internal constant TENOR_ABOVE_CEILING = "TENOR_ABOVE_CEILING";
+    bytes32 internal constant TENOR_EXCEEDS_MANDATE = "TENOR_EXCEEDS_MANDATE";
 
     /// @notice The invoice has already matured; there is no tenor left to price.
     bytes32 internal constant INVOICE_MATURED = "INVOICE_MATURED";
 
     /// @notice The mandate's unallocated balance is smaller than the purchase price.
     /// @dev This is the refusal that makes a standing quote firm rather than indicative.
-    bytes32 internal constant INSUFFICIENT_UNALLOCATED = "INSUFFICIENT_UNALLOCATED";
+    bytes32 internal constant EXPOSURE_EXHAUSTED = "EXPOSURE_EXHAUSTED";
 
     /// @notice Taking this invoice would push the mandate's exposure to one debtor past its cap.
-    bytes32 internal constant DEBTOR_LIMIT_EXCEEDED = "DEBTOR_LIMIT_EXCEEDED";
+    bytes32 internal constant DEBTOR_CONCENTRATION = "DEBTOR_CONCENTRATION";
 
     // --- gate-side refusals (decided inside a compliance gate) -------------------------------
 
     /// @notice The buyer has no valid KYC grant on this security's own `Kyc` facet.
-    bytes32 internal constant KYC_NOT_GRANTED = "KYC_NOT_GRANTED";
+    bytes32 internal constant NOT_KYC_VERIFIED = "NOT_KYC_VERIFIED";
 
     /// @notice The security's own `ControlList` refuses this buyer (blacklisted, or not whitelisted).
     bytes32 internal constant CONTROL_LIST_BLOCKED = "CONTROL_LIST_BLOCKED";

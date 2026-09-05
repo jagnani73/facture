@@ -869,7 +869,7 @@ describe('InvoiceRegistry', () => {
     await registry.write.setRating([INV_1, Rating.C], { account: attester.account });
     const belowFloor = await book.read.previewMatch([INV_1, mandateId]);
     assert.equal(belowFloor[0], false);
-    assert.equal(belowFloor[1], reason('RATING_BELOW_FLOOR'));
+    assert.equal(belowFloor[1], reason('RATING_BELOW_MANDATE'));
 
     await registry.write.setRating([INV_1, Rating.A], { account: attester.account });
     await book.write.matchInvoice([INV_1, mandateId], { account: matcher.account });

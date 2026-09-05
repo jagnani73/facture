@@ -488,13 +488,22 @@ describe('on-chain reason codes', () => {
     }
   });
 
-  it('maps the four the book spells differently', () => {
-    // MandateBook.sol and @facture/shared are both canonical for their own layer, and they
-    // disagree on wording for the same four refusals. Written down so it is not rediscovered.
-    expect(ON_CHAIN_REASON_CODE.EXPOSURE_EXHAUSTED).toBe('INSUFFICIENT_UNALLOCATED');
-    expect(ON_CHAIN_REASON_CODE.DEBTOR_CONCENTRATION).toBe('DEBTOR_LIMIT_EXCEEDED');
-    expect(ON_CHAIN_REASON_CODE.RATING_BELOW_MANDATE).toBe('RATING_BELOW_FLOOR');
-    expect(ON_CHAIN_REASON_CODE.TENOR_EXCEEDS_MANDATE).toBe('TENOR_ABOVE_CEILING');
+  it('spells every modelled refusal the same on-chain as off', () => {
+    // The vocabularies were unified: ReasonCodes.sol now spells each overlapping code
+    // exactly as @facture/shared does, so one decision reads the same in a MatchRefused
+    // event and in the API. This asserts the identity so a future divergence fails here
+    // rather than being discovered in a proof view.
+    for (const code of [
+      'EXPOSURE_EXHAUSTED',
+      'DEBTOR_CONCENTRATION',
+      'RATING_BELOW_MANDATE',
+      'TENOR_EXCEEDS_MANDATE',
+      'MANDATE_NOT_ACTIVE',
+      'INVOICE_NOT_CONFIRMED',
+      'NOT_KYC_VERIFIED',
+    ] as const) {
+      expect(ON_CHAIN_REASON_CODE[code]).toBe(code);
+    }
   });
 
   it('admits the book has no equivalent for a currency or funding refusal', () => {

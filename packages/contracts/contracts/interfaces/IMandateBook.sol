@@ -29,7 +29,7 @@ import {IDvpEscrow} from "./IDvpEscrow.sol";
  *      separately:
  *
  *        - Two invoices arriving against one mandate in the same block cannot both fill if only one
- *          is affordable. The second is refused with `INSUFFICIENT_UNALLOCATED`, deterministically,
+ *          is affordable. The second is refused with `EXPOSURE_EXHAUSTED`, deterministically,
  *          because allocation is a state write and not a check against a live wallet balance.
  *        - Overcommitment across mandates is structurally impossible rather than merely discouraged,
  *          because the same tokens cannot be escrowed twice.
@@ -367,24 +367,24 @@ interface IMandateBook {
      */
     error InvoiceNotConfirmed(bytes32 invoiceId);
 
-    /// @notice The debtor's earned rating sits below the mandate's floor. Paired with `RATING_BELOW_FLOOR`.
-    error RatingBelowFloor(bytes32 invoiceId, Rating invoiceRating, Rating minRating);
+    /// @notice The debtor's earned rating sits below the mandate's floor. Paired with `RATING_BELOW_MANDATE`.
+    error RatingBelowMandate(bytes32 invoiceId, Rating invoiceRating, Rating minRating);
 
-    /// @notice Days to maturity exceed the mandate's ceiling. Paired with `TENOR_ABOVE_CEILING`.
-    error TenorAboveCeiling(bytes32 invoiceId, uint32 tenorDays, uint32 maxTenorDays);
+    /// @notice Days to maturity exceed the mandate's ceiling. Paired with `TENOR_EXCEEDS_MANDATE`.
+    error TenorExceedsMandate(bytes32 invoiceId, uint32 tenorDays, uint32 maxTenorDays);
 
     /// @notice The invoice is at or past its due date; there is no tenor left to price. Paired with `INVOICE_MATURED`.
     error InvoiceMatured(bytes32 invoiceId, uint64 dueDate);
 
     /**
      * @notice The mandate's unallocated balance is smaller than the price.
-     * @dev Paired with `INSUFFICIENT_UNALLOCATED`. This is the refusal that makes a standing quote
+     * @dev Paired with `EXPOSURE_EXHAUSTED`. This is the refusal that makes a standing quote
      *      firm rather than indicative, and the one that resolves two invoices racing for one bid.
      */
-    error InsufficientUnallocated(uint256 mandateId, uint128 price, uint128 unallocated);
+    error ExposureExhausted(uint256 mandateId, uint128 price, uint128 unallocated);
 
-    /// @notice Taking this invoice would push exposure to one debtor past its cap. Paired with `DEBTOR_LIMIT_EXCEEDED`.
-    error DebtorLimitExceeded(uint256 mandateId, bytes32 debtorId, uint128 wouldBe, uint128 maxPerDebtor);
+    /// @notice Taking this invoice would push exposure to one debtor past its cap. Paired with `DEBTOR_CONCENTRATION`.
+    error DebtorConcentration(uint256 mandateId, bytes32 debtorId, uint128 wouldBe, uint128 maxPerDebtor);
 
     /**
      * @notice The instrument itself refuses this buyer.

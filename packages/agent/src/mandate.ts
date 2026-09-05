@@ -254,23 +254,27 @@ const money = (amount: MinorUnits, currency: Currency): string =>
 /**
  * The same refusals under the on-chain vocabulary.
  *
- * `MandateBook.sol` emits `bytes32` reason codes from `libraries/ReasonCodes.sol`, and it
- * names four of these differently to `@facture/shared` — the book says
- * `INSUFFICIENT_UNALLOCATED` where the domain says `EXPOSURE_EXHAUSTED`. Both vocabularies
- * are canonical for their own layer, so the mapping is written down here rather than being
- * rediscovered every time a `MatchRefused` event is read back.
+ * **The two vocabularies were unified**: `libraries/ReasonCodes.sol` was renamed to spell
+ * every overlapping code exactly as `@facture/shared` spells it, so a single decision now
+ * reads the same in a `MatchRefused` event and in the API. That was the point — the product
+ * claims every refusal names its reason, and two names for one decision undercuts it.
+ *
+ * So this map is an identity for everything the book models. It is kept rather than deleted
+ * because the two `null`s and the one genuine translation still carry information a reader
+ * would otherwise have to rediscover, and because it is the place a future divergence would
+ * be recorded.
  *
  * `null` means the on-chain book has no equivalent: it does not model currency at all, and
  * a jurisdiction refusal is decided inside a compliance gate rather than the book.
  */
 export const ON_CHAIN_REASON_CODE: Readonly<Record<AgentRefusalCode, string | null>> = {
-  RATING_BELOW_MANDATE: 'RATING_BELOW_FLOOR',
-  TENOR_EXCEEDS_MANDATE: 'TENOR_ABOVE_CEILING',
-  EXPOSURE_EXHAUSTED: 'INSUFFICIENT_UNALLOCATED',
-  DEBTOR_CONCENTRATION: 'DEBTOR_LIMIT_EXCEEDED',
+  RATING_BELOW_MANDATE: 'RATING_BELOW_MANDATE',
+  TENOR_EXCEEDS_MANDATE: 'TENOR_EXCEEDS_MANDATE',
+  EXPOSURE_EXHAUSTED: 'EXPOSURE_EXHAUSTED',
+  DEBTOR_CONCENTRATION: 'DEBTOR_CONCENTRATION',
   MANDATE_NOT_ACTIVE: 'MANDATE_NOT_ACTIVE',
   INVOICE_NOT_CONFIRMED: 'INVOICE_NOT_CONFIRMED',
-  NOT_KYC_VERIFIED: 'KYC_NOT_GRANTED',
+  NOT_KYC_VERIFIED: 'NOT_KYC_VERIFIED',
   INELIGIBLE_JURISDICTION: 'CONTROL_LIST_BLOCKED',
   CURRENCY_MISMATCH: null,
   WALLET_BALANCE_SHORT: null,

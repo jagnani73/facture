@@ -345,7 +345,7 @@ describe('MandateBook', () => {
       await viem.assertions.revertWithCustomError(
         ctx.book.write.matchInvoice([INV_2, id], { account: ctx.matcher.account }),
         ctx.book,
-        'InsufficientUnallocated',
+        'ExposureExhausted',
       );
 
       // The refused match left nothing behind.
@@ -367,7 +367,7 @@ describe('MandateBook', () => {
       await viem.assertions.revertWithCustomError(
         ctx.book.write.authoriseRelease([id, 1_001n], { account: ctx.buyer.account }),
         ctx.book,
-        'InsufficientUnallocated',
+        'ExposureExhausted',
       );
 
       await ctx.book.write.authoriseRelease([id, 1_000n], { account: ctx.buyer.account });
@@ -505,7 +505,7 @@ describe('MandateBook', () => {
       );
     });
 
-    it('RatingBelowFloor when the debtor sits under the mandate floor', async () => {
+    it('RatingBelowMandate when the debtor sits under the mandate floor', async () => {
       const ctx = await deploy();
       const id = await postAndFund(ctx, 100_000_000_000n, { minRating: Rating.A });
       await listInvoice(ctx, INV_1, { rating: Rating.B });
@@ -513,12 +513,12 @@ describe('MandateBook', () => {
       await viem.assertions.revertWithCustomError(
         ctx.book.write.matchInvoice([INV_1, id], { account: ctx.matcher.account }),
         ctx.book,
-        'RatingBelowFloor',
+        'RatingBelowMandate',
       );
     });
 
     /** A debtor with no settled history fails any mandate whose floor is a real grade. */
-    it('RatingBelowFloor for an unrated debtor', async () => {
+    it('RatingBelowMandate for an unrated debtor', async () => {
       const ctx = await deploy();
       const id = await postAndFund(ctx, 100_000_000_000n, { minRating: Rating.C });
       await listInvoice(ctx, INV_1, { rating: Rating.Unrated });
@@ -526,7 +526,7 @@ describe('MandateBook', () => {
       await viem.assertions.revertWithCustomError(
         ctx.book.write.matchInvoice([INV_1, id], { account: ctx.matcher.account }),
         ctx.book,
-        'RatingBelowFloor',
+        'RatingBelowMandate',
       );
     });
 
@@ -537,7 +537,7 @@ describe('MandateBook', () => {
      * reordered so that `D` sat above `Unrated`, this test is what fails, and it fails before any
      * defaulted paper can match against a bid that never meant to take it.
      */
-    it('RatingBelowFloor for a defaulted debtor even at the widest floor', async () => {
+    it('RatingBelowMandate for a defaulted debtor even at the widest floor', async () => {
       const ctx = await deploy();
       const id = await postAndFund(ctx, 100_000_000_000n, { minRating: Rating.Unrated });
       await listInvoice(ctx, INV_1, { rating: Rating.D });
@@ -545,11 +545,11 @@ describe('MandateBook', () => {
       await viem.assertions.revertWithCustomError(
         ctx.book.write.matchInvoice([INV_1, id], { account: ctx.matcher.account }),
         ctx.book,
-        'RatingBelowFloor',
+        'RatingBelowMandate',
       );
     });
 
-    it('TenorAboveCeiling when maturity is further out than the mandate accepts', async () => {
+    it('TenorExceedsMandate when maturity is further out than the mandate accepts', async () => {
       const ctx = await deploy();
       const id = await postAndFund(ctx, 100_000_000_000n, { maxTenorDays: 30 });
       await listInvoice(ctx, INV_1, { tenorDays: 60 });
@@ -557,7 +557,7 @@ describe('MandateBook', () => {
       await viem.assertions.revertWithCustomError(
         ctx.book.write.matchInvoice([INV_1, id], { account: ctx.matcher.account }),
         ctx.book,
-        'TenorAboveCeiling',
+        'TenorExceedsMandate',
       );
     });
 
@@ -575,7 +575,7 @@ describe('MandateBook', () => {
       );
     });
 
-    it('DebtorLimitExceeded when concentration would breach the cap', async () => {
+    it('DebtorConcentration when concentration would breach the cap', async () => {
       const ctx = await deploy();
       const price = await ctx.book.read.previewPrice([FACE, TENOR_DAYS, YIELD_BPS]);
       // Plenty of capital overall, but not enough headroom against this one debtor. Ordering matters:
@@ -586,7 +586,7 @@ describe('MandateBook', () => {
       await viem.assertions.revertWithCustomError(
         ctx.book.write.matchInvoice([INV_1, id], { account: ctx.matcher.account }),
         ctx.book,
-        'DebtorLimitExceeded',
+        'DebtorConcentration',
       );
     });
 
@@ -611,7 +611,7 @@ describe('MandateBook', () => {
       const id = await postAndFund(ctx, 100_000_000_000n);
       await listInvoice(ctx, INV_1);
 
-      await ctx.gate.write.setVerdict([false, reason('KYC_NOT_GRANTED')]);
+      await ctx.gate.write.setVerdict([false, reason('NOT_KYC_VERIFIED')]);
 
       await viem.assertions.revertWithCustomError(
         ctx.book.write.matchInvoice([INV_1, id], { account: ctx.matcher.account }),
@@ -674,7 +674,7 @@ describe('MandateBook', () => {
         ctx.book.write.tryMatch([INV_1, id], { account: ctx.matcher.account }),
         ctx.book,
         'MatchRefused',
-        [INV_1, id, reason('RATING_BELOW_FLOOR')],
+        [INV_1, id, reason('RATING_BELOW_MANDATE')],
       );
 
       // Nothing was allocated.
@@ -688,7 +688,7 @@ describe('MandateBook', () => {
 
       const [ok, previewed] = await ctx.book.read.previewMatch([INV_1, id]);
       assert.equal(ok, false);
-      assert.equal(previewed, reason('INSUFFICIENT_UNALLOCATED'));
+      assert.equal(previewed, reason('EXPOSURE_EXHAUSTED'));
 
       await viem.assertions.emitWithArgs(
         ctx.book.write.tryMatch([INV_1, id], { account: ctx.matcher.account }),

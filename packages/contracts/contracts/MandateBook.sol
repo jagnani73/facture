@@ -423,7 +423,7 @@ contract MandateBook is IMandateBook {
         if (msg.sender != m.buyer) revert NotMandateBuyer(mandateId, msg.sender);
 
         uint128 available = m.totalCommitted - m.allocated;
-        if (amount > available) revert InsufficientUnallocated(mandateId, amount, available);
+        if (amount > available) revert ExposureExhausted(mandateId, amount, available);
 
         // Decrement FIRST, then open the vault. Between this transaction and the attester's relay on
         // Arc the book under-counts, which is the safe direction; the reverse ordering would let the
@@ -545,7 +545,7 @@ contract MandateBook is IMandateBook {
         // Ordinal comparison. Valid only because {Rating} is ordered by credit quality, with `D`
         // as the zero value sitting below `Unrated`; see {FactureTypes}.
         if (uint8(inv.rating) < uint8(m.minRating)) {
-            e.reasonCode = ReasonCodes.RATING_BELOW_FLOOR;
+            e.reasonCode = ReasonCodes.RATING_BELOW_MANDATE;
             return e;
         }
 
@@ -562,29 +562,29 @@ contract MandateBook is IMandateBook {
         e.tenorDays = uint32((secondsToMaturity + 1 days - 1) / 1 days);
 
         if (e.tenorDays > m.maxTenorDays) {
-            e.reasonCode = ReasonCodes.TENOR_ABOVE_CEILING;
+            e.reasonCode = ReasonCodes.TENOR_EXCEEDS_MANDATE;
             return e;
         }
 
         // --- price, derived rather than supplied -----------------------------------------------
-        // The caller never states a price. If they did, "insufficient unallocated" and "debtor limit
-        // exceeded" would be checks against a number chosen by the party who wants the match to
-        // succeed. Deriving it from the mandate's own posted quote is what makes those two refusals
-        // mean something. Safe from underflow by the invariant enforced in {postMandate}.
+        // The caller never states a price. If they did, "exposure exhausted" and "debtor concentration"
+        // would be checks against a number chosen by the party who wants the match to succeed. Deriving
+        // it from the mandate's own posted quote is what makes those two refusals mean something. Safe
+        // from underflow by the invariant enforced in {postMandate}.
         e.price = _price(inv.faceValue, e.tenorDays, m.annualisedYieldBps);
 
         // --- 5. unallocated >= price -----------------------------------------------------------
         // The check that makes a standing quote firm rather than indicative.
         e.unallocatedAmount = m.totalCommitted - m.allocated;
         if (e.price > e.unallocatedAmount) {
-            e.reasonCode = ReasonCodes.INSUFFICIENT_UNALLOCATED;
+            e.reasonCode = ReasonCodes.EXPOSURE_EXHAUSTED;
             return e;
         }
 
         // --- 6. per-debtor concentration -------------------------------------------------------
         e.wouldBeExposure = _debtorExposure[mandateId][inv.debtorId] + e.price;
         if (e.wouldBeExposure > m.maxPerDebtor) {
-            e.reasonCode = ReasonCodes.DEBTOR_LIMIT_EXCEEDED;
+            e.reasonCode = ReasonCodes.DEBTOR_CONCENTRATION;
             return e;
         }
 
@@ -638,18 +638,18 @@ contract MandateBook is IMandateBook {
         if (r == ReasonCodes.INVOICE_ALREADY_ALLOCATED) {
             revert InvoiceAlreadyAllocated(invoiceId, _matchOfInvoice[invoiceId]);
         }
-        if (r == ReasonCodes.RATING_BELOW_FLOOR) {
-            revert RatingBelowFloor(invoiceId, e.rating, _mandates[mandateId].minRating);
+        if (r == ReasonCodes.RATING_BELOW_MANDATE) {
+            revert RatingBelowMandate(invoiceId, e.rating, _mandates[mandateId].minRating);
         }
         if (r == ReasonCodes.INVOICE_MATURED) revert InvoiceMatured(invoiceId, e.dueDate);
-        if (r == ReasonCodes.TENOR_ABOVE_CEILING) {
-            revert TenorAboveCeiling(invoiceId, e.tenorDays, _mandates[mandateId].maxTenorDays);
+        if (r == ReasonCodes.TENOR_EXCEEDS_MANDATE) {
+            revert TenorExceedsMandate(invoiceId, e.tenorDays, _mandates[mandateId].maxTenorDays);
         }
-        if (r == ReasonCodes.INSUFFICIENT_UNALLOCATED) {
-            revert InsufficientUnallocated(mandateId, e.price, e.unallocatedAmount);
+        if (r == ReasonCodes.EXPOSURE_EXHAUSTED) {
+            revert ExposureExhausted(mandateId, e.price, e.unallocatedAmount);
         }
-        if (r == ReasonCodes.DEBTOR_LIMIT_EXCEEDED) {
-            revert DebtorLimitExceeded(mandateId, e.debtorId, e.wouldBeExposure, _mandates[mandateId].maxPerDebtor);
+        if (r == ReasonCodes.DEBTOR_CONCENTRATION) {
+            revert DebtorConcentration(mandateId, e.debtorId, e.wouldBeExposure, _mandates[mandateId].maxPerDebtor);
         }
 
         // Everything remaining originated in the gate, and carries the gate's own code so that a

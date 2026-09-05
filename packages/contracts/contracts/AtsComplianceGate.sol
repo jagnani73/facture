@@ -119,7 +119,7 @@ contract AtsComplianceGate is IComplianceGate {
         //    actionable: an unlisted buyer can go and get a grant for this instrument.
         (probed, ok) = _probeBool(instrument, abi.encodeCall(IAtsKyc.getKycAccountStatus, (buyer)));
         if (!probed) return (false, ReasonCodes.COMPLIANCE_PROBE_FAILED);
-        if (!ok) return (false, ReasonCodes.KYC_NOT_GRANTED);
+        if (!ok) return (false, ReasonCodes.NOT_KYC_VERIFIED);
 
         return (true, ReasonCodes.NONE);
     }

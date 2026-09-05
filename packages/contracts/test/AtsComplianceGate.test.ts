@@ -42,7 +42,7 @@ describe('AtsComplianceGate', () => {
     const { gate, security } = await deploy(true, false, false);
     const [ok, code] = await gate.read.canReceive([security.address, BUYER]);
     assert.equal(ok, false);
-    assert.equal(code, reason('KYC_NOT_GRANTED'));
+    assert.equal(code, reason('NOT_KYC_VERIFIED'));
   });
 
   /**
