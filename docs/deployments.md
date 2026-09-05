@@ -338,12 +338,15 @@ venue's fee, not the holder's.
 
 Decoding this bond's own `deployBond` calldata gives `regulationType 1, regulationSubType 0` —
 Reg S, as decided. The invoice row said `reg-d-506c`, because the job carried the row's value to
-the adapter and the adapter used a venue-wide config value instead. Fixed in `083a26d`; the
-column default and the stored rows are corrected by migration `0003`, **which has not been
-applied to `packages/backend/data/facture.db`** — drizzle rebuilds the `invoices` table to change
-a default, which is not an operation to run against live demo state mid-session. Until it runs,
-seeded rows on that database still read Reg D 506(c) while every instrument the venue has
-deployed is Reg S.
+the adapter and the adapter used a venue-wide config value instead. Fixed in `083a26d`, and
+migration `0003` has since been applied to `packages/backend/data/facture.db`: all 28 invoices
+read `reg-s`, the column default matches, and `integrity_check` and `foreign_key_check` are both
+clean with every row count unchanged — 28 invoices, 27 trades, 99 quotes, 91 refusal receipts.
+
+It could not be applied by `pnpm db:migrate`, which fails silently on a populated database
+because the rebuild's `PRAGMA foreign_keys=OFF` is a no-op inside the transaction drizzle-kit
+wraps it in. The working procedure and why the obvious alternatives do not help are recorded at
+the top of the migration file.
 
 ## Debris on MF-2046
 

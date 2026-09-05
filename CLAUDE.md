@@ -422,13 +422,31 @@ so the proof view described Reg S paper as Reg D.
 - **A test pins each stored spelling to the enum pair the deployed factory checks** — Reg S
   `1/0`, 506(b) `2/1`, 506(c) `2/2`. A wrong mapping is a valid-looking number declaring the
   wrong offering, and a declaration is not something the venue can correct afterwards.
-- **Migration `0003` corrects the column default and the stored rows, and has NOT been applied
-  to `packages/backend/data/facture.db`.** Drizzle rebuilds the `invoices` table to change a
-  default, which is not something to run against live demo state mid-session. Until it runs,
-  seeded rows there still read Reg D while every deployed instrument is Reg S.
+- **Migration `0003` corrects the column default and the stored rows, and is applied** — all 28
+  invoices in `packages/backend/data/facture.db` now read `reg-s`, matching what every
+  deployed instrument carries.
 
 This is the third field found plumbed to the edge and dropped, after the indexer cursor and the
 agent's translation table. Worth checking for directly rather than waiting to trip over.
+
+**`pnpm db:migrate` cannot apply `0003` to a database that has invoices in it, and fails
+silently.** drizzle-kit exits 1 having printed nothing but its spinner. Changing a column
+default rebuilds the table, and the generated rebuild opens with `PRAGMA foreign_keys=OFF` —
+which is **a no-op inside a transaction**, and drizzle-kit wraps every migration in one. So
+enforcement stays on and `DROP TABLE invoices` trips the rows in `trades`, `quotes`,
+`refusal_receipts`, `settlement_outcomes` and `confirmation_requests` that point at it.
+`PRAGMA defer_foreign_keys=ON` does not rescue it: the drop's implicit delete increments the
+deferred counter and renaming the replacement table back does not decrement it, so the failure
+moves to `COMMIT`. On a fresh database it applies fine, there being no child rows to violate —
+which is the only case the generator has in mind.
+
+Against a populated one, use SQLite's documented rebuild order with the pragma **outside** the
+transaction (`PRAGMA foreign_keys=OFF; BEGIN; …; COMMIT; PRAGMA foreign_keys=ON;`), then check
+`integrity_check` and `foreign_key_check`, and insert the migration's sha256 into
+`__drizzle_migrations` so `db:migrate` treats it as done. The full procedure is written at the
+top of the migration file. Take a `VACUUM INTO` backup first and not a file copy — the demo
+database keeps most of its content in a WAL an order of magnitude larger than the `.db`, so
+copying the `.db` alone silently backs up almost nothing.
 
 ### Resolved: `/health` reports reachability, because nothing here indexes
 

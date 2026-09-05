@@ -1,3 +1,24 @@
+-- Changing a column default in SQLite means rebuilding the table, so this is drizzle-kit's
+-- generated rebuild plus the row correction at the end.
+--
+-- `pnpm db:migrate` CANNOT APPLY THIS TO A DATABASE THAT HAS INVOICES IN IT, and the failure
+-- is silent behind drizzle-kit's spinner - it exits 1 having printed nothing. The reason is
+-- the first line: `PRAGMA foreign_keys=OFF` is a no-op inside a transaction, and drizzle-kit
+-- wraps every migration in one. So enforcement stays on, and `DROP TABLE invoices` trips the
+-- rows in trades, quotes, refusal_receipts, settlement_outcomes and confirmation_requests
+-- that point at it. `PRAGMA defer_foreign_keys=ON` does not rescue it either: the drop's
+-- implicit delete increments the deferred violation counter, and renaming the replacement
+-- table back into place does not decrement it, so the failure just moves to COMMIT.
+--
+-- It applies cleanly to a fresh database, where no child rows exist to be violated, which is
+-- the only case drizzle-kit's generator has in mind. Against a populated one, follow
+-- SQLite's own documented table-rebuild order and put the pragma OUTSIDE the transaction:
+--
+--   PRAGMA foreign_keys = OFF;  BEGIN;  <every statement below>;  COMMIT;
+--   PRAGMA foreign_keys = ON;   -- then verify integrity_check and foreign_key_check
+--
+-- That is how it was applied to the demo database on 2026-09-02, from a VACUUM INTO backup
+-- taken with the server stopped, verified on a copy first.
 PRAGMA foreign_keys=OFF;--> statement-breakpoint
 CREATE TABLE `__new_invoices` (
 	`id` text PRIMARY KEY NOT NULL,
