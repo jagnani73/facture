@@ -33,13 +33,27 @@ function SignInControl() {
 
   if (state.status === 'signed-out') {
     return (
-      <button
-        type="button"
-        onClick={signIn}
-        className="label-micro h-7 rounded-xs border border-rule px-2 text-muted transition-colors hover:border-rule-strong hover:text-ink"
-      >
-        Sign in
-      </button>
+      <span className="flex items-center gap-2">
+        {/*
+          Named, not implied. Signed out is not a degraded state here — it is the shared demo
+          account, a seeded book with settled trades and matured receivables in it, which is
+          what lets the market be looked at without an account. Leaving it unlabelled invites
+          the opposite reading: that this is your book and you have no invoices.
+        */}
+        <span
+          className="label-micro hidden text-muted sm:block"
+          title="A shared, pre-seeded book. Sign in to get one of your own."
+        >
+          Demo book
+        </span>
+        <button
+          type="button"
+          onClick={signIn}
+          className="label-micro h-7 rounded-xs border border-rule px-2 text-muted transition-colors hover:border-rule-strong hover:text-ink"
+        >
+          Sign in
+        </button>
+      </span>
     );
   }
 

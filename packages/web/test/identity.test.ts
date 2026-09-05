@@ -105,6 +105,39 @@ describe('subscription', () => {
   });
 });
 
+/*
+ * `useMarket` reads the seller through `useSyncExternalStore(subscribe, sellerId, …)`, so
+ * these three properties are what make signing in actually re-fetch the book. They were all
+ * true and unused for a while: the subscription existed and nothing subscribed, so the
+ * identity changed and the screen kept showing the previous seller's invoices until the next
+ * navigation — the feature failing silently rather than loudly.
+ */
+describe('the store contract useSyncExternalStore depends on', () => {
+  it('returns a snapshot that changes identity when the seller changes', () => {
+    const before = sellerId();
+    setSignedInSeller(A_SELLER);
+    expect(sellerId()).not.toBe(before);
+  });
+
+  /* A snapshot that allocated a new value each call would re-render forever. */
+  it('returns a stable snapshot while nothing changes', () => {
+    setSignedInSeller(A_SELLER);
+    expect(sellerId()).toBe(sellerId());
+  });
+
+  it('notifies subscribers in the same tick the snapshot changes', () => {
+    let snapshotAtNotify: string | null = null;
+    const stop = subscribe(() => {
+      snapshotAtNotify = sellerId();
+    });
+
+    setSignedInSeller(A_SELLER);
+    expect(snapshotAtNotify).toBe(A_SELLER);
+
+    stop();
+  });
+});
+
 describe('explainMissingIdentity', () => {
   it('names the environment variable when nothing is configured or signed in', () => {
     const message = explainMissingIdentity('seller');

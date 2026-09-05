@@ -52,6 +52,22 @@ export const buyerId = (): string => BUYER_ID;
 /** True when the seller on screen is a signed-in one rather than the configured default. */
 export const isSignedIn = (): boolean => signedInSellerId !== null;
 
+/**
+ * Whether the screens are showing the shared demo account rather than someone's own book.
+ *
+ * The same fact as `!isSignedIn()`, named separately because it is the one the product says
+ * out loud. The configured seller is not a fallback in the user's eyes — it is **the demo
+ * account**: a shared, pre-seeded book with settled trades and matured receivables in it, so
+ * that the market can be looked at without an account and without pretending an empty page is
+ * a market.
+ *
+ * The distinction is load-bearing beyond labelling. Capital behind a demo mandate is the
+ * venue's own, and capital behind yours is yours, so which account is in view decides whose
+ * money a deposit moves. Saying "buyer capital is escrowed" over the demo book without that
+ * distinction would be the kind of overclaim this project keeps having to walk back.
+ */
+export const isDemoAccount = (): boolean => signedInSellerId === null;
+
 /** `null` signs out, which restores the configured identity rather than clearing it. */
 export function setSignedInSeller(id: string | null): void {
   const next = id === null || id.trim() === '' ? null : id.trim();

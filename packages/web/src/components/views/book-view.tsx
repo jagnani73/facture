@@ -330,7 +330,11 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
           </div>
 
           {visible.length === 0 ? (
-            <p className="px-5 py-10 text-center text-sm text-muted">Nothing in this view.</p>
+            <p className="px-5 py-10 text-center text-sm text-muted">
+              {rows.length === 0
+                ? 'This book is empty. Add an invoice and it is priced the moment your customer confirms it.'
+                : 'Nothing in this view.'}
+            </p>
           ) : null}
         </Card>
 

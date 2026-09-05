@@ -13,7 +13,10 @@
  * `fixtures.ts` was for in the first place.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+
+import { SELLER_ID } from '@/lib/api/config';
+import { sellerId, subscribe } from '@/lib/api/identity';
 
 import {
   confirmationIfImmediate,
@@ -75,9 +78,32 @@ function useAsyncResource<T>(
   return useMemo(() => ({ ...state, reload }), [state, reload]);
 }
 
+/**
+ * Whose book is being read, as a value a render can depend on.
+ *
+ * The identity lives in a module rather than in React, because the data layer is plain async
+ * code called from hooks rather than a component. That is fine for reading it and useless for
+ * *reacting* to it, which is what this bridges: signing in changes the module's answer, and
+ * nothing would re-render or re-fetch without a subscription.
+ *
+ * The server snapshot is deliberately the configured seller. There is no session on the
+ * server, so that is what it rendered, and returning anything else here would be a hydration
+ * mismatch dressed up as a fresh value.
+ */
+function useCurrentSeller(): string {
+  return useSyncExternalStore(subscribe, sellerId, () => SELLER_ID);
+}
+
 /** The whole market: the book, the curve, the mandates, and a price against every row. */
 export function useMarket(): AsyncResource<Market> {
-  const load = useCallback((signal: AbortSignal) => loadMarket(signal), []);
+  const seller = useCurrentSeller();
+  /*
+   * `loadMarket` reads the current seller itself, so `seller` is not passed to it — it is
+   * named here because that is what makes the fetch re-run when someone signs in or out.
+   * Without it the identity would change and the screen would keep showing the previous
+   * seller's book until the next navigation, which is the whole feature failing silently.
+   */
+  const load = useCallback((signal: AbortSignal) => loadMarket(signal), [seller]);
   const immediate = useMemo(() => marketIfImmediate(), []);
   return useAsyncResource(load, immediate);
 }
