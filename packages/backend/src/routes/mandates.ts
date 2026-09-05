@@ -16,7 +16,7 @@ import { z } from 'zod';
 import { getStore } from '../db/store.js';
 import { badRequest, notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
-import { getArcEscrow } from '../services/arc.js';
+import { ensureMandateRegistered, getArcEscrow, releaseMandateCapital } from '../services/arc.js';
 import { settlementService } from '../services/settlement.js';
 import { readJson, readParams, readQuery } from '../validate.js';
 import { money, moneyString, wireMandate } from '../wire.js';
@@ -95,7 +95,32 @@ mandateRoutes.post('/', async (c) => {
     status: 'draft',
   });
 
-  return c.json({ mandate: wireMandate(row), quoting: false }, 201);
+  /*
+   * Open the cash leg on Arc, here, because a deposit cannot land before it exists.
+   *
+   * `MandateVault.deposit` reverts `MandateNotRegistered` against an unregistered mandate, so
+   * without this a mandate written through this route can never be escrowed — its vault key is
+   * `keccak256(uuid)` and nothing had ever registered one. That was the state of things: the
+   * single working mandate had been registered by hand, and `pnpm demo:reset` picked up the
+   * rest between rehearsals, so anything created in between stayed unescrowable and every quote
+   * it would have made would have been unbacked.
+   *
+   * It runs at creation rather than at funding because the ordering is the contract's, not a
+   * preference: registration → the buyer's own deposit → funding verified against the balance.
+   * Registering at funding time would arrive one step after the deposit it exists to permit.
+   *
+   * **A chain that is down costs the registration, not the mandate.** Writing a bid is a
+   * business act, and `ensureMandateRegistered` answers a state rather than throwing — the same
+   * trade `services/uniqueness.ts` makes, where `checked: false` is deliberately not
+   * `claimed: false`. The state is on the response because an unregistered mandate otherwise
+   * fails much later, inside a contract revert nobody reads.
+   */
+  const registration = await ensureMandateRegistered(getArcEscrow(), row.id, buyer.arcAddress);
+
+  return c.json(
+    { mandate: wireMandate(row), quoting: false, escrowRegistration: registration },
+    201,
+  );
 });
 
 mandateRoutes.get('/', async (c) => {
@@ -281,6 +306,22 @@ mandateRoutes.post('/:id/fund', async (c) => {
    * assumption a reader has to make.
    */
   const escrow = getArcEscrow();
+
+  /*
+   * Registration, repaired rather than assumed.
+   *
+   * `POST /v1/mandates` opens the cash leg, and this is the second attempt for the case where
+   * that one could not reach the chain. It is a view call on every run after the first, so the
+   * cost of asking is one `buyerOf`, and the alternative is a buyer whose deposit reverts with
+   * a contract error and who is then told by the check below only that "the vault holds 0" —
+   * true, and silent about the reason it could never have held anything else.
+   *
+   * It cannot make THIS request succeed: the deposit had to precede the funding call, and it
+   * could not have. What it does is make the next one possible.
+   */
+  const buyer = await store.getBuyer(existing.buyerId);
+  const registration = await ensureMandateRegistered(escrow, id, buyer?.arcAddress ?? null);
+
   if (escrow.enabled) {
     const deposited = await escrow.depositedFor(id);
     const wouldBeCommitted = existing.fundedMinor + body.amountMinor;
@@ -298,7 +339,14 @@ mandateRoutes.post('/:id/fund', async (c) => {
         `This mandate would be counted as holding ${wouldBeCommitted} ${existing.currency} ` +
           `minor units, which needs ${required} USDC minor units on Arc, but the vault holds ` +
           `${deposited}. Capital has to arrive on Arc before the book will quote against it — ` +
-          'a bid backed by a request body is not a firm bid.',
+          'a bid backed by a request body is not a firm bid. ' +
+          /*
+           * Why the deposit could not have landed, when that is the reason. An empty vault
+           * against an unregistered mandate is not a buyer who forgot to send money; it is a
+           * buyer whose transaction reverted, and saying only "the vault holds 0" would send
+           * them to look at their wallet instead of at the registration.
+           */
+          registration.detail,
       );
     }
   }
@@ -320,16 +368,24 @@ mandateRoutes.post('/:id/fund', async (c) => {
      * by the presence of an escrow reference.
      */
     escrowVerified: escrow.enabled,
+    /** Whether the mandate's cash leg exists on Arc, which is what makes a deposit possible. */
+    escrowRegistration: registration,
   });
 });
 
 /**
  * Withdraw unallocated capital. Allocated capital is committed against trades in flight
  * and is not withdrawable — that is what "firm" means.
+ *
+ * **This used to decrement a SQLite row and stop there.** `MandateVault.executeRelease` was
+ * not in the backend's ABI and had no caller anywhere, so real USDC in the vault had no path
+ * out of it in this repo at all: a buyer could post capital, watch the book give the capacity
+ * back, and never see the money. The book and the money move together now.
  */
 mandateRoutes.post('/:id/withdraw', async (c) => {
   const { id } = readParams(c, uuidParam);
   const body = await readJson(c, withdrawBody);
+  const store = getStore();
 
   // A buyer withdrawing "everything unallocated" must not be short-changed by capital
   // reserved for a trade whose challenge window has already run out.
@@ -340,17 +396,51 @@ mandateRoutes.post('/:id/withdraw', async (c) => {
    * to the match: the allocation is taken under the same lock, so by the time this reads
    * `funded - allocated` the match has either happened or has not. Capital a buyer has
    * already been matched against is not theirs to pull — that is what "firm" means.
+   *
+   * **The book moves first and the chain second, and the order is chosen rather than
+   * incidental.** `IMandateVault` states the invariant the whole split rests on: the attested
+   * balance must be a lower bound on real Arc capital at every instant, so the book decrements
+   * at the moment it authorises, before the tokens move. A release that then fails leaves USDC
+   * in the vault against a book that no longer quotes it — recoverable by funding the mandate
+   * again. Reversed, a release that lands after the decrement failed leaves a mandate quoting
+   * capital that has already left, and every price it wins is one nobody can honour.
    */
-  const { mandate, withdrawn } = await getStore().withdrawFromMandate({
+  const { mandate, withdrawn } = await store.withdrawFromMandate({
     mandateId: id,
     ...(body.amountMinor === undefined ? {} : { amount: body.amountMinor }),
     at: new Date(),
+  });
+
+  /*
+   * The buyer on file, read only to be COMPARED against the vault's own binding. It is never
+   * sent: `executeRelease` takes no recipient and always pays `buyerOf`, which is the bound
+   * that stops a compromised relay redirecting a buyer's capital. What the comparison catches
+   * is the other half — a vault bound to an address this venue does not believe is the
+   * buyer's, where triggering the release would move their money to a stranger.
+   */
+  const buyer = await store.getBuyer(mandate.buyerId);
+
+  const release = await releaseMandateCapital(getArcEscrow(), {
+    mandateUuid: id,
+    amountMinor: withdrawn,
+    currency: mandate.currency,
+    buyerAddress: buyer?.arcAddress ?? null,
   });
 
   return c.json({
     mandate: wireMandate(mandate),
     withdrawn: money(withdrawn),
     quoting: mandate.status === 'active',
+    /**
+     * What became of the real USDC, in the vault's own units.
+     *
+     * `withdrawn` above is the mandate's currency at 2 decimals and `amountUsdcMinor` is USDC
+     * at 6 — the pair is published for the same reason the funding route publishes both sides
+     * of its comparison, because the defect being guarded against is two scales sharing one
+     * name. A state other than `released` means the book moved and the money did not, which a
+     * buyer has to be able to read rather than infer from a missing hash.
+     */
+    release: { ...release, amountUsdcMinor: money(release.amountUsdcMinor) },
   });
 });
 

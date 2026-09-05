@@ -38,17 +38,34 @@
  * {@link toSettlementAmount}, the same one the Hedera cash leg settles through, so a
  * mandate is backed on Arc by exactly the amount a trade would cost on either rail.
  *
- * ## What this does not do
+ * ## Capital arrives on its own and leaves only on the venue's word
  *
- * It does not move money. Depositing pulls USDC from `msg.sender`, so a deposit is the
- * buyer's own transaction from the buyer's own wallet — the venue holds the attester key, not
- * the buyer's. All the venue does is `registerMandate`, which names who a release may be paid
- * to, and then read what arrived.
+ * **It does not deposit.** `deposit` pulls USDC from `msg.sender`, so funding is the buyer's
+ * own transaction from the buyer's own wallet — the venue holds the attester key, not the
+ * buyer's. What the venue does before that is `registerMandate`, which names the one address a
+ * release may ever be paid to, and **without which a deposit reverts `MandateNotRegistered`.**
+ * That is why {@link ensureMandateRegistered} runs when a mandate is written rather than being
+ * left to a provisioning script: a mandate nobody registered is a mandate nobody can fund.
+ *
+ * **It does move money out**, on the vault's two authorised paths and no others.
+ * `executePayout` pays a settled trade's seller into the escrow, and `executeRelease` returns
+ * a buyer's unallocated capital to that buyer. Both are attester-only, and neither takes a
+ * recipient: the vault reads the binding it already holds, so a forged authorisation can only
+ * ever return a buyer's own money to that buyer.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { Currency } from '@facture/shared';
 import { ARC_TESTNET, CURRENCY_DECIMALS } from '@facture/shared';
-import { createPublicClient, createWalletClient, http, keccak256, parseAbi, toHex } from 'viem';
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  isAddress,
+  keccak256,
+  parseAbi,
+  toHex,
+} from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arcChain } from '../chain.js';
 import { badRequest, upstreamUnavailable } from '../errors.js';
@@ -75,6 +92,16 @@ const VAULT_ABI = parseAbi([
   'function paymentEscrow() view returns (address)',
   'function registerMandate(uint256 mandateId, address buyer)',
   'function registerMatch(bytes32 matchId, uint256 mandateId, address seller, uint128 price)',
+  /*
+   * The vault's OTHER way out, and it was missing from this ABI entirely — so "withdraw
+   * unallocated capital" decremented a SQLite row and left the real USDC with no path out of
+   * the contract at all. A buyer could post capital and never get it back.
+   *
+   * It takes no recipient on purpose. `executeRelease` pays `buyerOf(mandateId)`, the one-shot
+   * binding written at registration, so the venue cannot redirect a buyer's own money even by
+   * accident — which is why the caller reads that binding rather than passing an address.
+   */
+  'function executeRelease(bytes32 authId, uint256 mandateId, uint128 amount)',
   'function executePayout(bytes32 authId, bytes32 matchId, bytes32 lockId, bytes32 secretHash)',
 ]);
 
@@ -154,6 +181,27 @@ export const authIdFor = (tradeId: string): `0x${string}` => domainId('auth', tr
  */
 export const lockIdFor = (tradeId: string): `0x${string}` => domainId('lock', tradeId);
 
+/**
+ * The one authorisation id here that is minted rather than derived, and why.
+ *
+ * Every other id on this path comes from a trade id, because a trade is a row this venue can
+ * name and a retry of one trade must produce the same match. **A withdrawal is not a row.**
+ * `withdrawFromMandate` decrements a mandate and returns an amount; there is nothing durable
+ * to derive from, and the obvious substitutes all collide: two withdrawals of the same amount
+ * from the same mandate would derive one id, and the vault's `_consumed` guard would refuse
+ * the second one forever. That is a buyer permanently unable to take their own capital out.
+ *
+ * So the id is fresh per authorisation, which is exactly what `_consumed` wants. Randomness
+ * costs nothing here — the id authenticates nobody (`IMandateVault` says so plainly; only the
+ * attester may call), it merely has to be unique and unreplayable.
+ *
+ * It is published on a successful release and logged beside the transaction hash on a failed
+ * one, which is the case that needs it: a release whose receipt never arrived can be settled
+ * against the vault's own `isConsumed(authId)` by hand, rather than guessed at from a timeout.
+ */
+export const releaseAuthId = (): `0x${string}` =>
+  keccak256(toHex(`facture.release.v1:${randomUUID()}`));
+
 export interface ArcEscrow {
   /** Whether a vault is configured at all. False means funding is recorded, not verified. */
   readonly enabled: boolean;
@@ -165,12 +213,39 @@ export interface ArcEscrow {
    * a vault balance is a 10^4 error that looks like agreement, which is how it survived.
    */
   requiredFor(amountMinor: bigint, currency: string): bigint;
+  /**
+   * USDC the vault may return when `amountMinor` of `currency` is withdrawn from the book,
+   * in the same ERC-20 minor units (6dp) {@link depositedFor} answers in.
+   *
+   * The same conversion as {@link requiredFor} and the opposite rounding, which is not a
+   * detail — see {@link usdcReleasableFor}.
+   */
+  releasableFor(amountMinor: bigint, currency: string): bigint;
   /** USDC actually held for this mandate, in ERC-20 minor units (6dp). */
   depositedFor(mandateUuid: string): Promise<bigint>;
   /** The address a release would pay, or `null` when the mandate was never registered. */
   buyerOf(mandateUuid: string): Promise<string | null>;
-  /** Attester-only. Must happen before any deposit can land against the mandate. */
+  /**
+   * Attester-only. Must happen before any deposit can land against the mandate.
+   *
+   * One-shot and uncorrectable — `MandateAlreadyRegistered` on a second call, with no update
+   * path — so the address bound here is the only address this mandate's capital can ever come
+   * back to. Call it through {@link ensureMandateRegistered}, which reads the binding first
+   * and refuses an address nobody can be shown to hold a key for.
+   */
   registerMandate(mandateUuid: string, buyer: string): Promise<{ transactionHash: string }>;
+
+  /**
+   * Return unallocated capital to the mandate's registered buyer.
+   *
+   * Takes no recipient: the vault pays `buyerOf(mandateId)` and ignores anything the relay
+   * might prefer. `amountUsdcMinor` is USDC ERC-20 minor units (6dp), never the mandate's own
+   * currency — the two differ by four orders of magnitude and read as the same number.
+   */
+  executeRelease(input: {
+    mandateUuid: string;
+    amountUsdcMinor: bigint;
+  }): Promise<{ transactionHash: string; authId: string }>;
 
   /**
    * The payout binding for a trade, or `null` if this match was never registered.
@@ -289,6 +364,36 @@ export const usdcRequiredFor = (amountMinor: bigint, currency: string, scalePpm:
   );
 
 /**
+ * What the vault may pay back when that same amount is withdrawn from the book.
+ *
+ * **The same conversion and the opposite rounding, and the direction is the whole point.**
+ * The invariant a funded mandate keeps is `vaultBalance >= usdcRequiredFor(committed)`, and a
+ * withdrawal has to leave it standing over the smaller book that remains. Rounding the
+ * release DOWN does: `ceil(a) - floor(b) >= ceil(a - b)` for every remainder, so whatever dust
+ * the scaling leaves behind stays in the vault, backing capital the book still counts.
+ *
+ * Rounding it up breaks that outright, and not by a hair. Release `ceil` of a $0.10 withdrawal
+ * at 1 ppm and a whole USDC minor unit leaves the vault against a book that decremented by a
+ * tenth of one — repeat it and a mandate quoting real capital is standing on an empty vault,
+ * which is the overclaim the funding check exists to refuse arriving through the back door.
+ *
+ * It is also the payment rule from {@link toSettlementAmount} seen from the other side: money
+ * moving out rounds down, so the venue never hands over more than the ledger authorised.
+ */
+export const usdcReleasableFor = (
+  amountMinor: bigint,
+  currency: string,
+  scalePpm: number,
+): bigint =>
+  toSettlementAmount(
+    amountMinor,
+    CURRENCY_DECIMALS[currency as Currency] ?? 2,
+    USDC_DECIMALS,
+    scalePpm,
+    'down',
+  );
+
+/**
  * No vault configured.
  *
  * Reads answer "nothing is escrowed" rather than throwing, because the funding route has to
@@ -300,9 +405,11 @@ export function createDisabledArcEscrow(scalePpm = 1): ArcEscrow {
   return {
     enabled: false,
     requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, scalePpm),
+    releasableFor: (amountMinor, currency) => usdcReleasableFor(amountMinor, currency, scalePpm),
     depositedFor: () => Promise.resolve(0n),
     buyerOf: () => Promise.resolve(null),
     registerMandate: () => Promise.reject(noVault('Registering a mandate')),
+    executeRelease: () => Promise.reject(noVault('Releasing mandate capital')),
     payoutFor: () => Promise.resolve(null),
     lockOf: () => Promise.resolve(null),
     escrowAddress: () => Promise.reject(noVault('Reading the payout escrow')),
@@ -370,7 +477,7 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
    * rather than a rule to remember at four call sites.
    */
   const send = async (
-    functionName: 'registerMandate' | 'registerMatch' | 'executePayout',
+    functionName: 'registerMandate' | 'registerMatch' | 'executeRelease' | 'executePayout',
     args: readonly unknown[],
     context: Record<string, unknown>,
   ): Promise<`0x${string}`> => {
@@ -451,6 +558,10 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
       return usdcRequiredFor(amountMinor, currency, config.settlementScalePpm);
     },
 
+    releasableFor(amountMinor, currency) {
+      return usdcReleasableFor(amountMinor, currency, config.settlementScalePpm);
+    },
+
     async depositedFor(mandateUuid) {
       return read<bigint>('balanceOf', mandateUuid);
     },
@@ -467,6 +578,20 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
         buyer,
       });
       return { transactionHash: hash };
+    },
+
+    async executeRelease({ mandateUuid, amountUsdcMinor }) {
+      const authId = releaseAuthId();
+      const hash = await send(
+        'executeRelease',
+        [authId, vaultMandateId(mandateUuid), amountUsdcMinor],
+        {
+          mandateUuid,
+          amountUsdcMinor: amountUsdcMinor.toString(10),
+          authId,
+        },
+      );
+      return { transactionHash: hash, authId };
     },
 
     async payoutFor(tradeId) {
@@ -543,6 +668,364 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
       };
     },
   };
+}
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+const ZERO_ADDRESS = /^0x0{40}$/i;
+
+/** An address this venue is willing to bind capital to, or the reason it will not. */
+export type ArcAddressCheck = { ok: true; address: `0x${string}` } | { ok: false; reason: string };
+
+/**
+ * Whether an address may be bound as the only place a mandate's capital can ever return to.
+ *
+ * **Four of the seeded parties' addresses were invented**, and `seed.ts` says so: plausible hex
+ * nobody holds a key for. `registerMandate` is one-shot with no update path, so binding one is
+ * not a mistake anyone can correct afterwards — it is a mandate whose capital has a way in and
+ * no way out. Refusing to register is strictly better: the vault then refuses the deposit too,
+ * and the money never gets in to be stranded.
+ *
+ * EIP-55 is the tripwire, and it is the same one `scripts/demo-reset.mjs` uses so that the
+ * provisioning script and the route cannot disagree about which addresses are real. It catches
+ * all three invented buyer addresses because whoever wrote them typed mixed case without
+ * computing a checksum, while the one real wallet is lowercase and passes. **That is a useful
+ * accident and not a proof** — a fabricated address with a correct checksum sails through — so
+ * this is a floor under carelessness, not a guarantee of custody.
+ *
+ * The zero address is refused separately and by name. `registerMandate` reverts on it anyway,
+ * but a local refusal says which of the two problems it is instead of spending a transaction
+ * to be told.
+ */
+export function payableArcAddress(value: string | null | undefined): ArcAddressCheck {
+  if (value === null || value === undefined || value === '') {
+    return { ok: false, reason: 'is missing, so there is no address a release could pay' };
+  }
+  if (ZERO_ADDRESS.test(value)) {
+    return { ok: false, reason: 'is the zero address, which the vault refuses and nobody holds' };
+  }
+  if (!isAddress(value, { strict: true })) {
+    return {
+      ok: false,
+      reason: 'fails its EIP-55 checksum, so it was typed rather than generated by a wallet',
+    };
+  }
+  return { ok: true, address: value };
+}
+
+/**
+ * What the vault knows about a mandate's cash leg after this call, and how it came to know it.
+ *
+ * Flat rather than a discriminated union because it is rendered on the wire, where a reader has
+ * to be able to tell "registered" from "we could not ask" without inspecting which keys are
+ * present — the same distinction `checked: false` draws in `services/uniqueness.ts`.
+ */
+export interface MandateRegistration {
+  /**
+   * - `disabled` — no vault on this deployment; funding is recorded rather than escrowed.
+   * - `registered` — bound by this call, and the mandate can now be funded.
+   * - `already-registered` — bound already, to the address on file. What every re-run should say.
+   * - `bound-elsewhere` — bound to a DIFFERENT address. Permanent, and a release would pay it.
+   * - `unpayable` — the address on file cannot be shown to belong to anyone. Nothing written.
+   * - `unavailable` — the chain could not be reached, or the write failed. Nothing written.
+   */
+  state:
+    | 'disabled'
+    | 'registered'
+    | 'already-registered'
+    | 'bound-elsewhere'
+    | 'unpayable'
+    | 'unavailable';
+  /** The address the vault will pay a release to, when it is bound and readable. */
+  buyer: string | null;
+  transactionHash: string | null;
+  /** One sentence naming what happened and what it costs. */
+  detail: string;
+}
+
+/**
+ * Register a mandate's cash leg, once, and never on an address nobody can receive at.
+ *
+ * **`MandateVault.deposit` reverts `MandateNotRegistered` against an unregistered mandate**, so
+ * until this has run the mandate cannot be funded at all — every quote it would have made is
+ * unbacked and the funding route refuses it. That gap was real: `registerMandate` had no caller
+ * anywhere in the backend, the one working mandate had been registered by hand, and every
+ * mandate written through `POST /v1/mandates` was unescrowable until someone ran a provisioning
+ * script. This is that caller.
+ *
+ * **It reads before it writes, because the write cannot be taken back.** A second
+ * `registerMandate` reverts `MandateAlreadyRegistered` even with identical arguments, so a
+ * blind retry after a lost receipt would report a failure where the binding is actually fine.
+ * Asking `buyerOf` first costs a view call and tells a re-run from a first attempt.
+ *
+ * **It never throws.** Writing a mandate is a business act and a vault that is unreachable must
+ * cost the registration, not the bid — the same trade `services/uniqueness.ts` makes when the
+ * registry is down. What it must not do is stay quiet about it, because an unregistered mandate
+ * fails later, at a deposit, in a contract revert nobody reads. Hence a state on every answer.
+ */
+export async function ensureMandateRegistered(
+  vault: ArcEscrow,
+  mandateUuid: string,
+  buyerAddress: string | null,
+): Promise<MandateRegistration> {
+  if (!vault.enabled) {
+    return {
+      state: 'disabled',
+      buyer: null,
+      transactionHash: null,
+      detail:
+        'ARC_MANDATE_VAULT_ADDRESS is not set, so this mandate has no cash leg on Arc and its ' +
+        'funding is recorded rather than escrowed.',
+    };
+  }
+
+  let bound: string | null;
+  try {
+    bound = await vault.buyerOf(mandateUuid);
+  } catch (err) {
+    return {
+      state: 'unavailable',
+      buyer: null,
+      transactionHash: null,
+      detail:
+        `The Arc vault could not be read (${messageOf(err)}), so this mandate's cash leg was ` +
+        'not registered. A deposit against it reverts until it is.',
+    };
+  }
+
+  if (bound !== null) {
+    // Case-insensitively: hex from a chain call and hex from a database column differ in case
+    // and mean the same twenty bytes.
+    if (bound.toLowerCase() === (buyerAddress ?? '').toLowerCase()) {
+      return {
+        state: 'already-registered',
+        buyer: bound,
+        transactionHash: null,
+        detail: `This mandate's cash leg is already bound to ${bound}, which is the buyer on file.`,
+      };
+    }
+    return {
+      state: 'bound-elsewhere',
+      buyer: bound,
+      transactionHash: null,
+      detail:
+        `This mandate's cash leg is bound to ${bound}, not the ${buyerAddress ?? 'nothing'} on ` +
+        'file. `registerMandate` is one-shot with no update path, so the binding cannot be ' +
+        'corrected and a release would pay that address.',
+    };
+  }
+
+  const payable = payableArcAddress(buyerAddress);
+  if (!payable.ok) {
+    return {
+      state: 'unpayable',
+      buyer: null,
+      transactionHash: null,
+      detail:
+        `This mandate was not registered on Arc: the buyer's address ${payable.reason}. The ` +
+        'binding is permanent, so an address nobody can receive at is capital with no way back ' +
+        'out — the vault refusing the deposit is the better failure.',
+    };
+  }
+
+  try {
+    const { transactionHash } = await vault.registerMandate(mandateUuid, payable.address);
+    return {
+      state: 'registered',
+      buyer: payable.address,
+      transactionHash,
+      detail: `This mandate's cash leg is now bound to ${payable.address} and can be funded.`,
+    };
+  } catch (err) {
+    return {
+      state: 'unavailable',
+      buyer: null,
+      transactionHash: null,
+      detail:
+        `Registering this mandate on Arc failed (${messageOf(err)}). The mandate exists and a ` +
+        'deposit against it reverts until the registration succeeds.',
+    };
+  }
+}
+
+/** What became of the real USDC behind a withdrawal from the book. */
+export interface CapitalRelease {
+  /**
+   * - `disabled` — no vault on this deployment; the withdrawal is a ledger entry and no more.
+   * - `unregistered` — the vault never knew this mandate, so no capital can have landed in it.
+   * - `bound-elsewhere` — the vault pays an address that is not the buyer on file. Nothing sent.
+   * - `dust` — the scaled amount is below one USDC minor unit; there is nothing to move.
+   * - `insufficient` — the vault holds less than this release needs. Nothing sent.
+   * - `released` — USDC returned to the registered buyer.
+   * - `unavailable` — the chain could not be reached, or the write failed or timed out.
+   */
+  state:
+    | 'disabled'
+    | 'unregistered'
+    | 'bound-elsewhere'
+    | 'dust'
+    | 'insufficient'
+    | 'released'
+    | 'unavailable';
+  /** USDC ERC-20 minor units (6dp) the vault was asked to return. Never the book's own units. */
+  amountUsdcMinor: bigint;
+  /** The address the vault is bound to pay, when it could be read. */
+  buyer: string | null;
+  transactionHash: string | null;
+  authId: string | null;
+  detail: string;
+}
+
+/**
+ * Move the money a withdrawal already took off the book.
+ *
+ * **The book is decremented first and this runs second**, which is the order `IMandateVault`
+ * asks for rather than a convenience: the attested balance must never exceed the real one, so
+ * the safe failure is a book that counts less capital than the vault holds. A release that
+ * fails here leaves the buyer's USDC in the vault with the book no longer quoting against it —
+ * recoverable by funding the mandate again. Reverse the two and a release that lands after the
+ * book failed to decrement leaves a mandate quoting capital that has already left, which is a
+ * price nobody can honour.
+ *
+ * **It never throws, for the same reason a scheduling failure cannot un-mature a receivable.**
+ * The withdrawal happened; a rail that is down does not un-happen it. Every refusal below is a
+ * separate fact with its own name, because "the vault holds nothing" and "the vault could not
+ * be asked" want different actions from whoever reads them.
+ */
+export async function releaseMandateCapital(
+  vault: ArcEscrow,
+  input: {
+    mandateUuid: string;
+    /** The withdrawal, in the mandate's own currency's minor units (2dp for USD). */
+    amountMinor: bigint;
+    currency: string;
+    /** The buyer this venue believes owns the mandate. Compared, never sent. */
+    buyerAddress: string | null;
+  },
+): Promise<CapitalRelease> {
+  const base = { buyer: null, transactionHash: null, authId: null };
+
+  if (!vault.enabled) {
+    return {
+      ...base,
+      state: 'disabled',
+      amountUsdcMinor: 0n,
+      detail:
+        'ARC_MANDATE_VAULT_ADDRESS is not set, so no capital is escrowed on this deployment and ' +
+        'the withdrawal moved nothing but the book.',
+    };
+  }
+
+  /*
+   * Converted before anything is compared or sent. The book is in the mandate's own currency at
+   * 2 decimals and the vault is USDC at 6, and $50,000.00 and 5 USDC are both `5000000` — the
+   * defect that made a mandate read as backed by a ten-thousandth of its capital.
+   */
+  const amountUsdcMinor = vault.releasableFor(input.amountMinor, input.currency);
+
+  /*
+   * Nothing to move, and asked before the vault is read at all so a no-op costs no round trip.
+   * `executeRelease` reverts `ZeroValue` on a zero amount, and a remainder rounded away stays
+   * in the vault backing capital the book still counts — which is the direction
+   * {@link usdcReleasableFor} rounds for.
+   */
+  if (amountUsdcMinor === 0n) {
+    return {
+      ...base,
+      state: 'dust',
+      amountUsdcMinor,
+      detail:
+        `Withdrawing ${input.amountMinor} ${input.currency} minor units scales to less than one ` +
+        'USDC minor unit, so nothing left the vault and the remainder stays as backing.',
+    };
+  }
+
+  let bound: string | null;
+  let deposited: bigint;
+  try {
+    // Both reads before any write, and both are views: they cost no key, no gas and no
+    // signature, which is what makes a pre-flight cheaper than a reverted transaction.
+    bound = await vault.buyerOf(input.mandateUuid);
+    deposited = await vault.depositedFor(input.mandateUuid);
+  } catch (err) {
+    return {
+      ...base,
+      state: 'unavailable',
+      amountUsdcMinor,
+      detail:
+        `The Arc vault could not be read (${messageOf(err)}), so no capital was returned. The ` +
+        'withdrawal stands on the book and the USDC is still in the vault.',
+    };
+  }
+
+  if (bound === null) {
+    return {
+      ...base,
+      state: 'unregistered',
+      amountUsdcMinor,
+      detail:
+        'This mandate has no cash leg on Arc, so no capital can ever have been escrowed against ' +
+        'it and there is nothing to return.',
+    };
+  }
+
+  /*
+   * The vault pays `buyerOf` and takes no recipient, so a binding that disagrees with the buyer
+   * on file is not something the venue can steer around — it can only decline to trigger it.
+   * Sending anyway would move a buyer's money to an address this venue does not believe is
+   * theirs, on that buyer's own instruction, which is worse than leaving it escrowed.
+   */
+  if (bound.toLowerCase() !== (input.buyerAddress ?? '').toLowerCase()) {
+    return {
+      ...base,
+      state: 'bound-elsewhere',
+      buyer: bound,
+      amountUsdcMinor,
+      detail:
+        `The vault would pay ${bound}, which is not the ${input.buyerAddress ?? 'nothing'} on ` +
+        'file for this buyer. No capital was returned; the binding is permanent and needs an ' +
+        'operator.',
+    };
+  }
+
+  if (amountUsdcMinor > deposited) {
+    return {
+      ...base,
+      state: 'insufficient',
+      buyer: bound,
+      amountUsdcMinor,
+      detail:
+        `Returning this withdrawal needs ${amountUsdcMinor} USDC minor units and the vault holds ` +
+        `${deposited}. Nothing was sent — the vault would have reverted \`InsufficientVaultBalance\`, ` +
+        'and the book was funded against capital that never fully arrived.',
+    };
+  }
+
+  try {
+    const { transactionHash, authId } = await vault.executeRelease({
+      mandateUuid: input.mandateUuid,
+      amountUsdcMinor,
+    });
+    return {
+      state: 'released',
+      buyer: bound,
+      amountUsdcMinor,
+      transactionHash,
+      authId,
+      detail: `${amountUsdcMinor} USDC minor units returned to ${bound}.`,
+    };
+  } catch (err) {
+    return {
+      ...base,
+      state: 'unavailable',
+      buyer: bound,
+      amountUsdcMinor,
+      detail:
+        `Returning this withdrawal on Arc did not complete (${messageOf(err)}). The withdrawal ` +
+        'stands on the book; whether the USDC moved is what that message says and is not ' +
+        'something this venue is claiming either way.',
+    };
+  }
 }
 
 let escrow: ArcEscrow | undefined;

@@ -28,6 +28,7 @@ import { setAtsAdapter } from '../src/services/ats.js';
 import {
   createDisabledArcEscrow,
   setArcEscrow,
+  usdcReleasableFor,
   usdcRequiredFor,
   type ArcEscrow,
 } from '../src/services/arc.js';
@@ -404,9 +405,13 @@ export function fakeArcEscrow(overrides: Partial<ArcEscrow> = {}): ArcEscrow {
   return {
     enabled: true,
     requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, TEST_SCALE_PPM),
+    releasableFor: (amountMinor, currency) =>
+      usdcReleasableFor(amountMinor, currency, TEST_SCALE_PPM),
     depositedFor: () => Promise.resolve(0n),
     buyerOf: () => Promise.resolve(null),
     registerMandate: () => Promise.resolve({ transactionHash: '0xarc-register' }),
+    executeRelease: () =>
+      Promise.resolve({ transactionHash: '0xarc-release', authId: '0xarc-release-auth' }),
     payoutFor: () => Promise.resolve(null),
     registerMatch: () => Promise.resolve({ transactionHash: '0xarc-match', matchId: '0xmatch' }),
     executePayout: () =>

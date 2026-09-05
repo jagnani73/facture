@@ -1,5 +1,5 @@
 /**
- * Funding a mandate against capital that exists.
+ * A mandate's cash leg: opening it, funding it against capital that exists, and closing it.
  *
  * The route's own comment has always said what it wanted to be — *"the escrow record is the
  * authority on how much landed, never the request body"* — and then said there was no escrow
@@ -13,12 +13,27 @@
  * With no vault configured, funding stays recorded rather than verified — the behaviour the
  * README documents. `escrowVerified` on the response is how the two are told apart, so
  * "escrowed" is never something a reader has to assume.
+ *
+ * Either end of that life had a hole in it, and both were the same shape — a vault function
+ * with a definition, a comment and no caller:
+ *
+ * - **`registerMandate` had none**, so `deposit` reverted `MandateNotRegistered` and no mandate
+ *   written through the API could ever be escrowed. A provisioning script picked them up
+ *   between rehearsals; anything created in between was stuck.
+ * - **`executeRelease` had none, and was not even in the ABI**, so "withdraw unallocated
+ *   capital" moved a SQLite row and real USDC in the vault had no path out of the contract.
+ *
+ * What these tests hold down is mostly what the venue must NOT do: bind an address nobody can
+ * be shown to hold, overwrite a binding that is permanent, release more than the book gave
+ * back, or let a chain that is down cost a business act it has no business costing.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { call, createHarness, fakeArcEscrow, type Harness } from './helpers.js';
+import { call, createHarness, fakeArcEscrow, type Harness, type JsonBody } from './helpers.js';
 import {
   createDisabledArcEscrow,
+  payableArcAddress,
+  releaseAuthId,
   usdcRequiredFor,
   vaultMandateId,
   type ArcEscrow,
@@ -307,5 +322,439 @@ describe('vaultMandateId', () => {
     const id = vaultMandateId('8b879d02-4593-4d66-82bf-52d4833401b6');
     expect(id).toBeGreaterThan(0n);
     expect(id).toBeLessThan(2n ** 256n);
+  });
+});
+
+/**
+ * The buyer whose Arc address is real.
+ *
+ * Harrow Point's is the Circle wallet the agent operates, and it is lowercase, which viem's
+ * strict `isAddress` accepts — an unchecksummed address is unchecked, not wrong. Every other
+ * seeded buyer carries an invented one, and `seed.ts` says so.
+ */
+const HARROW_ARC = '0x1c755e95cb11e5d5af498bb0ea595b56e1adb035';
+
+/** The same twenty bytes, checksummed, as a chain call would answer them. */
+const HARROW_ARC_CHECKSUMMED = '0x1C755e95CB11E5D5aF498bb0EA595b56e1adb035';
+
+/** Ashgrove Treasury's, invented and mixed-case, so it fails its EIP-55 checksum. */
+const INVENTED_ARC = '0x9C41f5A8B2e70dD3c1A4e88F6b0C25dE7a913F04';
+
+/**
+ * A vault that answers, and remembers every write it was asked for.
+ *
+ * The assertion that matters on this path is usually the ABSENCE of a write: `registerMandate`
+ * is one-shot and `executeRelease` moves real money, so "it did not send" is the property, and
+ * a fake that only returned success could not express it.
+ */
+function recordingVault(overrides: Partial<ArcEscrow> = {}): {
+  vault: ArcEscrow;
+  registered: { mandateUuid: string; buyer: string }[];
+  released: { mandateUuid: string; amountUsdcMinor: bigint }[];
+} {
+  const registered: { mandateUuid: string; buyer: string }[] = [];
+  const released: { mandateUuid: string; amountUsdcMinor: bigint }[] = [];
+  const vault = fakeArcEscrow({
+    registerMandate: (mandateUuid, buyer) => {
+      registered.push({ mandateUuid, buyer });
+      return Promise.resolve({ transactionHash: '0xregistered' });
+    },
+    executeRelease: (input) => {
+      released.push(input);
+      return Promise.resolve({ transactionHash: '0xreleased', authId: '0xauth' });
+    },
+    ...overrides,
+  });
+  return { vault, registered, released };
+}
+
+const createMandate = async (buyerLabel: string): Promise<JsonBody> =>
+  call(h.app, 'POST', '/v1/mandates', {
+    body: {
+      buyerId: h.seeded.buyerIds[buyerLabel] ?? '',
+      ratingFloor: 'B',
+      maxTenorDays: 60,
+      annualisedYieldBps: 850,
+      currency: 'USD',
+      exposureLimitMinor: '50000000',
+    },
+  });
+
+describe('opening a mandate cash leg', () => {
+  /*
+   * The finding, stated as the behaviour that closes it. Without this call the vault refuses
+   * the buyer's deposit outright, so the mandate is not merely unfunded — it is unfundable,
+   * and every quote it would have made would have been backed by nothing.
+   */
+  it('registers the mandate on the vault when it is written', async () => {
+    const { vault, registered } = recordingVault();
+    h = await createHarness({ arc: vault });
+
+    const res = await createMandate('BUY-HARROW');
+
+    expect(res.status).toBe(201);
+    expect(res.body.escrowRegistration.state).toBe('registered');
+    expect(registered).toEqual([{ mandateUuid: res.body.mandate.id, buyer: HARROW_ARC }]);
+  });
+
+  /*
+   * `registerMandate` reverts `MandateAlreadyRegistered` on a second call and there is no
+   * update path, so asking first is the only way to tell a re-run from a first attempt without
+   * spending a transaction to be told.
+   */
+  it('does not write again when the binding is already there', async () => {
+    const { vault, registered } = recordingVault({
+      // Checksummed, as a chain answers; the row holds it lowercase. Same twenty bytes.
+      buyerOf: () => Promise.resolve(HARROW_ARC_CHECKSUMMED),
+    });
+    h = await createHarness({ arc: vault });
+
+    const res = await createMandate('BUY-HARROW');
+
+    expect(res.body.escrowRegistration.state).toBe('already-registered');
+    expect(registered).toEqual([]);
+  });
+
+  /*
+   * The binding is permanent and it names the ONLY address a release may ever pay. An invented
+   * one is not a mistake anyone can correct — it is capital with a way in and no way out — so
+   * refusing to register is strictly better than registering: the vault then refuses the
+   * deposit too, and the money never gets in to be stranded.
+   */
+  it('refuses an address that fails its checksum rather than binding it forever', async () => {
+    const { vault, registered } = recordingVault();
+    h = await createHarness({ arc: vault });
+
+    const res = await createMandate('BUY-ASHGROVE');
+
+    expect(res.status).toBe(201);
+    expect(res.body.escrowRegistration.state).toBe('unpayable');
+    expect(res.body.escrowRegistration.detail).toContain('EIP-55');
+    expect(registered).toEqual([]);
+  });
+
+  /* A vault bound to somebody else is a fact to report, never a write to attempt. */
+  it('reports a binding to a different address instead of trying to correct it', async () => {
+    const { vault, registered } = recordingVault({
+      buyerOf: () => Promise.resolve(INVENTED_ARC),
+    });
+    h = await createHarness({ arc: vault });
+
+    const res = await createMandate('BUY-HARROW');
+
+    expect(res.body.escrowRegistration.state).toBe('bound-elsewhere');
+    expect(res.body.escrowRegistration.buyer).toBe(INVENTED_ARC);
+    expect(registered).toEqual([]);
+  });
+
+  /*
+   * Writing a bid is a business act. A vault that cannot be reached costs the registration and
+   * must not cost the mandate — the same trade `services/uniqueness.ts` makes when the registry
+   * is down, where `checked: false` is deliberately not `claimed: false`.
+   */
+  it('still writes the mandate when the vault cannot be read', async () => {
+    const { vault, registered } = recordingVault({
+      buyerOf: () => Promise.reject(new Error('rpc down')),
+    });
+    h = await createHarness({ arc: vault });
+
+    const res = await createMandate('BUY-HARROW');
+
+    expect(res.status).toBe(201);
+    expect(res.body.escrowRegistration.state).toBe('unavailable');
+    expect(res.body.escrowRegistration.detail).toContain('rpc down');
+    expect(registered).toEqual([]);
+
+    const stored = await h.store.getMandate(res.body.mandate.id as string);
+    expect(stored).not.toBeNull();
+  });
+
+  it('still writes the mandate when the registration itself reverts', async () => {
+    const { vault } = recordingVault({
+      registerMandate: () => Promise.reject(new Error('reverted on Arc')),
+    });
+    h = await createHarness({ arc: vault });
+
+    const res = await createMandate('BUY-HARROW');
+
+    expect(res.status).toBe(201);
+    expect(res.body.escrowRegistration.state).toBe('unavailable');
+  });
+
+  it('says there is no cash leg at all when no vault is configured', async () => {
+    h = await createHarness({ arc: createDisabledArcEscrow() });
+
+    const res = await createMandate('BUY-HARROW');
+
+    expect(res.status).toBe(201);
+    expect(res.body.escrowRegistration.state).toBe('disabled');
+    expect(res.body.escrowRegistration.detail).toContain('ARC_MANDATE_VAULT_ADDRESS');
+  });
+
+  /*
+   * The repair, and the reason it is worth a view call on a route that already reads the
+   * vault: a buyer whose deposit reverted is otherwise told only that "the vault holds 0",
+   * which is true and sends them to look at their wallet instead of at the registration.
+   */
+  it('registers a mandate that missed its first attempt, and says why funding failed', async () => {
+    const { vault, registered } = recordingVault();
+    h = await createHarness({ arc: vault });
+    // Written straight to the store, as a mandate created while the chain was unreachable is.
+    const mandate = await h.store.insertMandate({
+      buyerId: h.seeded.buyerIds['BUY-HARROW'] ?? '',
+      ratingFloor: 'B',
+      maxTenorDays: 60,
+      annualisedYieldBps: 850,
+      currency: 'USD',
+      exposureLimitMinor: 50_000_000n,
+      perDebtorLimitMinor: null,
+      status: 'draft',
+    });
+
+    const res = await call(h.app, 'POST', `/v1/mandates/${mandate.id}/fund`, {
+      body: { amountMinor: '5000000', escrowRef: '0xdeadbeef' },
+    });
+
+    // This request cannot succeed — the deposit had to come first and could not have — but the
+    // next one can, and the refusal says which of the two problems the buyer has.
+    expect(res.status).toBe(400);
+    expect(res.body.detail).toContain('can be funded');
+    expect(registered).toEqual([{ mandateUuid: mandate.id, buyer: HARROW_ARC }]);
+  });
+});
+
+describe('closing a mandate cash leg', () => {
+  /** A funded mandate belonging to the one buyer with a real address. */
+  async function fundedMandate(committedMinor: bigint): Promise<string> {
+    const created = await createMandate('BUY-HARROW');
+    const id = created.body.mandate.id as string;
+    /*
+     * Funded straight through the store rather than through the route: what is under test here
+     * is the release, and going via `POST /fund` would make every case depend on the funding
+     * check's own arithmetic as well.
+     */
+    await h.store.fundMandate({
+      mandateId: id,
+      amount: committedMinor,
+      escrowRef: 'escrow:test',
+      at: new Date(),
+    });
+    return id;
+  }
+
+  const withdraw = (id: string, amountMinor?: string) =>
+    call(h.app, 'POST', `/v1/mandates/${id}/withdraw`, {
+      body: amountMinor === undefined ? {} : { amountMinor },
+    });
+
+  /* The finding: the book gave the capacity back and the money never moved. */
+  it('returns the USDC, converted out of the mandate own units', async () => {
+    const { vault, released } = recordingVault({
+      buyerOf: () => Promise.resolve(HARROW_ARC_CHECKSUMMED),
+      depositedFor: () => Promise.resolve(needs(5_000_000n)),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.status).toBe(200);
+    expect(res.body.withdrawn).toBe('5000000');
+    expect(res.body.release.state).toBe('released');
+    // $50,000.00 is 5,000,000 US cents and 50,000 USDC minor units. The two are not one
+    // number, which is the defect this conversion exists to close.
+    expect(res.body.release.amountUsdcMinor).toBe('50000');
+    expect(released).toEqual([{ mandateUuid: id, amountUsdcMinor: 50_000n }]);
+  });
+
+  /*
+   * Rounding, pinned as a literal because the direction is a decision rather than a detail.
+   *
+   * A release rounds DOWN where a backing requirement rounds up, and the pair is what keeps
+   * `vaultBalance >= requiredFor(committed)` standing over the smaller book a withdrawal
+   * leaves: `ceil(a) - floor(b) >= ceil(a - b)` for every remainder. Round the release up and
+   * a mandate quoting real capital ends up standing on an empty vault.
+   */
+  it('rounds the release down, leaving the remainder as backing', async () => {
+    const { vault, released } = recordingVault({
+      buyerOf: () => Promise.resolve(HARROW_ARC),
+      depositedFor: () => Promise.resolve(needs(5_000_100n)),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_100n);
+
+    // One cent past $50,000.00, which scales to 50,000.01 USDC minor units.
+    await withdraw(id, '5000001');
+
+    expect(released).toEqual([{ mandateUuid: id, amountUsdcMinor: 50_000n }]);
+    // The same amount as a backing requirement rounds the other way, and must keep doing so.
+    expect(needs(5_000_001n)).toBe(50_001n);
+  });
+
+  /* Below a whole USDC minor unit there is nothing to move, and `executeRelease` reverts on it. */
+  it('sends nothing when the withdrawal scales below one USDC minor unit', async () => {
+    const { vault, released } = recordingVault({
+      buyerOf: () => Promise.resolve(HARROW_ARC),
+      depositedFor: () => Promise.resolve(1_000n),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '99');
+
+    expect(res.body.release.state).toBe('dust');
+    expect(res.body.release.amountUsdcMinor).toBe('0');
+    expect(released).toEqual([]);
+  });
+
+  /* Read before you write: the vault would revert, and a doomed transaction costs gas to be told. */
+  it('does not send a release the vault cannot cover', async () => {
+    const { vault, released } = recordingVault({
+      buyerOf: () => Promise.resolve(HARROW_ARC),
+      depositedFor: () => Promise.resolve(needs(5_000_000n) - 1n),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.body.release.state).toBe('insufficient');
+    expect(released).toEqual([]);
+  });
+
+  /*
+   * `executeRelease` pays `buyerOf` and takes no recipient, which is the bound that stops a
+   * compromised relay redirecting a buyer's capital. The other half is this: a vault bound to
+   * an address the venue does not believe is the buyer's is one the venue declines to trigger,
+   * because the alternative is moving their money to a stranger on their own instruction.
+   */
+  it('refuses to trigger a release toward an address that is not the buyer on file', async () => {
+    const { vault, released } = recordingVault({
+      buyerOf: () => Promise.resolve(INVENTED_ARC),
+      depositedFor: () => Promise.resolve(needs(5_000_000n)),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.body.release.state).toBe('bound-elsewhere');
+    expect(res.body.release.buyer).toBe(INVENTED_ARC);
+    expect(released).toEqual([]);
+  });
+
+  /*
+   * The order, asserted as the invariant `IMandateVault` asks for: the attested balance must
+   * never exceed the real one, so the book decrements first and a failed release leaves USDC
+   * in the vault against a book that no longer quotes it. That is recoverable by funding
+   * again; the reverse — a mandate quoting capital that has already left — is not.
+   */
+  it('does not un-withdraw the book when the release fails', async () => {
+    const { vault } = recordingVault({
+      buyerOf: () => Promise.resolve(HARROW_ARC),
+      depositedFor: () => Promise.resolve(needs(5_000_000n)),
+      executeRelease: () => Promise.reject(new Error('Arc did not confirm executeRelease in time')),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.status).toBe(200);
+    expect(res.body.withdrawn).toBe('5000000');
+    expect(res.body.release.state).toBe('unavailable');
+    // A timeout is not a revert, and the message must not claim nothing moved.
+    expect(res.body.release.detail).toContain('did not confirm');
+
+    const after = await h.store.getMandate(id);
+    expect(after?.fundedMinor).toBe(0n);
+  });
+
+  /*
+   * Only unallocated capital may leave. The store's lock is what refuses the withdrawal, and
+   * what this pins is that the release cannot route around it — the vault is asked for exactly
+   * what the book gave back and never for the committed total.
+   */
+  it('releases only what the book actually gave back', async () => {
+    const { vault, released } = recordingVault({
+      buyerOf: () => Promise.resolve(HARROW_ARC),
+      depositedFor: () => Promise.resolve(needs(5_000_000n)),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+    // Committed against a trade in flight, and therefore not the buyer's to pull.
+    await h.store.allocate(id, 3_000_000n);
+
+    // No amount: "everything unallocated", which is $20,000 of the $50,000 committed.
+    const res = await withdraw(id);
+
+    expect(res.body.withdrawn).toBe('2000000');
+    expect(released).toEqual([{ mandateUuid: id, amountUsdcMinor: 20_000n }]);
+
+    const refused = await withdraw(id, '3000000');
+    expect(refused.status).toBe(409);
+    expect(released).toHaveLength(1);
+  });
+
+  it('moves the book alone when no vault is configured', async () => {
+    h = await createHarness({ arc: createDisabledArcEscrow() });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.status).toBe(200);
+    expect(res.body.withdrawn).toBe('5000000');
+    expect(res.body.release.state).toBe('disabled');
+  });
+
+  it('refuses to release with no vault, naming the variable', async () => {
+    await expect(
+      createDisabledArcEscrow().executeRelease({ mandateUuid: 'any', amountUsdcMinor: 1n }),
+    ).rejects.toMatchObject({
+      detail: expect.stringContaining('ARC_MANDATE_VAULT_ADDRESS'),
+    });
+  });
+});
+
+describe('payableArcAddress', () => {
+  /*
+   * The same tripwire `scripts/demo-reset.mjs` uses, and it has to stay the same one: a route
+   * and a provisioning script disagreeing about which addresses are real is how a binding
+   * nobody can receive at gets written by whichever of the two is less careful.
+   */
+  it('accepts a real wallet, checksummed or lowercase', () => {
+    expect(payableArcAddress(HARROW_ARC)).toEqual({ ok: true, address: HARROW_ARC });
+    expect(payableArcAddress(HARROW_ARC_CHECKSUMMED).ok).toBe(true);
+  });
+
+  /* All three invented buyer addresses fail here, because they were typed rather than derived. */
+  it('rejects a mixed-case address whose checksum was never computed', () => {
+    expect(payableArcAddress(INVENTED_ARC).ok).toBe(false);
+  });
+
+  it('rejects the zero address by name rather than by revert', () => {
+    const answer = payableArcAddress(`0x${'0'.repeat(40)}`);
+    expect(answer.ok).toBe(false);
+    expect(answer.ok === false && answer.reason).toContain('zero address');
+  });
+
+  it('rejects a missing address', () => {
+    expect(payableArcAddress(null).ok).toBe(false);
+    expect(payableArcAddress('').ok).toBe(false);
+  });
+});
+
+describe('releaseAuthId', () => {
+  /*
+   * The one id on this path that is minted rather than derived. `MandateVault._consumed` makes
+   * every authorisation single-use, so two withdrawals sharing an id would leave the second one
+   * permanently refused — a buyer unable to take their own capital out.
+   */
+  it('is fresh on every call', () => {
+    expect(releaseAuthId()).not.toBe(releaseAuthId());
+  });
+
+  it('is a bytes32 the vault will accept', () => {
+    expect(releaseAuthId()).toMatch(/^0x[0-9a-f]{64}$/);
   });
 });
