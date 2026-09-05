@@ -164,10 +164,15 @@ export const toSettlementAmount = (
   assetDecimals: number,
   scalePpm: number,
 ): bigint => {
-  const scaled = (amountMinor * BigInt(scalePpm)) / 1_000_000n;
+  /*
+   * Shift first, scale second. The other order truncates: scaling 5,933,178 minor units by
+   * 1 ppm gives 5 before the decimals shift ever runs, so $59,331.78 settles as 0.05 rather
+   * than 0.0593 — a rounding error of the same order as the amount itself.
+   */
   const shift = assetDecimals - currencyDecimals;
-  if (shift >= 0) return scaled * 10n ** BigInt(shift);
-  return scaled / 10n ** BigInt(-shift);
+  const shifted =
+    shift >= 0 ? amountMinor * 10n ** BigInt(shift) : amountMinor / 10n ** BigInt(-shift);
+  return (shifted * BigInt(scalePpm)) / 1_000_000n;
 };
 
 /**

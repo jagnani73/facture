@@ -119,16 +119,29 @@ export const ATS_ABI = [
       { name: 'holdId', type: 'uint256' },
     ],
   },
+  /*
+   * Both of these take a `HoldIdentifier` STRUCT, not flat arguments. Passing the three
+   * fields flat produces a different selector, so the diamond answers
+   * `FunctionNotFound(bytes4)` rather than a revert that names anything useful — and it
+   * does so only at execution, which on this path is *after* the cash leg has settled.
+   * Confirmed against the ATS SDK's own call sites and a live security.
+   */
   {
     type: 'function',
     name: 'executeHoldByPartition',
     stateMutability: 'nonpayable',
     inputs: [
-      { name: 'partition', type: 'bytes32' },
-      { name: 'tokenHolder', type: 'address' },
-      { name: 'holdId', type: 'uint256' },
-      { name: 'amount', type: 'uint256' },
+      {
+        name: 'holdIdentifier',
+        type: 'tuple',
+        components: [
+          { name: 'partition', type: 'bytes32' },
+          { name: 'tokenHolder', type: 'address' },
+          { name: 'holdId', type: 'uint256' },
+        ],
+      },
       { name: 'to', type: 'address' },
+      { name: 'amount', type: 'uint256' },
     ],
     outputs: [{ name: 'success', type: 'bool' }],
   },
@@ -137,9 +150,15 @@ export const ATS_ABI = [
     name: 'releaseHoldByPartition',
     stateMutability: 'nonpayable',
     inputs: [
-      { name: 'partition', type: 'bytes32' },
-      { name: 'tokenHolder', type: 'address' },
-      { name: 'holdId', type: 'uint256' },
+      {
+        name: 'holdIdentifier',
+        type: 'tuple',
+        components: [
+          { name: 'partition', type: 'bytes32' },
+          { name: 'tokenHolder', type: 'address' },
+          { name: 'holdId', type: 'uint256' },
+        ],
+      },
       { name: 'amount', type: 'uint256' },
     ],
     outputs: [{ name: 'success', type: 'bool' }],
@@ -370,11 +389,13 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
         abi: ATS_ABI,
         functionName: 'executeHoldByPartition',
         args: [
-          DEFAULT_PARTITION,
-          input.holderEvmAddress,
-          BigInt(input.holdId),
-          input.units,
+          {
+            partition: DEFAULT_PARTITION,
+            tokenHolder: input.holderEvmAddress,
+            holdId: BigInt(input.holdId),
+          },
           input.toEvmAddress,
+          input.units,
         ],
       });
       const receipt = await submit(input.securityId, calldata, 'executeHoldByPartition');
@@ -385,7 +406,14 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
       const calldata = encodeFunctionData({
         abi: ATS_ABI,
         functionName: 'releaseHoldByPartition',
-        args: [DEFAULT_PARTITION, input.holderEvmAddress, BigInt(input.holdId), input.units],
+        args: [
+          {
+            partition: DEFAULT_PARTITION,
+            tokenHolder: input.holderEvmAddress,
+            holdId: BigInt(input.holdId),
+          },
+          input.units,
+        ],
       });
       const receipt = await submit(input.securityId, calldata, 'releaseHoldByPartition');
       return { transactionId: receipt.transactionId, consensusAt: receipt.consensusAt };
@@ -481,6 +509,23 @@ export const hederaNetworkName = (): string => hedera.network;
  * ATS call then reverts, which is the correct outcome for a counterparty with no Hedera
  * account on file — inventing an address would move a security to nobody.
  */
+/**
+ * The operator's EVM address as the **alias** derived from its ECDSA public key, not the
+ * long-zero form derived from its account number.
+ *
+ * A Hedera account with an ECDSA key has both. To the ledger they are the same account; to
+ * a Solidity contract holding an internal mapping they are unrelated keys. So when the
+ * venue names itself as a hold's escrow, it must use the address it will actually call
+ * from — the alias — or `executeHold` reverts because `msg.sender` is not the escrow the
+ * hold recorded. That failure lands *after* the cash leg has settled, which is the
+ * expensive half of a DvP to get wrong.
+ */
+export function operatorEvmAddress(operatorKey: string): Address {
+  const raw = PrivateKey.fromStringECDSA(operatorKey).publicKey.toEvmAddress();
+  const body = raw.startsWith('0x') ? raw.slice(2) : raw;
+  return `0x${body.toLowerCase()}`;
+}
+
 export function accountIdToEvmAddress(accountId: string | null | undefined): Address {
   if (accountId === null || accountId === undefined) return ZERO_ADDRESS;
   if (/^0x[0-9a-fA-F]{40}$/.test(accountId)) return accountId as Address;

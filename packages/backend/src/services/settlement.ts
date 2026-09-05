@@ -27,7 +27,7 @@ import { getConfig } from '../config.js';
 import { getStore } from '../db/store.js';
 import { badRequest, conflict, internalError, notFound, upstreamUnavailable } from '../errors.js';
 import { rootLogger } from '../logger.js';
-import { accountIdToEvmAddress, getAtsAdapter } from './ats.js';
+import { accountIdToEvmAddress, getAtsAdapter, operatorEvmAddress } from './ats.js';
 import type { SettlementOutcome } from './rating.js';
 import { ratingService } from './rating.js';
 import { getX402Client } from './x402.js';
@@ -196,7 +196,7 @@ export const settlementService: SettlementService = {
       holderEvmAddress: accountIdToEvmAddress(intent.sellerHederaAccountId),
       toEvmAddress: accountIdToEvmAddress(intent.buyerHederaAccountId),
       // The venue is the escrow agent for the challenge window, and nothing longer.
-      escrowEvmAddress: accountIdToEvmAddress(getConfig().env.HEDERA_OPERATOR_ID),
+      escrowEvmAddress: operatorEvmAddress(getConfig().env.HEDERA_OPERATOR_KEY),
       units: intent.unitsMinor,
       expiresAt,
     });
