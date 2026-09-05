@@ -14,7 +14,7 @@ import { closeDb, getDb } from './db/index.js';
 import { createSqliteStore } from './db/sqlite-store.js';
 import { setStoreFactory } from './db/store.js';
 import { createLogger, rootLogger, setRootLogger } from './logger.js';
-import { initAtsAdapter, regulationKeyFor } from './services/ats.js';
+import { initAtsAdapter } from './services/ats.js';
 import { createAtsComplianceGate, setComplianceGate } from './services/compliance.js';
 import { initIndexer } from './services/indexer.js';
 import {
@@ -59,7 +59,6 @@ function boot(): void {
     operatorKey: env.HEDERA_OPERATOR_KEY,
     // Unset disables issuance rather than simulating it — see `services/ats.ts`.
     factoryId: env.ATS_FACTORY_ID,
-    regulation: regulationKeyFor(env.ATS_REGULATION_TYPE),
     gasLimit: env.ISSUANCE_GAS_LIMIT,
     network: hedera.network,
     logger: log,

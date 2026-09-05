@@ -22,6 +22,13 @@
       "when": 1788333719252,
       "tag": "0002_maturity_schedule",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1788346138357,
+      "tag": "0003_regulation_is_reg_s",
+      "breakpoints": true
     }
   ]
 }

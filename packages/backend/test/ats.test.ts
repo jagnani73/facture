@@ -11,9 +11,10 @@
  * type. A selector assertion is the only thing that catches it without spending money.
  */
 
+import { REGULATIONS } from '@facture/shared';
 import { encodeFunctionData } from 'viem';
 import { describe, expect, it } from 'vitest';
-import { ATS_ABI, DEPLOY_BOND_SELECTOR } from '../src/services/ats.js';
+import { ATS_ABI, DEPLOY_BOND_SELECTOR, regulationKeyFor } from '../src/services/ats.js';
 
 const ZERO = `0x${'0'.repeat(40)}` as const;
 
@@ -102,6 +103,27 @@ describe('deployBond calldata', () => {
     const [, regulation] = bondArgs;
     expect(regulation.additionalSecurityData.countriesControlListType).toBe(false);
     expect(regulation.additionalSecurityData.listOfCountries).toContain('KP');
+  });
+
+  it('maps each stored regulation onto the enum pair the factory checks', () => {
+    /*
+     * `onlyValidRegulation` reads two uint8s, so a wrong mapping is a valid-looking number
+     * that declares the wrong offering — and the declaration is what a resale is judged
+     * against, not something the venue can correct afterwards. The pairs are read off the
+     * deployed factory's own v6.0.0 text, not the ATS docs.
+     *
+     * This runs on the invoice's own stored spelling. It used to run on a venue-wide config
+     * value while the row said something else: MF-2052's row read Reg D 506(c) and its bond
+     * went out `1/0`.
+     */
+    for (const [stored, type, subType] of [
+      ['reg-s', 1, 0],
+      ['reg-d-506b', 2, 1],
+      ['reg-d-506c', 2, 2],
+    ] as const) {
+      const regulation = REGULATIONS[regulationKeyFor(stored)];
+      expect([regulation.regulationType, regulation.regulationSubType]).toEqual([type, subType]);
+    }
   });
 
   it('declares the functions the compliance path actually calls', () => {

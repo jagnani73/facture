@@ -351,13 +351,12 @@ export interface AtsAdapterConfig {
   readonly operatorId: string;
   readonly operatorKey: string;
   readonly factoryId: string | undefined;
-  readonly regulation: RegulationKey;
   readonly gasLimit: number;
   readonly network: string;
   readonly logger?: Logger | undefined;
 }
 
-/** Map the env spelling onto shared's regulation table, which owns the ATS enum values. */
+/** Map the stored spelling onto shared's regulation table, which owns the ATS enum values. */
 export function regulationKeyFor(value: 'reg-d-506b' | 'reg-d-506c' | 'reg-s'): RegulationKey {
   switch (value) {
     case 'reg-d-506b':
@@ -457,7 +456,7 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
 
   return {
     async deployBond(job) {
-      const regulation = REGULATIONS[config.regulation];
+      const regulation = REGULATIONS[regulationKeyFor(job.regulationType)];
       const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
 
       const calldata = encodeFunctionData({

@@ -265,9 +265,7 @@ export const invoices = sqliteTable(
 
     /** Checksum-valid; ATS `onlyValidISIN` rejects arbitrary strings. */
     isin: text('isin'),
-    regulationType: text('regulation_type', { enum: REGULATION_TYPE })
-      .notNull()
-      .default('reg-d-506c'),
+    regulationType: text('regulation_type', { enum: REGULATION_TYPE }).notNull().default('reg-s'),
     securityId: text('security_id'),
     securityEvmAddress: text('security_evm_address'),
 

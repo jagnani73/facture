@@ -229,7 +229,7 @@ export class MemoryStore implements Store {
       status: row.status ?? 'draft',
       uniquenessHash: row.uniquenessHash,
       isin: row.isin ?? null,
-      regulationType: row.regulationType ?? 'reg-d-506c',
+      regulationType: row.regulationType ?? 'reg-s',
       securityId: row.securityId ?? null,
       securityEvmAddress: row.securityEvmAddress ?? null,
       issuanceState: row.issuanceState ?? 'queued',

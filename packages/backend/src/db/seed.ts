@@ -862,7 +862,7 @@ export async function seedStore(store: Store): Promise<SeedResult> {
       status: spec.status,
       uniquenessHash: hash,
       isin: issued ? isinForInvoice(hash) : null,
-      regulationType: 'reg-d-506c',
+      regulationType: 'reg-s',
       securityId: issued ? (spec.securityId ?? hederaIdFor(hash)) : null,
       securityEvmAddress: issued ? addressFromHash(hash) : null,
       issuanceState: issued ? 'issued' : 'queued',

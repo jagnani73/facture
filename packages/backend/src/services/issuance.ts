@@ -27,7 +27,15 @@ export interface IssuanceJob {
   invoiceId: string;
   /** Checksum-valid ISIN, generated ahead of time — ATS `onlyValidISIN` rejects strings. */
   isin: string;
-  /** ATS `onlyValidRegulation`: Reg D 506(b)/506(c) or Reg S. Never unset. */
+  /**
+   * ATS `onlyValidRegulation`: Reg D 506(b)/506(c) or Reg S. Never unset.
+   *
+   * Read from the invoice row and deployed as-is, so the row is a record of the paper
+   * rather than a second opinion about it. It used to be carried this far and then
+   * dropped — the adapter took a venue-wide value from config instead — and the two only
+   * agreed because both happened to come from the same variable. Seeded rows did not:
+   * MF-2052's row said Reg D 506(c) while its bond went out `1/0`, Reg S.
+   */
   regulationType: 'reg-d-506b' | 'reg-d-506c' | 'reg-s';
   /** Invoice due date. Becomes the bond maturity; `initializeMaturity` is one-shot. */
   maturityAt: Date;
