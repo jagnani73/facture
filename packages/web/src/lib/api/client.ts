@@ -58,6 +58,8 @@ interface RequestOptions {
   query?: Query | undefined;
   body?: unknown;
   signal?: AbortSignal | undefined;
+  /** Extra headers. Only sign-in uses this, to present its bearer credential. */
+  headers?: Record<string, string> | undefined;
   /** What is being asked for, in the product's words. Used to write the failure sentence. */
   what: string;
 }
@@ -107,6 +109,7 @@ async function request<T>(
       headers: {
         accept: 'application/json, application/problem+json',
         ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...options.headers,
       },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       ...(options.signal ? { signal: options.signal } : {}),
@@ -217,31 +220,33 @@ export const api = {
   /* --- Seller: signing in ----------------------------------------------- */
 
   /**
-   * `POST /v1/sellers` — sign in by email, and record the wallet made from it.
+   * `POST /v1/sellers` — sign in, and record the wallet the identity was made from.
    *
-   * Idempotent on email at the venue, which is what makes this the *sign-in* call and not
-   * just a sign-up call: a returning business gets its existing id back rather than a second
-   * empty book. That is also why nothing caches the id locally — this is cheap to ask again
-   * and always current, and a cached id would be a staler second answer.
+   * **Sends no body.** The venue reads the email and the wallet address out of the Privy
+   * identity token and verifies them against Privy's signature, so there is no field here a
+   * caller could use to claim another business's identity. An earlier version passed both in
+   * a body and the venue believed them.
    *
-   * The venue refuses to rebind a wallet address that is already on file, so a 409 here is
-   * a real answer about this business rather than a transport failure.
+   * The token must be the **identity** token, not the access token: only the first carries
+   * the linked accounts, and the second fails at the signature check rather than at anything
+   * that names the mistake.
+   *
+   * Idempotent on email at the venue, which is what makes this the *sign-in* call rather than
+   * a sign-up call: a returning business gets its existing id back instead of a second empty
+   * book. That is also why nothing caches the id — this is cheap to ask again and always
+   * current, and a cached copy would be a staler second answer.
+   *
+   * A 409 is a real answer about this business, not a transport failure: the venue refuses to
+   * rebind a wallet address that is already on file.
    */
-  signInSeller(
-    input: { name: string; email: string; arcAddress?: string | undefined },
-    signal?: AbortSignal,
-  ): Promise<SellerSignIn> {
+  signInSeller(idToken: string, signal?: AbortSignal): Promise<SellerSignIn> {
     return request(
       '/sellers',
       {
         method: 'POST',
         what: 'signing in',
         signal,
-        body: {
-          name: input.name,
-          email: input.email,
-          ...(input.arcAddress ? { arcAddress: input.arcAddress } : {}),
-        },
+        headers: { authorization: `Bearer ${idToken}` },
       },
       (raw) => readSellerSignIn(raw),
     );

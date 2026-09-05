@@ -17,6 +17,7 @@ import { createLogger, rootLogger, setRootLogger } from './logger.js';
 import { initAtsAdapter } from './services/ats.js';
 import { createAtsComplianceGate, setComplianceGate } from './services/compliance.js';
 import { initIndexer } from './services/indexer.js';
+import { initPrivyVerifier } from './services/privy.js';
 import {
   createStoreIssuanceSink,
   getIssuanceQueue,
@@ -71,6 +72,13 @@ function boot(): void {
     // Unset disables the maturity payout rail rather than simulating one.
     collectionAccountId: env.MATURITY_COLLECTION_ACCOUNT_ID,
     assetMode: env.X402_ASSET_MODE,
+    logger: log,
+  });
+
+  initPrivyVerifier({
+    // Unset disables seller sign-in rather than trusting an email nobody verified.
+    appId: env.PRIVY_APP_ID,
+    appSecret: env.PRIVY_APP_SECRET,
     logger: log,
   });
 

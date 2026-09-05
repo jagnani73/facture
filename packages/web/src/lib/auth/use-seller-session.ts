@@ -1,13 +1,13 @@
 'use client';
 
-import { usePrivy } from '@privy-io/react-auth';
+import { useIdentityToken, usePrivy } from '@privy-io/react-auth';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api } from '@/lib/api/client';
 import { signInAvailable } from '@/lib/api/config';
+import type { SellerRecord } from '@/lib/api/contract';
 import { setSignedInSeller } from '@/lib/api/identity';
 import { ApiError } from '@/lib/api/problem';
-import type { SellerRecord } from '@/lib/api/contract';
 
 /**
  * Turning a Privy login into a seller the venue knows about.
@@ -22,44 +22,26 @@ import type { SellerRecord } from '@/lib/api/contract';
  * again, and a copy kept in localStorage would be a second answer that can go stale while
  * looking authoritative.
  *
- * ## The business name is provisional, and that is a real limitation
+ * ## The identity token, and why the wait matters
  *
- * The venue requires a name and Privy has no idea what a business is called, so one is
- * derived from the email domain. This is tolerable rather than good, and only because of
- * three specific facts: no screen renders it (`api-source.ts` says "Your business"), the
- * venue keeps the first name it was given and never overwrites it, and a business signing in
- * is not a business telling us its trading name. Making it correct needs a route that can
- * change it, which does not exist. That is a gap, stated rather than hidden behind a
- * plausible-looking string.
- */
-
-/**
- * `ada@meridian-fabrication.example` → `Meridian Fabrication`.
+ * All this sends is `Authorization: Bearer <identity token>`. The email and wallet come out
+ * of that token at the venue, verified against Privy's signature — nothing this file knows is
+ * trusted, because nothing it knows is proof.
  *
- * Total by construction, because the venue requires a non-empty name and rejects the
- * request otherwise: a sign-in that fails validation on a field the person never typed
- * would be unexplainable to them. The last resort says it is unnamed rather than dressing
- * up an empty string, which is the one outcome that would be worse than a placeholder.
+ * The **identity** token is the one carrying linked accounts; the access token carries a DID
+ * and would make the venue call Privy's API for the email on every sign-in. They arrive
+ * separately, and the identity token can still be `null` on the render where `authenticated`
+ * first turns true — so this waits for the token rather than firing a request that would be
+ * refused for having no credential.
  */
-export function provisionalName(email: string): string {
-  const domain = email.split('@')[1] ?? '';
-  const label = domain.split('.')[0] ?? '';
-  const words = label
-    .split(/[-_]+/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1));
-
-  if (words.length > 0) return words.join(' ');
-  return email.trim() === '' ? 'Unnamed business' : email.trim();
-}
 
 export type SellerSessionState =
   | { status: 'unavailable' }
   | { status: 'loading' }
   | { status: 'signed-out' }
-  | { status: 'signing-in'; email: string }
+  | { status: 'signing-in' }
   | { status: 'signed-in'; seller: SellerRecord; created: boolean }
-  | { status: 'failed'; email: string; message: string };
+  | { status: 'failed'; message: string };
 
 export interface SellerSession {
   state: SellerSessionState;
@@ -69,26 +51,18 @@ export interface SellerSession {
 
 export function useSellerSession(): SellerSession {
   const available = signInAvailable();
-  const { ready, authenticated, user, login, logout } = usePrivy();
+  const { ready, authenticated, login, logout } = usePrivy();
+  const { identityToken } = useIdentityToken();
   const [state, setState] = useState<SellerSessionState>(
     available ? { status: 'loading' } : { status: 'unavailable' },
   );
 
   /*
-   * Which email the venue has already been asked about. Privy re-renders on wallet
-   * creation, so without this the same sign-in fires several POSTs — harmless at the venue,
-   * because the route is idempotent, and still three requests where one was meant.
+   * Which token the venue has already been asked about. Privy re-renders on wallet creation
+   * and on token refresh, so without this one sign-in fires several POSTs — harmless at the
+   * venue, because the route is idempotent, and still three requests where one was meant.
    */
   const asked = useRef<string | null>(null);
-
-  /*
-   * Blank counts as absent. A logged-in Privy user with no usable email cannot be turned
-   * into a seller — the venue identifies one by email — so this reads as signed out rather
-   * than being sent on to fail validation on a field nobody typed.
-   */
-  const rawEmail = user?.email?.address?.trim();
-  const email = rawEmail === undefined || rawEmail === '' ? null : rawEmail;
-  const walletAddress = user?.wallet?.address ?? null;
 
   useEffect(() => {
     if (!available) return;
@@ -98,29 +72,28 @@ export function useSellerSession(): SellerSession {
       return;
     }
 
-    if (!authenticated || email === null) {
+    if (!authenticated) {
       asked.current = null;
       setSignedInSeller(null);
       setState({ status: 'signed-out' });
       return;
     }
 
-    if (asked.current === email) return;
-    asked.current = email;
+    // Authenticated, but the credential has not arrived yet. Not a failure; not yet a request.
+    if (identityToken === null) {
+      setState({ status: 'signing-in' });
+      return;
+    }
+
+    if (asked.current === identityToken) return;
+    asked.current = identityToken;
 
     const controller = new AbortController();
-    setState({ status: 'signing-in', email });
+    setState({ status: 'signing-in' });
 
     void (async () => {
       try {
-        const result = await api.signInSeller(
-          {
-            name: provisionalName(email),
-            email,
-            ...(walletAddress ? { arcAddress: walletAddress } : {}),
-          },
-          controller.signal,
-        );
+        const result = await api.signInSeller(identityToken, controller.signal);
         setSignedInSeller(result.seller.id);
         setState({ status: 'signed-in', seller: result.seller, created: result.created });
       } catch (error) {
@@ -133,7 +106,6 @@ export function useSellerSession(): SellerSession {
         asked.current = null;
         setState({
           status: 'failed',
-          email,
           message:
             error instanceof ApiError
               ? (error.detail ?? error.title)
@@ -143,7 +115,7 @@ export function useSellerSession(): SellerSession {
     })();
 
     return () => controller.abort();
-  }, [available, ready, authenticated, email, walletAddress]);
+  }, [available, ready, authenticated, identityToken]);
 
   const signOut = useCallback(() => {
     setSignedInSeller(null);

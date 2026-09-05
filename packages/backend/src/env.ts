@@ -71,6 +71,17 @@ export const envSchema = z
      */
     MATURITY_COLLECTION_ACCOUNT_ID: ACCOUNT_ID.optional(),
 
+    /**
+     * Privy, for seller sign-in. Unset disables the route rather than letting it accept an
+     * unverified email — see `services/privy.ts`.
+     *
+     * The app id is also public and lives in the web package; it is here because verifying
+     * a token needs both halves. The secret is a server credential and must never be given
+     * a `NEXT_PUBLIC_` prefix, which is an instruction to inline it into the browser bundle.
+     */
+    PRIVY_APP_ID: z.string().min(1).optional(),
+    PRIVY_APP_SECRET: z.string().min(1).optional(),
+
     // Arc
     ARC_SETTLEMENT_PRIVATE_KEY: HEX_32,
     ARC_MAX_FEE_PER_GAS_GWEI: z.coerce

@@ -1,120 +1,134 @@
 /**
  * Seller onboarding.
  *
- * The one route a business needs before it has a book: give an email address and the
- * wallet that was made from it, and get back the id every other seller-side route is
- * scoped by. Until this existed a seller could only arrive through `seed.ts`, which meant
- * the product's opening claim — *a seller connects a wallet, or has one made from an email
- * address* — was true of the argument and not of the build.
+ * The one route a business needs before it has a book: present a verified identity and get
+ * back the id every other seller-side route is scoped by. Until this existed a seller could
+ * only arrive through `seed.ts`, which meant the product's opening claim — *a seller connects
+ * a wallet, or has one made from an email address* — was true of the argument and not of the
+ * build.
+ *
+ * ## The identity comes from the token, never from the body
+ *
+ * This route takes **no body at all**. The email and the wallet address are read out of a
+ * Privy identity token presented as `Authorization: Bearer <token>` and verified against
+ * Privy's signature, so what the venue records is what Privy attested rather than what a
+ * caller typed. The first version of this route did read them from a body, and anyone could
+ * have claimed any business's email address.
+ *
+ * With no Privy credentials configured the route refuses and says so, in the same shape as
+ * issuance with no ATS factory. Accepting an unverified email so that sign-in still "works"
+ * is the exact behaviour being removed here, and it would be reachable only on the
+ * deployments that had forgotten to configure it.
  *
  * ## Email is the identity, so this is idempotent on it
  *
- * `sellers.email` carries a unique index, and signing in with an email address is the only
- * way a seller is identified at all. So a repeat call is a sign-in, not a duplicate: the
- * existing row comes back with `200`, a new one is created with `201`, and a business
- * cannot end up with two books because it capitalised its own address differently.
+ * `sellers.email` carries a unique index, and the email is now a verified fact. So a repeat
+ * call is a sign-in, not a duplicate: the existing row comes back with `200`, a new one is
+ * created with `201`, and a business cannot end up with two books.
  *
  * ## A wallet address is recorded once and never rebound
  *
- * Nothing authenticates this route. That is survivable for creating a row — the worst case
- * is a stranger reserving an email address they do not own — and it is *not* survivable for
- * overwriting a wallet, because a seller's recorded address is where their money is
- * expected to be. So an address is written only into a field that is currently null, and a
- * different address arriving for a seller who already has one is a `409` rather than a
- * silent rebind. Sending the same address again is a no-op, which is what a repeat sign-in
- * from the same wallet looks like.
- *
- * When this route gains real authentication that rule can be relaxed deliberately. It must
- * not be relaxed by accident, which is why the refusal is here rather than a comment.
+ * A verified token proves who signed in; it does not prove that the wallet now attached to
+ * that account is the one the business expects to be paid at. Account recovery, a linked
+ * second wallet, or a compromised inbox all produce a valid token carrying a different
+ * address. Since a recorded address is where a seller's money is expected to go, an address
+ * only ever fills a field that is currently null: the same address again is a no-op, and a
+ * different one is a `409` rather than a silent rebind. Changing it deliberately needs a
+ * route that says that is what it is doing.
  *
  * ## The two address fields are not the same kind of thing
  *
  * `arcAddress` is an ordinary EVM address: valid on Arc the moment it exists. A Hedera
  * `hederaAccountId` is a `0.0.x`, and a freshly made wallet does not have one — what it has
- * is an *alias* derived from its public key, and Hedera creates the account behind that
- * alias when it is first funded. Both are accepted, neither is required, and the absence of
- * an account id is a fact about Hedera rather than a gap in the record.
+ * is an *alias* derived from its public key, and Hedera creates the account behind that alias
+ * when it is first funded. So a seller holding a perfectly good address with no account id is
+ * the normal state, and the absence is a fact about Hedera rather than a gap in the record.
  */
 
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getStore } from '../db/store.js';
-import { conflict, notFound } from '../errors.js';
+import { conflict, notFound, unauthorized } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
-import { readJson, readParams } from '../validate.js';
+import { getPrivyVerifier, provisionalName } from '../services/privy.js';
+import { readParams } from '../validate.js';
 import { wireSeller } from '../wire.js';
 
 const uuidParam = z.object({ id: z.uuid() });
 
-/** An EVM address. Checksum is not verified; the length and alphabet are. */
-const evmAddress = z
-  .string()
-  .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 20-byte hex address');
-
-/** A Hedera account id, `shard.realm.num`. Never an alias — see the module note. */
-const hederaAccountId = z
-  .string()
-  .regex(/^\d+\.\d+\.\d+$/, 'must be a Hedera account id in shard.realm.num form');
-
-const createSellerBody = z.object({
-  name: z.string().trim().min(1).max(200),
-  /*
-   * Lowercased here rather than at the store, so that what the route decided to look up is
-   * the same string it would have written. `upsertDebtor` normalises the same way.
-   */
-  email: z
-    .string()
-    .trim()
-    .toLowerCase()
-    .pipe(z.email())
-    .refine((v) => v.length <= 320),
-  arcAddress: evmAddress.optional(),
-  hederaAccountId: hederaAccountId.optional(),
-});
+/**
+ * The identity token, out of the Authorization header.
+ *
+ * Rejected here rather than passed to Privy when it is missing or malformed, so "you sent no
+ * credential" and "your credential did not verify" stay different answers.
+ */
+function bearerToken(header: string | undefined): string {
+  const raw = header?.trim() ?? '';
+  const match = /^Bearer\s+(\S+)$/i.exec(raw);
+  if (!match?.[1]) {
+    throw unauthorized(
+      'Signing in needs a Privy identity token, presented as `Authorization: Bearer <token>`.',
+    );
+  }
+  return match[1];
+}
 
 export const sellerRoutes = new Hono<AppEnv>();
 
 sellerRoutes.post('/', async (c) => {
-  const body = await readJson(c, createSellerBody);
+  const token = bearerToken(c.req.header('authorization'));
+  const verified = await getPrivyVerifier().verify(token);
   const store = getStore();
 
-  const existing = await store.getSellerByEmail(body.email);
+  /*
+   * Checked again here, and not because the verifier is untrusted.
+   *
+   * `VerifiedSeller.email` is typed as a `string`, so an empty one satisfies the compiler
+   * while being unusable: it is the unique key this table is built on, and a row carrying it
+   * would claim the identity of every other emailless seller. The real verifier refuses it
+   * already. This is the assertion that stops any future verifier — a different provider, a
+   * fake in a test that has drifted — from being able to insert one at all.
+   */
+  const email = verified.email.trim().toLowerCase();
+  if (email === '') {
+    throw unauthorized(
+      'That sign-in verified but carried no email address, and a seller is identified by ' +
+        'email here.',
+    );
+  }
+
+  const existing = await store.getSellerByEmail(email);
   if (!existing) {
     const created = await store.insertSeller({
-      name: body.name,
-      email: body.email,
-      arcAddress: body.arcAddress ?? null,
-      hederaAccountId: body.hederaAccountId ?? null,
+      name: provisionalName(email),
+      email,
+      arcAddress: verified.walletAddress,
+      // An alias has no account id until something funds it. See the module note.
+      hederaAccountId: null,
     });
     return c.json({ seller: wireSeller(created), created: true }, 201);
   }
 
   /*
-   * Fill what is missing, refuse what would move. `undefined` means the caller said
-   * nothing about that field and is not an instruction to clear it.
+   * Fill what is missing, refuse what would move. A token with no wallet on it says nothing
+   * about the address on file and must not be read as an instruction to clear it.
    */
-  const wallet: { arcAddress?: string; hederaAccountId?: string } = {};
+  const offered = verified.walletAddress;
+  const held = existing.arcAddress;
 
-  for (const field of ['arcAddress', 'hederaAccountId'] as const) {
-    const offered = body[field];
-    if (offered === undefined) continue;
-
-    const held = existing[field];
-    if (held === null) {
-      wallet[field] = offered;
-      continue;
-    }
-    if (held.toLowerCase() === offered.toLowerCase()) continue;
-
+  if (offered !== null && held !== null && held.toLowerCase() !== offered.toLowerCase()) {
     throw conflict(
       'conflict',
-      `This business already has a ${field === 'arcAddress' ? 'wallet address' : 'Hedera account'} on file, and it is not the one you sent. ` +
-        'A recorded address is where a seller expects to be paid, so it is not changed by signing in again.',
+      'This business already has a wallet address on file, and it is not the one this ' +
+        'sign-in carried. A recorded address is where a seller expects to be paid, so it is ' +
+        'not changed by signing in again.',
     );
   }
 
   const seller =
-    Object.keys(wallet).length > 0 ? await store.updateSellerWallet(existing.id, wallet) : existing;
+    offered !== null && held === null
+      ? await store.updateSellerWallet(existing.id, { arcAddress: offered })
+      : existing;
 
   return c.json({ seller: wireSeller(seller), created: false }, 200);
 });

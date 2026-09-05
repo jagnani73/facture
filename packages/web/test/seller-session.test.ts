@@ -1,15 +1,18 @@
 /**
- * The seller-session decoder and the name it has to invent.
+ * The seller-session decoder.
  *
  * The hook itself is glue over Privy and is not worth a fake Privy to exercise. What is
- * worth pinning is either side of it: the shape the venue answers with, and the one value
- * this build makes up rather than reads.
+ * worth pinning is the shape the venue answers with, since a decoder reading the wrong field
+ * is well-typed and silent.
+ *
+ * The business name is no longer derived here. It is derived at the venue, beside the
+ * verified email it comes from, so that two callers cannot disagree about what a business is
+ * called - `packages/backend/test/sellers.test.ts` covers it.
  */
 
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '@/lib/api/problem';
 import { readSeller, readSellerSignIn } from '@/lib/api/contract';
-import { provisionalName } from '@/lib/auth/use-seller-session';
 
 function refusal(read: () => unknown): ApiError {
   try {
@@ -72,20 +75,5 @@ describe('readSellerSignIn', () => {
 
   it('refuses a sign-in with no seller in it', () => {
     expect(refusal(() => readSellerSignIn({ created: true })).detail).toContain('signIn.seller');
-  });
-});
-
-describe('provisionalName', () => {
-  it('builds a readable label from the email domain', () => {
-    expect(provisionalName('ada@meridian.example')).toBe('Meridian');
-    expect(provisionalName('ap@meridian-fabrication.example')).toBe('Meridian Fabrication');
-    expect(provisionalName('ada@petra_foods.co.uk')).toBe('Petra Foods');
-  });
-
-  /* The venue requires a non-empty name, so there is no input that may produce one. */
-  it('never produces an empty name', () => {
-    for (const email of ['ada@', 'ada', '', '@example.com']) {
-      expect(provisionalName(email).length).toBeGreaterThan(0);
-    }
   });
 });

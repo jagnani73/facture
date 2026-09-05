@@ -21,6 +21,7 @@ import { loadConfig, resetConfig } from '../src/config.js';
 import { createMemoryStore, type MemoryStore } from '../src/db/memory-store.js';
 import { seedStore } from '../src/db/seed.js';
 import { setStore } from '../src/db/store.js';
+import { unauthorized } from '../src/errors.js';
 import { createLogger, setRootLogger } from '../src/logger.js';
 import type { AtsAdapter, HoldReceipt } from '../src/services/ats.js';
 import { setAtsAdapter } from '../src/services/ats.js';
@@ -29,6 +30,11 @@ import { setScheduleAdapter } from '../src/services/schedule.js';
 import type { ComplianceDecision, ComplianceGate } from '../src/services/compliance.js';
 import { setComplianceGate } from '../src/services/compliance.js';
 import { initIssuanceQueue } from '../src/services/issuance.js';
+import {
+  setPrivyVerifier,
+  type PrivyVerifier,
+  type VerifiedSeller,
+} from '../src/services/privy.js';
 import type { Notifier } from '../src/services/notifier.js';
 import { setNotifier } from '../src/services/notifier.js';
 import { DEFAULT_NETWORK, DEFAULT_SCHEME, initX402Client } from '../src/services/x402.js';
@@ -307,7 +313,43 @@ export interface HarnessOptions {
   seed?: boolean;
   gate?: ComplianceGate;
   settleFails?: string;
+  /** Stands in for Privy. Absent means every sign-in verifies as {@link DEFAULT_SIGN_IN}. */
+  privy?: PrivyVerifier;
 }
+
+/** What the stub verifier attests to when a test does not say otherwise. */
+export const DEFAULT_SIGN_IN: VerifiedSeller = {
+  email: 'ada@meridian.example',
+  walletAddress: '0x1c755e95cb11e5d5af498bb0ea595b56e1adb035',
+  privyUserId: 'did:privy:test',
+};
+
+/**
+ * A Privy stand-in that verifies one token and rejects everything else.
+ *
+ * It refuses rather than accepting anything, because the route's own contract is that an
+ * unverifiable token does not sign anyone in — a fake that said yes to every string would
+ * let that contract rot without a test noticing.
+ */
+export function stubPrivy(
+  attested: Partial<VerifiedSeller> = {},
+  token = VALID_ID_TOKEN,
+): PrivyVerifier {
+  return {
+    verify: (idToken) =>
+      idToken === token
+        ? Promise.resolve({ ...DEFAULT_SIGN_IN, ...attested })
+        : Promise.reject(unauthorized('That sign-in could not be verified.')),
+  };
+}
+
+/** Any opaque string; the stub compares, it does not parse. */
+export const VALID_ID_TOKEN = 'privy-identity-token-for-tests';
+
+/** The header a signed-in caller sends. */
+export const signedIn = (token = VALID_ID_TOKEN): Record<string, string> => ({
+  authorization: `Bearer ${token}`,
+});
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   resetConfig();
@@ -322,6 +364,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
   const schedule = createRecordingSchedule();
   setScheduleAdapter(schedule);
   setComplianceGate(options.gate ?? createAllowingGate());
+  setPrivyVerifier(options.privy ?? stubPrivy());
   setNotifier(silentNotifier);
 
   initIssuanceQueue({ minIntervalMs: 0, maxAttempts: 3, backoffBaseMs: 1 });
@@ -359,6 +402,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
       setAtsAdapter(undefined);
       setScheduleAdapter(undefined);
       setComplianceGate(undefined);
+      setPrivyVerifier(undefined);
       resetConfig();
     },
   };

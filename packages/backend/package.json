@@ -25,6 +25,7 @@
     "@facture/shared": "workspace:*",
     "@hiero-ledger/sdk": "^2.85.0",
     "@hono/node-server": "^1.19.0",
+    "@privy-io/server-auth": "^1.32.5",
     "@x402/core": "2.24.0",
     "@x402/fetch": "2.24.0",
     "@x402/hedera": "2.24.0",
