@@ -48,32 +48,16 @@ export const DATA_SOURCE: DataSource = resolveSource();
 export const usingApi = (): boolean => DATA_SOURCE === 'api';
 
 /**
- * Who the screens are looking at.
+ * Who this build was *configured* to look at.
  *
  * Every seller-side and buyer-side route on the backend is scoped by a `z.uuid()` — the
  * book is `GET /v1/invoices?sellerId=…`, the mandates page is `GET /v1/mandates?buyerId=…`.
- * There is no session yet, so the identity is configuration rather than login state, and
- * it is stated here rather than threaded through every call site.
+ *
+ * These two are the fallback and no longer the whole answer. **Read `lib/api/identity.ts`
+ * instead of importing these directly**: a signed-in seller takes precedence over the
+ * configured one, and a constant captured at module load cannot express that. They stay
+ * exported because they are genuinely what the build was told, which is still the answer
+ * when nobody has signed in.
  */
 export const SELLER_ID: string = RAW_SELLER_ID?.trim() ?? '';
 export const BUYER_ID: string = RAW_BUYER_ID?.trim() ?? '';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * The backend validates these as UUIDs and answers 422 otherwise, which would surface as
- * "the venue rejected the request" on every screen at once. Catching it here means the
- * message can name the variable that is actually missing.
- */
-export function checkIdentity(kind: 'seller' | 'buyer'): string | null {
-  const value = kind === 'seller' ? SELLER_ID : BUYER_ID;
-  const variable = kind === 'seller' ? 'NEXT_PUBLIC_SELLER_ID' : 'NEXT_PUBLIC_BUYER_ID';
-
-  if (value === '') {
-    return `${variable} is not set, so this build does not know which ${kind} to ask the venue about.`;
-  }
-  if (!UUID.test(value)) {
-    return `${variable} is "${value}", which is not a UUID. The venue identifies a ${kind} by UUID and will refuse anything else.`;
-  }
-  return null;
-}

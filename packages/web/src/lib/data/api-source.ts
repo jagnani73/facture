@@ -26,7 +26,7 @@ import type { Debtor, Invoice, Mandate, MinorUnits } from '@/lib/domain';
 import { ASSET_CHAIN, CHAINS, isQuotable, tenorDays } from '@/lib/domain';
 import type { Position } from '@/lib/pricing';
 import { api } from '@/lib/api/client';
-import { BUYER_ID, SELLER_ID, checkIdentity } from '@/lib/api/config';
+import { buyerId, explainMissingIdentity, sellerId } from '@/lib/api/identity';
 import type { LiveQuoteResponse, TradeProofResponse, TradeRecord } from '@/lib/api/contract';
 import { ApiError } from '@/lib/api/problem';
 import { isSettledTrade } from '@/lib/settlement';
@@ -64,7 +64,7 @@ async function mapLimit<T, R>(
 }
 
 function requireIdentity(): void {
-  const problems = [checkIdentity('seller'), checkIdentity('buyer')].filter(
+  const problems = [explainMissingIdentity('seller'), explainMissingIdentity('buyer')].filter(
     (message): message is string => message !== null,
   );
 
@@ -145,10 +145,10 @@ export async function apiMarket(signal?: AbortSignal): Promise<Market> {
   const asOf = new Date();
 
   const [book, mandatePage, sellerTrades, buyerTrades] = await Promise.all([
-    api.listInvoices({ sellerId: SELLER_ID }, signal),
-    api.listMandates({ buyerId: BUYER_ID }, signal),
-    api.listTrades({ sellerId: SELLER_ID }, signal),
-    api.listTrades({ buyerId: BUYER_ID }, signal),
+    api.listInvoices({ sellerId: sellerId() }, signal),
+    api.listMandates({ buyerId: buyerId() }, signal),
+    api.listTrades({ sellerId: sellerId() }, signal),
+    api.listTrades({ buyerId: buyerId() }, signal),
   ]);
 
   const rows = book.items;
@@ -225,8 +225,8 @@ export async function apiMarket(signal?: AbortSignal): Promise<Market> {
   return buildMarket({
     source: 'api',
     asOf,
-    seller: { id: SELLER_ID, name: SELLER_NAME },
-    viewer: { id: BUYER_ID, name: 'Your desk' },
+    seller: { id: sellerId(), name: SELLER_NAME },
+    viewer: { id: buyerId(), name: 'Your desk' },
     invoices,
     debtors: [...debtorsById.values()],
     mandates,

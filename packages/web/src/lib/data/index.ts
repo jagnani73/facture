@@ -14,7 +14,8 @@
 
 import type { MinorUnits, Rating } from '@/lib/domain';
 import { api } from '@/lib/api/client';
-import { BUYER_ID, DATA_SOURCE, SELLER_ID, usingApi } from '@/lib/api/config';
+import { DATA_SOURCE, usingApi } from '@/lib/api/config';
+import { buyerId, sellerId } from '@/lib/api/identity';
 import type { TradeChallenge } from '@/lib/api/contract';
 import {
   describeFailure,
@@ -152,7 +153,7 @@ export async function addInvoices(
   for (const draft of drafts) {
     try {
       await api.createInvoice({
-        sellerId: SELLER_ID,
+        sellerId: sellerId(),
         debtor: { name: draft.customer, email: draft.customerEmail },
         invoiceNumber: draft.reference,
         faceValue: draft.amountMinor,
@@ -237,7 +238,7 @@ export async function writeAndFundMandate(
   let mandateId: string;
   try {
     const mandate = await api.createMandate({
-      buyerId: BUYER_ID,
+      buyerId: buyerId(),
       ratingFloor: input.ratingFloor,
       maxTenorDays: input.maxTenorDays,
       annualisedYieldBps: input.annualisedYieldBps,
