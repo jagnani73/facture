@@ -1,7 +1,7 @@
 # Demo script
 
 Five moves, in the order the README argues them: list, quote, match, settle, mature. Written
-against the venue as it actually runs on 2026-09-02, with the ids and transaction hashes it
+against the venue as it actually runs on 2026-09-03, with the ids and transaction hashes it
 actually holds, so a judge can check a claim instead of taking it.
 
 Everything below is either a URL to open or a request to send. Where a move is staged rather than
@@ -9,8 +9,8 @@ live, it says so in place. Where the thing on screen is a fiction from the seede
 a receivable with a bond behind it, it says that too — a demo that blurs the two is worth less than
 one that does not, because the whole product claim is that a price can be checked.
 
-Budget about **twelve minutes** for the five moves, plus two for the proof view. Staging is
-separate and is described at the end.
+Budget about **twelve minutes** for the five moves, plus two for the proof view and two for the
+on-chain guarantees at the end. Staging is separate and is described last.
 
 ---
 
@@ -23,18 +23,36 @@ Two processes, both already running in the sessions this was written in:
 | venue   | `pnpm --filter @facture/backend dev` | `http://localhost:8787` |
 | screens | `pnpm --filter @facture/web dev`     | `http://localhost:3000` |
 
-The web app has no login. It reads which seller and which buyer it is looking at from
-`packages/web/.env.local`:
+### Demo book, or your own
+
+The masthead says **Demo book · Sign in**, and that is the whole of the account model.
+
+- **Signed out** you are looking at the shared demo book: a seeded seller with 29 invoices,
+  settled trades and matured receivables in it. Nothing to create, nothing to fund, and it is
+  labelled rather than implied.
+- **Sign in** with an email address and Privy makes a wallet. The venue reads the email out of a
+  signed Privy identity token — not out of the request body — and mints the id its routes are
+  scoped by. Your book starts empty and says so.
+
+For a demo, **stay signed out**. The seeded book is where the settled trades and the matured
+receivables are. Sign in only if someone asks to see onboarding, and expect an empty book on the
+other side, which is the correct answer for a business that has just arrived.
+
+Signed out, the screens read their identity from `packages/web/.env.local`:
 
 - seller `e37a8422-960d-5a77-9825-8964df79ed49` — Meridian Fabrication
-- buyer `4c94a6a6-e8a2-59af-b244-b7f90c402a25` — Ashgrove Treasury
+- buyer `f888dd62-6df0-5600-925e-06469ef0aef6` — Harrow Point
 
-Those two ids appear in every seller-scoped and buyer-scoped request below. They are UUIDv5 derived
+Those ids appear in every seller-scoped and buyer-scoped request below. They are UUIDv5 derived
 from fixture labels, so they survive a reseed unchanged.
 
-**`GET /health` reads `degraded`, and that is expected.** The indexer cursor is `0` against a chain
-head in the tens of millions, so the dependency block reports lag. The database and the x402
-facilitator both report `ok`. Nothing in the five moves reads the indexer.
+**The buyer is Harrow Point deliberately.** It is the agent-operated desk, it is the buyer in both
+settled trades, and it holds the one mandate actually escrowed on Arc — so its two bids show a
+backed one and an unbacked one side by side.
+
+**`GET /health` reads `ok`.** It reports per-rail reachability rather than an indexer lag, because
+this build originates its chain transactions rather than following a stream and has no position to
+be behind. A rail that will not answer is fatal and says which one.
 
 ```
 curl http://localhost:8787/health
@@ -42,19 +60,26 @@ curl http://localhost:8787/health
 
 ### What is real and what is seeded
 
-The book holds 28 invoices. **Three of them have an instrument that exists on Hedera:**
+The book holds 29 invoices. **Four of them have an instrument that exists on Hedera:**
 
-| invoice | security       | what it is                                          |
-| ------- | -------------- | --------------------------------------------------- |
-| MF-2051 | `0.0.10331926` | its own bond, deployed by the venue. The clean one. |
-| MF-2052 | `0.0.10331928` | its own bond, deployed by the venue.                |
-| MF-2046 | `0.0.10316440` | the gas-probe bond, pointed at by hand. A stand-in. |
+| invoice | security       | what it is                                           |
+| ------- | -------------- | ---------------------------------------------------- |
+| MF-2051 | `0.0.10331926` | its own bond, deployed by the venue. The clean one.  |
+| MF-2052 | `0.0.10331928` | its own bond, deployed by the venue.                 |
+| MF-2046 | `0.0.10316440` | the gas-probe bond, pointed at by hand. A stand-in.  |
+| MF-2052 | `0.0.10343726` | a **second** MF-2052, issued by accident. See below. |
 
 The other 25 carry security ids in the `0.0.67xxxxx` range that were never deployed —
 `https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.6751909` answers `Not found`. They
 price correctly and they settle nothing. The seeded settled trades carry invented `0x…` cash
-hashes and an HCS topic (`0.0.6741301`) with no messages on it. Do not open those; they are the
-demo book, not the ledger.
+hashes and a seeded HCS topic (`0.0.6741301`) with no messages on it. Do not open those; they are
+the demo book, not the ledger. The **real** refusal topic is `0.0.10342152` and does have messages.
+
+**There are two invoices numbered MF-2052 and two customers called Petra Foods Group.** The second
+of each was created while testing the duplicate check: posting under a different debtor email made
+a different customer, hence a different receivable, hence a legitimate listing. It is recorded in
+[deployments.md](./deployments.md) rather than deleted. If it comes up, that is the answer — and it
+is a fair illustration of what the uniqueness hash keys on.
 
 **Show MF-2051.** It was issued its own bond by the venue's own issuance queue, sold against a
 funded standing bid, and matured paying its holder par, with no stand-in anywhere in the chain of
@@ -336,13 +361,20 @@ http://localhost:3000/book/068ac953-19e4-5254-96ea-0b06b8f479f8   MF-2047, rated
 http://localhost:3000/book/460311ff-60d4-54dc-93ce-d5ccbad98b24   MF-2048, unrated, 1600 bps
 http://localhost:3000/mandates
 http://localhost:3000/proof/3d129208-a99e-4667-bc4a-1d7bc5a537eb  MF-2051, the clean lifecycle
+http://localhost:3000/proof/6f0654c7-99fc-4f4c-a4fb-d0e7d2626b2e  MF-2052, second clean lifecycle
 http://localhost:3000/proof/85c8efbe-9940-4067-97f9-096f0576a377  MF-2046, the honest mess
 ```
+
+The mandates screen is worth a deliberate stop: Harrow Point's two bids render `Escrowed on Arc`
+and `Not escrowed`, and both say `Agent-run` — which the venue reports from the buyer's own policy
+rather than the screen assuming it.
 
 ### Venue — `http://localhost:8787`
 
 ```
 GET  /health
+POST /v1/sellers                               sign in; Bearer a Privy identity token, no body
+GET  /v1/sellers/:id
 POST /v1/invoices                              202, and queues a real deployBond
 GET  /v1/invoices?sellerId=…                   the book
 GET  /v1/invoices/:id
@@ -352,9 +384,9 @@ GET  /v1/invoices/:id/quote                    the price that is already there
 GET  /v1/confirm/:token                        public, token-authenticated
 POST /v1/confirm/:token
 POST /v1/mandates
-GET  /v1/mandates?buyerId=…
+GET  /v1/mandates?buyerId=…                    carries `escrow` and `operator` per bid
 GET  /v1/mandates/exposure?buyerId=…
-POST /v1/mandates/:id/fund
+POST /v1/mandates/:id/fund                     verified against the Arc vault
 POST /v1/mandates/:id/withdraw
 GET  /v1/mandates/:id/exposure
 POST /v1/trades                                arms on the first call, settles on the second
@@ -380,18 +412,62 @@ https://testnet.mirrornode.hedera.com/api/v1/transactions/0.0.7162784-1788340765
 https://testnet.mirrornode.hedera.com/api/v1/transactions/0.0.10311549-1788340781-520345720
 ```
 
-**One correction to make in the room if someone clicks through from the proof view.** The venue
-builds a security's explorer link as `https://hashscan.io/testnet/token/0.0.10331926`. An ATS
-security is a diamond **contract**, not an HTS token — the mirror node answers `Not found` on
-`/api/v1/tokens/0.0.10331926` and answers fully on `/api/v1/contracts/0.0.10331926`. The correct
-HashScan path is `/contract/…`. The link is wrong; the address it names is right.
+---
 
-**And one more, if anyone reads an invoice row over the API.** `regulationType` on the seeded rows
-in the running database still says `reg-d-506c`, while every instrument the venue has actually
-deployed carries Reg S — decodable from each bond's own `deployBond` calldata. The code is fixed and
-migration `0003` corrects the column, but it has not been applied to
-`packages/backend/data/facture.db` because changing a default rebuilds the `invoices` table, which
-is not something to run against live demo state. The chain is right and the row is stale.
+## Move 6 — the guarantees, if there is time
+
+Three claims the product makes that are now checkable by someone who has not agreed to trust the
+venue. Each is one read. This is the strongest two minutes in the demo and it needs no UI.
+
+### A refusal you can verify without us
+
+Topic [`0.0.10342152`](https://hashscan.io/testnet/topic/0.0.10342152).
+
+```
+https://testnet.mirrornode.hedera.com/api/v1/topics/0.0.10342152/messages
+```
+
+The payload is a SHA-256 commitment and an opaque receipt id — **not** the reason. Say why: a
+refusal names the customer and the amounts, and a topic is public, so publishing it would broadcast
+one buyer's exposure and one seller's customer list. The refused party is handed their receipt and
+their sequence number, hashes it the same way, and compares. We cannot change our answer after the
+fact, and nobody watching learns anything but that a refusal happened.
+
+### One receivable, one instrument — across venues, not just ours
+
+Registry [`0x8eb9f00126bca50226e47b71a75f7b438e81d408`](https://hashscan.io/testnet/contract/0x8eb9f00126bca50226e47b71a75f7b438e81d408).
+
+The point to make: a unique index stops **this** venue listing a receivable twice and can say
+nothing about the same invoice being financed somewhere else — and the second financier is a
+different company, not a second row in our table.
+
+That was tested by claiming a receivable this venue has **no row for** —
+`0xd57e1311a31458e8e38bfaaed4b69b3a8045ff725cbe3156527f83a6821ee945`, standing in for a rival — and
+then trying to list it. The venue answered **409**. Nothing local could have refused it, because
+there was nothing local.
+
+### The debtor confirmation, in public
+
+Registry [`0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7`](https://hashscan.io/testnet/contract/0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7).
+
+`isConfirmed(invoiceId)` is a public view, and MF-2052 reads `true`
+(`0x10b35612b7f88d6e9c7094bded16b0751a3c10201fac4d2b48afb62e59f2dcbd`). That is the fact the whole
+risk argument rests on: a full advance with no holdback is justified **because** the customer
+acknowledged the debt, and until this was on chain that was a column only we could see.
+
+The contract cannot express a confirmation at listing — `list` always writes `Draft` — so a
+confirmation the customer never gave is not something we could assert by setting one field.
+
+### Capital that is actually posted
+
+Vault [`0x217256d0fdf83ffd81bbc6884ad44f5c02501102`](https://testnet.arcscan.app/address/0x217256d0fdf83ffd81bbc6884ad44f5c02501102)
+on Arc holds **5 USDC** against Harrow Point's mandate, deposited by that buyer's own wallet. The
+mandates screen shows `Escrowed on Arc` on that bid and `Not escrowed` on the other.
+
+Be precise about what this is: **capital backing a bid, not a settled cash leg.** No sale has yet
+paid a seller in USDC — `executePayout` is the half that is not built. And five seeded mandates
+still quote against capital nobody posted; the funding check stops that growing rather than undoing
+it, which is why the screen labels each bid rather than claiming the book is uniformly backed.
 
 ---
 

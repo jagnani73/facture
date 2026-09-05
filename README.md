@@ -104,10 +104,21 @@ day one: selling the same receivable to three financiers is the specific fraud t
 always had, and it is roughly what broke Greensill. A registry does not make an invoice real, but it
 stops it being sold twice.
 
-Today that uniqueness is enforced by a unique index on the hash, written in the same statement that
-creates the invoice, so there is no check-then-insert window for the fraud to fit through. The
-`UniquenessRegistry` contract is deployed and the venue does not yet call it, so the guarantee is
-currently the venue's rather than the chain's.
+Two things enforce it, and they answer different questions. A unique index on the hash, written in
+the same statement that creates the invoice, means there is no check-then-insert window inside this
+venue. And [`UniquenessRegistry`](https://hashscan.io/testnet/contract/0x8eb9f00126bca50226e47b71a75f7b438e81d408)
+on Hedera is checked before an invoice is listed and claimed once its instrument exists &mdash; which
+is the half a database cannot do, because the second financier is a different company, not a second
+row in the first one's table. The registry is append-only and has no release, so a non-zero answer is
+a permanent public statement that a receivable is spoken for.
+
+That has been tested the only way it means anything: a receivable **this venue has no row for** was
+claimed on chain by another instrument, and listing it came back 409. Nothing local could have
+refused it.
+
+If the registry cannot be reached, listing proceeds on the index alone. That is a real reduction in
+strength rather than a fallback that pretends otherwise, and it is the honest trade against an RPC
+outage stopping a business from listing an invoice.
 
 ### Quote
 
@@ -157,12 +168,19 @@ The honest reason for two chains is not that it is clever. It is that **buyer ca
 where stablecoins live.** You do not ask a treasury desk to bridge onto Hedera to buy a $40k
 receivable. DvP means it never has to.
 
-Where the build actually is: the trades that settled ran their cash leg over x402 on
-`hedera:testnet`, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
-The Arc leg &mdash; `MandateVault` and the payment-side `DvpEscrow` &mdash; is deployed on Arc
-testnet, and the Hedera book's `cashLeg()` returns Arc's chain id and the vault address as
-immutables recorded at construction, so the link cannot be redirected. It has not yet carried USDC.
-The mechanism is real; the second chain is wired and idle.
+Where the build actually is, in two parts, because they are different claims.
+
+**The cash leg that has settled ran on Hedera.** Both completed trades took their payment over x402
+on `hedera:testnet`, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
+The Hedera book's `cashLeg()` returns Arc's chain id and the vault address as immutables recorded at
+construction, so the cross-chain link cannot be redirected.
+
+**Real USDC is escrowed on Arc, and that is capital rather than a settled leg.** `MandateVault` holds
+5 USDC against one mandate, deposited by that buyer's own wallet, and the venue refuses to count a
+mandate as holding more than the vault does &mdash; `balanceOf` is a view, so checking costs nothing.
+The mandates screen says which bids are backed that way and which are not. **No sale has yet paid a
+seller in USDC**: `executePayout` is the half that is not built, so escrowed capital and a settled
+cash leg remain two different things on this page.
 
 ### Mature
 
@@ -208,9 +226,14 @@ receipts, the compliance decision and both settlement legs.
 ### The book
 
 A seller connects a wallet, or has one made from an email address, and adds their outstanding
-invoices: customer, amount, invoice number, due date. There is no sign-in in this build &mdash; the
-screens are told which seller and which buyer they are looking at by configuration, and the venue
-scopes every route by that id.
+invoices: customer, amount, invoice number, due date.
+
+A seller signs in with an email address and Privy makes the wallet; there is nothing to install and
+no seed phrase to keep. The venue reads the email out of a signed Privy identity token rather than
+out of the request, so what it records is what Privy attested rather than what a caller typed, and a
+wallet address once recorded is never rebound by signing in again. Signed out, the screens show a
+shared **demo book** &mdash; seeded, with settled trades and matured receivables in it, so the market
+can be looked at without an account at all.
 
 Each invoice becomes an instrument at this moment, not at the moment of sale. That ordering matters
 more than it looks. Tokenisation happens at onboarding, when nobody is watching a clock, so issuance
@@ -346,7 +369,12 @@ Recorded here so they are not relitigated mid-build.
   is which.
 - **Where a rating comes from.** Earned on the platform out of settled payment behaviour, starting
   unrated. No oracle, and no invented score.
-- **Whether an invoice is real.** Debtor confirmation gates listability, and a uniqueness registry
+- **Whether an invoice is real.** Debtor confirmation gates listability, and it is recorded on
+  [`InvoiceRegistry`](https://hashscan.io/testnet/contract/0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7):
+  `isConfirmed(invoiceId)` is a public view, so the fact that justifies advancing the full face value
+  is checkable without trusting us. The contract cannot express a confirmation at listing &mdash; it
+  always writes `Draft` &mdash; so a confirmation the customer never gave is not something the venue
+  can assert by setting one field. A uniqueness registry
   keyed on `hash(debtor, invoice number, amount)` means one receivable mints exactly one instrument,
   ever.
 - **What a seller does with the USDC.** Nothing, for now. Cash-out rails are out of scope and are
