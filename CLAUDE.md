@@ -565,6 +565,30 @@ sitting on the asset leg of every trade. Not for a hackathon.
   A test found the guard living only in the verifier, where any other verifier could bypass
   it.
 
+### Resolved: refusal receipts are on a topic, as commitments
+
+Topic **`0.0.10342152`**. `refusal_receipts` had carried `hcs_topic_id` and
+`hcs_sequence_number` since the first migration, the proof view rendered a link off them, and
+the seed filled them in — and nothing had ever written. The fifth mechanism with no caller
+found in two days, and the only one propping up a headline product claim.
+
+- **The topic carries a SHA-256 digest, never the reason.** A refusal sentence names the
+  debtor and the amounts, and a topic is public — publishing one would broadcast a buyer's
+  exposure and a seller's customer list, which is worse than the problem being fixed and is
+  something `api-source.ts` already refuses to do. The refused party is handed their receipt
+  and their sequence number and checks the digest themselves.
+- **The canonical form is an array, not an object.** `JSON.stringify` follows key insertion
+  order, so an object would make the digest depend on assignment order. **Field order is now
+  a promise**: the digest of the receipt at sequence 1 is pinned as a literal in
+  `test/hcs.test.ts`, because changing it silently invalidates every receipt already issued.
+  Appending a field is the only safe change, and still needs the version bumped.
+- **`publishRefusals` never throws.** A topic that is down costs the checkable copy, not the
+  refusal — the alternative is a funder losing the answer they were owed because an unrelated
+  service was unavailable. So the claim is that a refusal is always recorded and is checkable
+  wherever consensus was reached, **not** that every refusal is on chain.
+- **No submit key.** The property wanted is that the venue cannot alter what it already said,
+  not that only the venue may speak.
+
 ## Cut list
 
 Ordered by what leaves the product most intact, not by which track is cheapest to lose. A prize is

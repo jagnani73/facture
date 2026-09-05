@@ -129,10 +129,20 @@ That ordering is the whole argument. An AMM matches first and discovers the tran
 afterwards, so a non-compliant trade shows up as a revert. Here an ineligible counterparty is never
 matched in the first place, and the refusal is a first-class output rather than a failed transaction.
 
-Every refusal is stored with its reason code and its sentence, and the schema carries the HCS topic
-and sequence number that would let the refused party check it without trusting us. **Nothing writes
-to HCS yet**, so those two fields are null on every trade that really settled. The seeded book fills
-them in; the ledger does not.
+Every refusal is stored with its reason code and its sentence, and committed to a Hedera Consensus
+Service topic &mdash; [`0.0.10342152`](https://hashscan.io/testnet/topic/0.0.10342152) &mdash; so
+the refused party can check it without trusting us.
+
+**What goes on the topic is a hash, not the reason.** A refusal names the customer and the amounts,
+and a topic is public: publishing it would broadcast one buyer's exposure and one seller's customer
+list to anyone reading. So the message carries a SHA-256 commitment and an opaque receipt id. We
+hand you your receipt, you hash it the same way, and you check it against the digest recorded at
+your sequence number. We cannot later claim we gave you a different reason, and nobody watching the
+topic learns anything but that a refusal happened.
+
+Consensus attaches after the receipt is written, so a topic that is unavailable costs the
+independently checkable copy and never the answer itself. A refusal is always recorded; it is
+checkable wherever consensus was reached.
 
 ### Settle
 

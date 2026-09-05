@@ -91,6 +91,38 @@ this vault. **Five seeded mandates still quote against capital nobody posted** �
 guards the funding path and does not retroactively unfund anything, so that is stopped from
 growing rather than undone.
 
+## Refusal receipts on HCS — 2026-09-03
+
+|               |                                                                |
+| ------------- | -------------------------------------------------------------- |
+| topic         | `0.0.10342152`                                                 |
+| create tx     | `0.0.10311549@1788400397.382626486`                            |
+| memo          | `Facture refusal receipts v1 — sha256 commitments, no reasons` |
+| submit key    | none — anyone may write                                        |
+| first message | sequence `1`, consensus `1788400454.638258247`                 |
+
+A message is a SHA-256 commitment and an opaque receipt id, and nothing else:
+
+```json
+{ "v": 1, "kind": "facture.refusal", "receiptId": "…", "digest": "572e74b3…524b8a3d" }
+```
+
+**The reason is deliberately absent.** A refusal sentence names the debtor and the amounts,
+so publishing one would put a buyer's exposure and a seller's customer list on a public
+stream. The refused party is given their receipt and their sequence number, hashes the
+receipt the same way, and compares — which proves the venue did not change its answer without
+revealing the answer to anyone else. Read back from the mirror node to confirm the payload
+carries no reason, rating, tenor, mandate or buyer.
+
+**No submit key, on purpose.** The property wanted is that the venue cannot alter what it
+already said, not that only the venue may speak. A forged message commits to a digest that
+matches no receipt anyone holds, and the sequence number is what binds a receipt to a
+message, so an open topic adds noise rather than weakness.
+
+The digest of the receipt at sequence 1 is pinned as a literal in `test/hcs.test.ts`: it is a
+promise already made to whoever holds that receipt, so the canonical field order can never be
+changed quietly.
+
 ## ATS security (the paper)
 
 |              |                                                                      |
