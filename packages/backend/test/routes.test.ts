@@ -575,7 +575,13 @@ describe('trades and the proof view', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.invoice.invoiceNumber).toBe('MF-2033');
-    expect(res.body.invoice.securityExplorerUrl).toContain('hashscan.io');
+    /*
+     * `/contract/`, not `/token/`. An ATS security is a diamond the factory deployed, and the
+     * mirror node 404s on `/api/v1/tokens/<id>` for one. Asserting only the hostname is what
+     * let the wrong path stand: every HashScan URL contains `hashscan.io`, including the ones
+     * that resolve to nothing, and this is the link the proof view offers as its evidence.
+     */
+    expect(res.body.invoice.securityExplorerUrl).toContain('hashscan.io/testnet/contract/');
     expect(res.body.assetLeg.explorerUrl).toContain('/transaction/');
     expect(res.body.compliance.hcsExplorerUrl).toContain('/topic/0.0.6741301/message/4400');
     expect(res.body.pricing.faceValue).toBe('9500000');

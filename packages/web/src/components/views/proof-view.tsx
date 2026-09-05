@@ -474,7 +474,7 @@ function InstrumentCard({ record }: { record: ProofRecord }) {
           <Row term="Issued" value={formatDateTime(instrument.issuedAt)} />
         ) : null}
         {instrument.explorerUrl ? (
-          <Explorer href={instrument.explorerUrl} label="Open the token in HashScan" />
+          <Explorer href={instrument.explorerUrl} label="Open the security in HashScan" />
         ) : null}
         {instrument.issuedTxId ? (
           <Explorer

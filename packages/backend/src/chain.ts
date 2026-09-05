@@ -84,7 +84,16 @@ export const explorer = {
   arcAddress: (address: string): string => explorerAddressUrl(cashChainKey, address),
   hederaTx: (id: string): string => explorerTxUrl(assetChainKey, id),
   hederaAccount: (id: string): string => explorerAddressUrl(assetChainKey, id),
-  hederaToken: (id: string): string => `${hedera.explorerUrl}/token/${id}`,
+  /**
+   * An ATS security, which is a **contract** and not an HTS token.
+   *
+   * It was `/token/` until 2026-09-02, and that link went nowhere: the mirror node answers
+   * `/api/v1/contracts/0.0.10331928` and 404s on `/api/v1/tokens/0.0.10331928`. The security
+   * is a diamond the factory deployed, so nothing about it was ever a token — the name of the
+   * field is what made the wrong path look right. This is the link on the proof view, whose
+   * whole job is being checkable somewhere that is not us.
+   */
+  hederaSecurity: (id: string): string => `${hedera.explorerUrl}/contract/${id}`,
   /** A scheduled transaction, which is how a maturity payout is visible before it executes. */
   hederaSchedule: (id: string): string => `${hedera.explorerUrl}/schedule/${id}`,
   hederaTopicMessage: (topicId: string, seq: number): string =>

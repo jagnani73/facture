@@ -181,7 +181,7 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
       uniquenessHash: invoice.uniquenessHash,
       isin: invoice.isin,
       securityId: invoice.securityId,
-      securityExplorerUrl: link(invoice.securityId, explorer.hederaToken),
+      securityExplorerUrl: link(invoice.securityId, explorer.hederaSecurity),
     },
     confirmation: {
       decision: invoice.confirmationDecision,
