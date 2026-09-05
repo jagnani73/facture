@@ -1,13 +1,20 @@
 /**
  * `GET /health`.
  *
- * More than a liveness ping on purpose. During a demo the useful question is never "is
- * the process up" — it is "is the price on screen current". That needs the indexer cursor
- * next to the chain head, the issuance queue depth, and whether the facilitator is
- * answering, all in one response you can leave open in a tab.
+ * More than a liveness ping on purpose. During a demo the useful question is never "is the
+ * process up" — it is "can this venue still complete a trade". That wants both rails, the
+ * database, the issuance queue depth and the facilitator in one response you can leave open
+ * in a tab.
  *
- * Always returns a body. 200 when everything is up, 503 when a dependency the product
- * needs is not — a health check that lies is worse than none.
+ * It deliberately does NOT claim to answer "is the price on screen current". A quote is
+ * computed on read from mandates in the database rather than replayed from chain events, so
+ * its freshness is the database's business and nothing here can add to it. This route used
+ * to imply otherwise by publishing an indexer lag beside each head; the cursor behind that
+ * number was advanced by nothing, so the lag was the whole chain height and the 503 was
+ * permanent. The reasoning is recorded in `services/indexer.ts`.
+ *
+ * Always returns a body. 200 when everything the product needs is up, 503 when it is not —
+ * a health check that lies is worse than none, and one that is always red lies too.
  */
 
 import { Hono } from 'hono';
@@ -39,7 +46,7 @@ export const healthRoutes = new Hono<AppEnv>();
 healthRoutes.get('/health', async (c) => {
   const { env, chain } = getConfig();
 
-  const [db, indexer, facilitator] = await Promise.all([
+  const [db, chainStatus, facilitator] = await Promise.all([
     pingDb(),
     getIndexer().refresh(),
     checkFacilitator(),
@@ -49,7 +56,11 @@ healthRoutes.get('/health', async (c) => {
 
   // The facilitator being down does not make the service unhealthy — the book still
   // prices and lists. It only blocks the cash leg, so it is reported, not fatal.
-  const ok = db.ok && indexer.healthy;
+  //
+  // A chain that will not answer is fatal, and the asymmetry is the point: the asset leg is
+  // placed on Hedera and the cash leg on Arc, so an unreachable rail means no trade can
+  // complete at all, rather than one route being slower than usual.
+  const ok = db.ok && chainStatus.healthy;
 
   return c.json(
     {
@@ -60,10 +71,15 @@ healthRoutes.get('/health', async (c) => {
         database: db,
         facilitator: { ...facilitator, url: env.X402_FACILITATOR_URL },
       },
-      /** Cursor vs head, per chain. A stale price is invisible without this. */
+      /**
+       * Per-rail reachability. `state` is the answer and `head` is the evidence for it;
+       * `state` is carried explicitly so that "not asked yet" and "asked, no answer" stay
+       * two facts rather than one null head. No lag is reported: nothing in this build
+       * tracks a position that could be behind one.
+       */
       chains: {
-        arc: { ...indexer.arc, chainId: chain.arc.chainId },
-        hedera: { ...indexer.hedera, network: chain.hedera.network },
+        arc: { ...chainStatus.arc, chainId: chain.arc.chainId },
+        hedera: { ...chainStatus.hedera, network: chain.hedera.network },
       },
       /** Queue depth answers "why is this invoice still grey" in one glance. */
       issuance,

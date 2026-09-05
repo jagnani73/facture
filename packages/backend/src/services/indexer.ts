@@ -1,102 +1,110 @@
 /**
- * Chain head and indexer cursor.
+ * Chain reachability, for `GET /health`.
  *
- * Exists for `GET /health`. Knowing, mid-demo, whether the backend is behind the chain or
- * the chain itself has stalled is the difference between a ten-second recovery and a
- * confused two minutes on stage — a stale price is indistinguishable from a wrong price
- * unless something reports the lag.
+ * **This build does not index.** Nothing here follows an event stream, and nothing in the
+ * service records a stream position: the venue *originates* its chain transactions rather
+ * than reading them back, so what a trade stores is a transaction id and a consensus
+ * timestamp — identifiers, not a position anything could resume from.
  *
- * Heads are read for real, and cursors are read from and written to storage — an
- * in-memory cursor resets to null on every restart, which reads on the health page as
- * "never polled" rather than "four thousand blocks behind", and only one of those is fine.
+ * It used to claim otherwise, and the claim held `/health` at 503 from the first request.
+ * A cursor was published beside the head and the difference between them reported as a
+ * lag, but the only writer of that cursor was an `advance()` no caller ever reached, so
+ * the cursor stayed at the `"0"` the seed persists and the lag printed as the entire chain
+ * height. `advance()` is gone rather than left waiting for the loop that would have called
+ * it: dead code with a good comment is still dead code, and this dead code was wired to a
+ * red light.
+ *
+ * A verdict derived from a counter nothing moves is worse than no verdict, because a
+ * health check that is always red is a health check nobody reads — and what it was
+ * drowning out is real. Arc's RPC is the cash leg's rail; Hedera's mirror node is what the
+ * compliance gate reads and what a maturity payout's status is asked of. Whether those two
+ * answer is a genuine dependency probe, and it is all this can honestly report.
+ *
+ * The distinction the old cursor comment existed to protect outlives the cursor, because
+ * it was never really about cursors: **two different unknowns must not render as the same
+ * thing.** "We have not asked yet" and "we asked and the chain did not answer" have
+ * different fixes, and a head left at its last good value while the read fails is
+ * indistinguishable from a live one. So a failed read builds a fresh row with a null head
+ * instead of amending the previous one, and `state` names which case produced the row
+ * rather than leaving a reader to infer it from a triple of nulls.
+ *
+ * The exported `initIndexer` / `getIndexer` names are vestigial. Renaming them reaches
+ * `src/index.ts`, which this change deliberately leaves alone.
  */
 
 import { createPublicClient, http } from 'viem';
-import { arcChain, assetChainKey, cashChainKey, hedera } from '../chain.js';
-import { getStore } from '../db/store.js';
+import { arcChain, hedera } from '../chain.js';
 import type { Logger } from '../logger.js';
 import { rootLogger } from '../logger.js';
 
-export interface ChainCursor {
-  /** Last position this service has processed. null before the first poll. */
-  cursor: string | null;
-  /** Latest position on chain. null when the head could not be read. */
+/**
+ * Which of the three cases produced a row.
+ *
+ * Explicit rather than inferred from a null head, because "never asked" and "asked and
+ * got nothing back" are exactly the pair that collapsing costs you.
+ */
+export type ChainReachability = 'unread' | 'reachable' | 'unreachable';
+
+export interface ChainHead {
+  state: ChainReachability;
+  /** Latest position on chain, in the chain's own unit. Non-null only when reachable. */
   head: string | null;
-  /** head - cursor, in the chain's own unit. null when either side is unknown. */
-  lag: number | null;
+  /** When the head was last asked for — which is not when it was last answered. */
   lastPolledAt: string | null;
   error: string | null;
 }
 
-export interface IndexerStatus {
-  arc: ChainCursor;
-  hedera: ChainCursor;
-  /** False when either chain head is unreadable or the lag is beyond tolerance. */
+export interface ChainStatus {
+  arc: ChainHead;
+  hedera: ChainHead;
+  /** True only when both rails answered. A chain we cannot ask is not a healthy one. */
   healthy: boolean;
 }
 
-/** Blocks / consensus-seconds behind before health flips to degraded. */
-const ARC_LAG_TOLERANCE_BLOCKS = 25;
-const HEDERA_LAG_TOLERANCE_BLOCKS = 25;
-
-function emptyCursor(): ChainCursor {
-  return { cursor: null, head: null, lag: null, lastPolledAt: null, error: null };
-}
+const unread = (): ChainHead => ({ state: 'unread', head: null, lastPolledAt: null, error: null });
 
 export class Indexer {
   readonly #log: Logger;
-  readonly #arcClient = createPublicClient({ chain: arcChain, transport: http() });
-  #arc: ChainCursor = emptyCursor();
-  #hedera: ChainCursor = emptyCursor();
+  /**
+   * `cacheTime: 0` because viem otherwise serves `getBlockNumber` from a 4-second cache,
+   * and a cached head published under a fresh `lastPolledAt` is a stale head wearing a
+   * current timestamp — the same collapse this module exists to prevent, just smaller.
+   */
+  readonly #arcClient = createPublicClient({ chain: arcChain, transport: http(), cacheTime: 0 });
+  #arc: ChainHead = unread();
+  #hedera: ChainHead = unread();
 
   constructor(logger: Logger = rootLogger) {
     this.#log = logger.child({ svc: 'indexer' });
   }
 
-  status(): IndexerStatus {
-    const withinTolerance = (c: ChainCursor, tolerance: number): boolean =>
-      c.error === null && c.head !== null && (c.lag === null || c.lag <= tolerance);
-
+  status(): ChainStatus {
     return {
       arc: this.#arc,
       hedera: this.#hedera,
-      healthy:
-        withinTolerance(this.#arc, ARC_LAG_TOLERANCE_BLOCKS) &&
-        withinTolerance(this.#hedera, HEDERA_LAG_TOLERANCE_BLOCKS),
+      healthy: this.#arc.state === 'reachable' && this.#hedera.state === 'reachable',
     };
   }
 
-  /** Called by the health route and by the poll loop. Never throws. */
-  async refresh(): Promise<IndexerStatus> {
+  /** Called by the health route. Never throws: an outage is a value here, not an exception. */
+  async refresh(): Promise<ChainStatus> {
     const [arc, hed] = await Promise.all([this.#refreshArc(), this.#refreshHedera()]);
     this.#arc = arc;
     this.#hedera = hed;
     return this.status();
   }
 
-  async #refreshArc(): Promise<ChainCursor> {
+  async #refreshArc(): Promise<ChainHead> {
     const now = new Date().toISOString();
     try {
       const head = await this.#arcClient.getBlockNumber();
-      // Read from storage, not from memory. An in-memory cursor resets to null on every
-      // restart, which reports as "never polled" rather than "four thousand blocks
-      // behind" - the two look identical on the health page and only one of them is fine.
-      const cursor = await this.#readCursor(cashChainKey, this.#arc.cursor);
-      return {
-        cursor,
-        head: head.toString(),
-        lag: cursor === null ? null : Number(head - BigInt(cursor)),
-        lastPolledAt: now,
-        error: null,
-      };
+      return { state: 'reachable', head: head.toString(), lastPolledAt: now, error: null };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.#log.warn('arc head unreadable', { err: message });
-      return { ...this.#arc, head: null, lag: null, lastPolledAt: now, error: message };
+      return this.#unreachable('arc', err, now);
     }
   }
 
-  async #refreshHedera(): Promise<ChainCursor> {
+  async #refreshHedera(): Promise<ChainHead> {
     const now = new Date().toISOString();
     const url = `${hedera.mirrorNodeUrl.replace(/\/$/, '')}/api/v1/blocks?limit=1&order=desc`;
     try {
@@ -110,54 +118,20 @@ export class Indexer {
       const head = body.blocks?.[0]?.number;
       if (typeof head !== 'number') throw new Error('mirror node returned no block number');
 
-      const cursor = await this.#readCursor(assetChainKey, this.#hedera.cursor);
-      return {
-        cursor,
-        head: String(head),
-        lag: cursor === null ? null : head - Number(cursor),
-        lastPolledAt: now,
-        error: null,
-      };
+      return { state: 'reachable', head: String(head), lastPolledAt: now, error: null };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.#log.warn('hedera head unreadable', { err: message });
-      return { ...this.#hedera, head: null, lag: null, lastPolledAt: now, error: message };
+      return this.#unreachable('hedera', err, now);
     }
   }
 
   /**
-   * Read a persisted cursor, falling back to whatever is in memory.
-   *
-   * Never throws. A cursor that cannot be read is a degraded health page; letting it
-   * escape would make an unreachable database look like an unreachable chain.
+   * Built fresh rather than spread over the last good row: keeping the previous head
+   * through a failed read would publish the last known height as the current one.
    */
-  async #readCursor(chain: string, fallback: string | null): Promise<string | null> {
-    try {
-      return (await getStore().getCursor(chain)) ?? fallback;
-    } catch (err) {
-      this.#log.debug('cursor unreadable, using in-memory position', { chain, err });
-      return fallback;
-    }
-  }
-
-  /**
-   * Advanced by the ingest loop once events up to `position` are durably applied.
-   *
-   * Memory moves first and the write follows, because the caller has already applied the
-   * events: a failed write means the cursor is re-read from an older position on the next
-   * restart and some events are re-applied, which every consumer here is idempotent
-   * against. Advancing storage first and failing would skip them instead.
-   */
-  advance(chain: 'arc' | 'hedera', position: string): void {
-    const key = chain === 'arc' ? cashChainKey : assetChainKey;
-    if (chain === 'arc') this.#arc = { ...this.#arc, cursor: position };
-    else this.#hedera = { ...this.#hedera, cursor: position };
-
-    void getStore()
-      .setCursor(key, position)
-      .catch((err: unknown) => {
-        this.#log.warn('could not persist indexer cursor', { chain, position, err });
-      });
+  #unreachable(chain: string, err: unknown, at: string): ChainHead {
+    const message = err instanceof Error ? err.message : String(err);
+    this.#log.warn('chain head unreadable', { chain, err: message });
+    return { state: 'unreachable', head: null, lastPolledAt: at, error: message };
   }
 }
 
