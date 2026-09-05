@@ -1039,6 +1039,48 @@ the sweep's question backwards: not what has no caller, but what the callers act
   `draft`, which is exactly the distinction the Arc vault makes between committed capital and
   posted capital.
 
+### Resolved: the product moved to the machines, not the other way round
+
+**Built 2026-09-04**, off the status map above. Both machines now describe what the code does,
+and the code performs no edge they forbid. **No transition table changed** — that direction was
+chosen deliberately, because a machine edited to match the code is a machine that can never
+catch the code being wrong.
+
+- **Listing is an act.** `POST /v1/invoices/:id/list` and `/delist` move an invoice between
+  `confirmed` and `listed`, and **arming refuses anything not listed** — which is what closes
+  `confirmed -> sold`, the edge every trade in this repo's history performed. `listed` was
+  written by nothing but the seed until now, and the README's own "Never cut" path opens with
+  the word _List_, so the product was missing its first step.
+- **Quotability is unchanged, on purpose.** A `confirmed` invoice still gets an indicative
+  price, because the book renders in one pass with no chain reads and that is worth keeping.
+  Listing is the seller _offering_ it, and the offer binds at arm time rather than quote time.
+  Making `listed` the only quotable status would have been the tidier model and a slower book.
+- **Delisting refuses while a trade is armed.** Without that a seller could withdraw the offer
+  between the 402 and the buyer's signature. That is the Arc rail's lesson showing up in a
+  third place: a hole that was unreachable only because nothing could reach it, made reachable
+  by adding the route that reaches it.
+- **`funding` is the state the machine always said it was.** `fundMandate` walks
+  `draft -> funding -> active` hop by hop, and reaches `active` only when the Arc vault
+  actually backs the committed capital. A deployment with no vault promotes straight through,
+  because there is nothing to verify — the same call `chooseRail` makes. **An unreadable vault
+  parks rather than promotes:** an indeterminate answer must not put a price on the curve.
+- **A top-up to an `active` or `exhausted` mandate is still refused when it cannot be verified.**
+  That was already deliberate and has not changed. The machine has no `active -> funding` to
+  demote into, so the only alternative to refusing is an active mandate quoting capital nobody
+  posted.
+- **Every mandate status write goes through `transitionMandate`**, and the self-writes in
+  `allocate` / `release` / `withdrawFromMandate` omit the column entirely rather than performing
+  `X -> X`. `db/status.ts` holds the rules once: a lifecycle rule that drifted between the two
+  stores would make the whole suite agree with a store nobody deploys.
+- **`escrow.backed` had two copies of its comparison facing opposite directions** — one on the
+  list screen, one in the funding route. Now one, used by three callers. That is the same defect
+  as the settlement conversion, found in a second place.
+
+**The consequence to know about:** five seeded mandates still quote against capital nobody
+posted, and this does not undo that. Seeded rows are inserted `active` directly, so the walk
+never runs for them. It stops the next one, which is the position already taken when
+`ARC_MANDATE_VAULT_ADDRESS` was first wired.
+
 ### Declined: the secondary market, and the wall it hits
 
 **Decided 2026-09-04.** `sold -> listed` stays unbuilt. The edge is in `invoice-machine.ts` and
