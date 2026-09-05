@@ -343,15 +343,18 @@ invoiceRoutes.post('/:id/confirmation-request', async (c) => {
  * why the service having no caller was a gap rather than an omission.
  *
  * **The cash leg comes back `pending` and that is the honest answer.** The money that
- * settles a matured receivable is the debtor's payment, and there is no debtor payment
- * rail in this build. What this does is real: it names the current holder, writes the
- * outcome to the settlement-outcome ledger (which is what moves the customer's rating),
- * and releases the mandate's capital so an exhausted bid can quote again. What it does not
- * do is claim anyone was paid.
+ * settles a matured receivable is the debtor's payment, and a debtor here has no wallet by
+ * design — that is what makes confirmation work. What this does is real: it names the
+ * current holder, writes the outcome to the settlement-outcome ledger (which is what moves
+ * the customer's rating), releases the mandate's capital so an exhausted bid can quote
+ * again, and puts the obligation on the ledger as a Hedera Scheduled Transaction paying
+ * face value to that holder. What it does not do is claim anyone was paid.
  *
- * Operator-triggered, because nothing observes debtor payments here. When a rail exists,
- * the trigger is that observation and a Hedera Scheduled Transaction carries the payout —
- * one-shot maturity settlement is exactly what `ScheduleCreateTransaction` is for.
+ * The schedule is created **unsigned**, drawn on the venue's collection account. Signing it
+ * is the venue's statement that the debtor's money arrived, and that is a separate act from
+ * the receivable maturing — so `payout` is an obligation anyone can look up, not a receipt.
+ *
+ * Operator-triggered, because nothing observes debtor payments here.
  */
 invoiceRoutes.post('/:id/mature', async (c) => {
   const { id } = readParams(c, uuidParam);
@@ -371,6 +374,13 @@ invoiceRoutes.post('/:id/mature', async (c) => {
     alreadyRecorded: result.alreadyRecorded,
     assetLeg: result.assetLeg,
     cashLeg: result.cashLeg,
+    /**
+     * The obligation as an on-chain object: an unsigned Hedera Scheduled Transaction paying
+     * face value to the holder. `null` when no collection account is configured.
+     */
+    payout: result.payout,
+    /** Why there is no payout when there should have been one. */
+    payoutError: result.payoutError,
     maturedAt: result.settledAt,
     proofUrl: `/v1/trades/${result.tradeId}/proof`,
   });

@@ -1,0 +1,1 @@
+ALTER TABLE `trades` ADD `maturity_schedule_id` text;

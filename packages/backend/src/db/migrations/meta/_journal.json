@@ -15,6 +15,13 @@
       "when": 1788267578940,
       "tag": "0001_trade_units",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788333719252,
+      "tag": "0002_maturity_schedule",
+      "breakpoints": true
     }
   ]
 }

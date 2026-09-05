@@ -30,6 +30,7 @@ import { rootLogger } from '../logger.js';
 import { accountIdToEvmAddress, getAtsAdapter, operatorEvmAddress } from './ats.js';
 import type { SettlementOutcome } from './rating.js';
 import { ratingService } from './rating.js';
+import { getScheduleAdapter } from './schedule.js';
 import { getX402Client } from './x402.js';
 import type { PaymentRequirements, ResourceInfo } from './x402.js';
 
@@ -112,9 +113,46 @@ export interface SettlementResult {
   settledAt: string;
 }
 
+/**
+ * The scheduled payout for a matured receivable, with somewhere to go and look at it.
+ *
+ * Wider than the rail's own `MaturityPayoutReceipt` because a replay answers from the stored
+ * schedule id rather than from the ledger. The id and the explorer link are always known;
+ * the details of the `ScheduleCreate` that produced it are only known to the call that made
+ * it, and re-reading them would be a paid query to restate something already recorded.
+ */
+export interface MaturityPayoutLeg {
+  scheduleId: string;
+  transactionId: string | null;
+  consensusAt: string | null;
+  payerAccountId: string | null;
+  payeeAccountId: string | null;
+  amountMinor: string;
+  executed: boolean;
+  explorerUrl: string;
+}
+
 export interface MaturityResult extends SettlementResult {
   /** Who the face value is owed to: whoever holds the paper now. */
   holder: { buyerId: string; mandateId: string; name: string | null };
+  /**
+   * The obligation, as an on-chain object: a Hedera Scheduled Transaction paying the face
+   * value from the venue's collection account to the current holder.
+   *
+   * `null` when no collection account is configured, which is the truthful answer for a
+   * deployment with no rail rather than a reason to fail. It is created **unsigned** — the
+   * signature is the venue's statement that the debtor's money arrived, and maturity is not
+   * that statement.
+   */
+  payout: MaturityPayoutLeg | null;
+  /**
+   * Why there is no payout, when there should have been one.
+   *
+   * Separate from `payout: null` on purpose. A deployment with no collection account and a
+   * deployment whose scheduling call failed are not the same fact, and collapsing them
+   * would turn a broken rail into a configuration that merely looks quiet.
+   */
+  payoutError: string | null;
   /** How the receivable resolved, as it was written to the settlement-outcome ledger. */
   outcome: SettlementOutcome;
   /**
@@ -716,12 +754,78 @@ export const settlementService: SettlementService = {
         `current holder ${holder?.name ?? holderTrade.buyerId}.`,
     });
 
+    /*
+     * The obligation becomes an on-chain object here.
+     *
+     * Scheduled last, and deliberately after the ledger write and the capital release: a
+     * receivable has matured whether or not a payout could be arranged, and a rail that is
+     * down must not be able to un-mature it or strand a mandate's capital. So a failure
+     * here is reported, not thrown — the alternative is an endpoint that half-succeeds and
+     * says nothing, which is the shape of bug this whole path is careful about.
+     *
+     * The amount goes through the same conversion the trade's cash leg used, so the two
+     * legs of one receivable cannot disagree about what a unit of its currency settles as.
+     */
+    const payoutAmount = getX402Client().settlementAmount(
+      invoice.faceValue,
+      CURRENCY_DECIMALS[invoice.currency as Currency] ?? 2,
+    );
+
+    let payout: MaturityPayoutLeg | null = null;
+    let payoutError: string | null = null;
+
+    if (holderTrade.maturityScheduleId !== null) {
+      /*
+       * Already arranged. Reported rather than repeated: a second schedule against one
+       * receivable is a second claim on the same face value, and the venue would have two
+       * obligations on the ledger with no way to tell which one it meant. The stored id is
+       * the record of the first, which is the one to sign or delete.
+       */
+      payout = {
+        scheduleId: holderTrade.maturityScheduleId,
+        transactionId: null,
+        consensusAt: null,
+        payerAccountId: null,
+        payeeAccountId: holder?.hederaAccountId ?? null,
+        amountMinor: payoutAmount.toString(10),
+        executed: false,
+        explorerUrl: explorer.hederaSchedule(holderTrade.maturityScheduleId),
+      };
+    } else {
+      try {
+        const receipt = await getScheduleAdapter().schedulePayout({
+          invoiceId,
+          tradeId: holderTrade.id,
+          payeeAccount: holder?.hederaAccountId ?? '',
+          amountMinor: payoutAmount,
+        });
+        if (receipt !== null) {
+          /*
+           * Written before the result is returned, so a caller that retries after a dropped
+           * connection finds the schedule rather than making another one. The schedule
+           * already exists on the ledger at this point; losing its id here is the failure
+           * that costs a duplicate obligation.
+           */
+          await store.updateTrade(holderTrade.id, { maturityScheduleId: receipt.scheduleId });
+          payout = { ...receipt, explorerUrl: explorer.hederaSchedule(receipt.scheduleId) };
+        }
+      } catch (err) {
+        payoutError = err instanceof Error ? err.message : String(err);
+        rootLogger.error('maturity payout could not be scheduled', {
+          invoiceId,
+          tradeId: holderTrade.id,
+          err,
+        });
+      }
+    }
+
     rootLogger.info('receivable matured', {
       invoiceId,
       tradeId: holderTrade.id,
       holder: holderTrade.buyerId,
       outcome,
       alreadyRecorded,
+      scheduleId: payout?.scheduleId ?? null,
     });
 
     return {
@@ -744,10 +848,15 @@ export const settlementService: SettlementService = {
           holderTrade.assetTxId === null ? null : explorer.hederaTx(holderTrade.assetTxId),
       },
       /*
-       * `pending`, with no transaction and no explorer link. The face value is owed to the
-       * holder and nobody has paid it: there is no debtor payment rail here, and a cash leg
-       * reported as settled would be a receipt for a payment that did not happen on the one
-       * screen whose whole job is to be checkable.
+       * `pending`, with no transaction and no explorer link — and that stays true even when
+       * a payout was scheduled, because a schedule is an obligation rather than a payment.
+       * It executes when the collection key signs, which is the venue's statement that the
+       * debtor's money arrived; until then nobody has been paid and this leg must not say
+       * otherwise on the one screen whose whole job is to be checkable.
+       *
+       * What changed is that `pending` now has something behind it. `payout` carries the
+       * schedule id, so a holder can read the obligation on the mirror node instead of
+       * taking our word that they are owed something.
        */
       cashLeg: {
         chain: challenge.accepted.network.startsWith('hedera') ? 'hedera' : 'arc',
@@ -759,6 +868,8 @@ export const settlementService: SettlementService = {
         payer: null,
         explorerUrl: null,
       },
+      payout,
+      payoutError,
       settledAt: now.toISOString(),
     };
   },

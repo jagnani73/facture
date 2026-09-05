@@ -252,6 +252,41 @@ Two things follow. The live testnet contracts carry the old strings in their byt
 redeploying. And `ON_CHAIN_REASON_CODE` in `packages/agent/src/mandate.ts` still translates to the
 old names - it is now an identity map for the codes it covers, and should be retired or corrected.
 
+### Resolved: the maturity payout rail
+
+**A debtor has no wallet, and that is load-bearing rather than missing.** Confirmation works
+because the customer is asked to acknowledge their own accounts payable through a link with one
+sentence and two buttons — no wallet, no signup. Give them a key to manage and the behavioural
+argument collapses. So the payout at maturity **cannot** be a transfer the debtor signs, and any
+design that assumes one is wrong at the root.
+
+The money therefore arrives the way it arrives at a factoring house: into a **collection account**
+the venue operates, off-chain, by whatever rail the debtor already uses. `POST
+/v1/invoices/:id/mature` makes the _obligation_ an on-chain object at the moment of maturity — a
+Hedera Scheduled Transaction paying face value to the current holder — and the payment executes
+against it when the money is actually there.
+
+- **The schedule must not be drawn on the operator.** A `ScheduleCreateTransaction` executes as
+  soon as its required signatures are present, and the operator signs the create. Fund the payout
+  from the operator and it fires on the spot, reporting the debtor as having paid at the instant
+  the receivable matured. `MATURITY_COLLECTION_ACCOUNT_ID` must be a different account;
+  `services/schedule.ts` refuses the configuration rather than trusting a comment.
+- **The cash leg stays `pending` even when a payout was scheduled.** A schedule is an obligation,
+  not a receipt. It becomes a payment when the collection key signs, which is the venue's
+  statement that the debtor's money landed — a separate act from the receivable maturing.
+- **The schedule id is persisted** on the holding trade (`trades.maturity_schedule_id`, migration
+  `0002`). Without it a second call creates a second schedule: two claims on one face value, and
+  no way to tell which obligation the venue meant. Maturity is observable twice by design, so
+  this is not hypothetical.
+- **A rail that is down cannot un-mature a receivable.** The ledger write and the capital release
+  happen first and a scheduling failure comes back as `payoutError`, never as a throw. A null
+  `payout` with no error means no collection account is configured; those two are different facts
+  and are not collapsed.
+- **HBAR only, and no expiration time is set.** An HTS payout owes the holder an association step
+  that does not exist yet, and long-term scheduled transactions are network-gated — the default
+  schedule lifetime applies. Both are stated in `services/schedule.ts`. **Untested against
+  testnet**: no schedule has been created for real yet.
+
 ## Cut list
 
 Ordered by what leaves the product most intact, not by which track is cheapest to lose. A prize is

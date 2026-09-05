@@ -433,6 +433,17 @@ export const trades = sqliteTable(
     hcsTopicId: text('hcs_topic_id'),
     hcsSequenceNumber: bigintText('hcs_sequence_number'),
 
+    /**
+     * The Hedera Scheduled Transaction that pays this trade's holder at maturity, `0.0.x`.
+     *
+     * Stored because the schedule is an obligation that exists on the ledger whether or not
+     * this service remembers it. Without a record, a second call to maturity would create a
+     * second schedule — two claims on one face value — and the venue would have no way to
+     * find the first one to sign or delete it. This column is what makes the payout
+     * idempotent, and it is set only on the call that actually matured the receivable.
+     */
+    maturityScheduleId: text('maturity_schedule_id'),
+
     createdAt: instant('created_at').notNull().default(NOW_MS),
     settledAt: instant('settled_at'),
   },

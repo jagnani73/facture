@@ -8,6 +8,8 @@
  * - the database is `MemoryStore`, which implements the whole `Store` contract including
  *   the clamping, the idempotency and the ordering the SQLite one promises;
  * - Hedera is a fake `AtsAdapter` that records what it was asked to do;
+ * - the maturity payout rail is a fake `ScheduleAdapter` that records what it was asked to
+ *   schedule, and can answer as an unconfigured or a broken rail;
  * - the x402 facilitator is a stubbed `fetch` answering `/supported`, `/verify`, `/settle`.
  *
  * Nothing here stubs a route, a service or the pricing. Those are exercised as shipped.
@@ -22,6 +24,8 @@ import { setStore } from '../src/db/store.js';
 import { createLogger, setRootLogger } from '../src/logger.js';
 import type { AtsAdapter, HoldReceipt } from '../src/services/ats.js';
 import { setAtsAdapter } from '../src/services/ats.js';
+import type { MaturityPayoutRequest, ScheduleAdapter } from '../src/services/schedule.js';
+import { setScheduleAdapter } from '../src/services/schedule.js';
 import type { ComplianceDecision, ComplianceGate } from '../src/services/compliance.js';
 import { setComplianceGate } from '../src/services/compliance.js';
 import { initIssuanceQueue } from '../src/services/issuance.js';
@@ -50,10 +54,56 @@ export interface Harness {
   app: ReturnType<typeof createApp>;
   store: MemoryStore;
   ats: RecordingAtsAdapter;
+  /** The maturity payout rail. Records what it was asked to schedule. */
+  schedule: RecordingScheduleAdapter;
   seeded: Awaited<ReturnType<typeof seedStore>>;
   /** Everything the facilitator was asked. Lets a test assert verify-before-settle. */
   facilitatorCalls: string[];
   restore(): void;
+}
+
+export interface RecordingScheduleAdapter extends ScheduleAdapter {
+  scheduled: MaturityPayoutRequest[];
+  /** Set to make the rail answer `null`, as an unconfigured collection account does. */
+  disabled: boolean;
+  /** Set to make scheduling throw, which must not un-mature the receivable. */
+  fails: string | undefined;
+}
+
+/**
+ * A rail that records rather than schedules.
+ *
+ * `executed` is hardcoded `false` and there is deliberately no way to flip it here: a
+ * payout that reports itself executed at the moment of creation is precisely the bug the
+ * collection-account design exists to prevent, and a fake that could express it would let a
+ * test pass while the real rail lied.
+ */
+function createRecordingSchedule(): RecordingScheduleAdapter {
+  let counter = 0;
+  const adapter: RecordingScheduleAdapter = {
+    scheduled: [],
+    disabled: false,
+    fails: undefined,
+
+    schedulePayout(request) {
+      if (adapter.fails !== undefined) return Promise.reject(new Error(adapter.fails));
+      if (adapter.disabled) return Promise.resolve(null);
+      counter += 1;
+      adapter.scheduled.push(request);
+      return Promise.resolve({
+        scheduleId: `0.0.${7_000_000 + counter}`,
+        transactionId: `0.0.5512@1756000400.00000000${counter}`,
+        consensusAt: new Date('2026-09-01T09:32:40.000Z').toISOString(),
+        payerAccountId: '0.0.5599',
+        payeeAccountId: /^\d+\.\d+\.\d+$/.test(request.payeeAccount)
+          ? request.payeeAccount
+          : '0.0.6098431',
+        amountMinor: request.amountMinor.toString(10),
+        executed: false,
+      });
+    },
+  };
+  return adapter;
 }
 
 export interface RecordingAtsAdapter extends AtsAdapter {
@@ -232,6 +282,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 
   const ats = createRecordingAts();
   setAtsAdapter(ats);
+  const schedule = createRecordingSchedule();
+  setScheduleAdapter(schedule);
   setComplianceGate(options.gate ?? createAllowingGate());
   setNotifier(silentNotifier);
 
@@ -261,12 +313,14 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     app: createApp(),
     store,
     ats,
+    schedule,
     seeded,
     facilitatorCalls: facilitator.calls,
     restore: () => {
       facilitator.restore();
       setStore(undefined);
       setAtsAdapter(undefined);
+      setScheduleAdapter(undefined);
       setComplianceGate(undefined);
       resetConfig();
     },

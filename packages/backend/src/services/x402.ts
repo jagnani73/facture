@@ -268,6 +268,25 @@ export class X402Client {
   }
 
   /**
+   * Invoice money in the settlement asset's smallest units, under this client's own
+   * decimals and scale.
+   *
+   * Exposed because the cash leg is not the only thing that has to name an amount in the
+   * settlement asset — the maturity payout is denominated the same way, and a caller that
+   * reached for the environment variables instead would be a second definition of the
+   * convention. Two legs of one receivable disagreeing about what a unit of its currency
+   * settles as is not a difference anyone would notice until money moved.
+   */
+  settlementAmount(amountMinor: bigint, currencyDecimals: number): bigint {
+    return toSettlementAmount(
+      amountMinor,
+      currencyDecimals,
+      this.#opts.assetDecimals,
+      this.#opts.settlementScalePpm,
+    );
+  }
+
+  /**
    * Builds the 402 challenge for one trade's cash leg.
    *
    * Returns the requirements and the resource description separately, because in

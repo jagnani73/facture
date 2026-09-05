@@ -85,6 +85,8 @@ export const explorer = {
   hederaTx: (id: string): string => explorerTxUrl(assetChainKey, id),
   hederaAccount: (id: string): string => explorerAddressUrl(assetChainKey, id),
   hederaToken: (id: string): string => `${hedera.explorerUrl}/token/${id}`,
+  /** A scheduled transaction, which is how a maturity payout is visible before it executes. */
+  hederaSchedule: (id: string): string => `${hedera.explorerUrl}/schedule/${id}`,
   hederaTopicMessage: (topicId: string, seq: number): string =>
     `${hedera.explorerUrl}/topic/${topicId}/message/${seq}`,
 } as const;

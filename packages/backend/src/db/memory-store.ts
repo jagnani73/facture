@@ -609,6 +609,7 @@ export class MemoryStore implements Store {
       complianceCheckedAt: row.complianceCheckedAt ?? null,
       hcsTopicId: row.hcsTopicId ?? null,
       hcsSequenceNumber: row.hcsSequenceNumber ?? null,
+      maturityScheduleId: row.maturityScheduleId ?? null,
       createdAt: row.createdAt ?? this.#now(),
       settledAt: row.settledAt ?? null,
     };

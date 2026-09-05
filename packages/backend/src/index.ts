@@ -23,6 +23,7 @@ import {
   initIssuanceQueue,
 } from './services/issuance.js';
 import { createLoggingNotifier, setNotifier } from './services/notifier.js';
+import { initScheduleAdapter } from './services/schedule.js';
 import { DEFAULT_NETWORK, DEFAULT_SCHEME, initX402Client } from './services/x402.js';
 
 function loadConfigOrExit(): Config {
@@ -60,6 +61,16 @@ function boot(): void {
     regulation: regulationKeyFor(env.ATS_REGULATION_TYPE),
     gasLimit: env.ISSUANCE_GAS_LIMIT,
     network: hedera.network,
+    logger: log,
+  });
+
+  initScheduleAdapter({
+    operatorId: env.HEDERA_OPERATOR_ID,
+    operatorKey: env.HEDERA_OPERATOR_KEY,
+    network: hedera.network,
+    // Unset disables the maturity payout rail rather than simulating one.
+    collectionAccountId: env.MATURITY_COLLECTION_ACCOUNT_ID,
+    assetMode: env.X402_ASSET_MODE,
     logger: log,
   });
 

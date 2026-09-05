@@ -54,6 +54,15 @@ export const envSchema = z
     ISSUANCE_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(4_000),
     ISSUANCE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(6),
     ISSUANCE_BACKOFF_BASE_MS: z.coerce.number().int().positive().default(2_000),
+    /**
+     * The account a matured receivable is paid from. Unset disables the payout rail.
+     *
+     * Must not be the operator. The operator signs the `ScheduleCreate`, so a payout drawn
+     * on it would already hold its own required signature and execute on creation — which
+     * would report the debtor as having paid at the instant the receivable matured.
+     * `services/schedule.ts` refuses that configuration rather than trusting this comment.
+     */
+    MATURITY_COLLECTION_ACCOUNT_ID: ACCOUNT_ID.optional(),
 
     // Arc
     ARC_SETTLEMENT_PRIVATE_KEY: HEX_32,

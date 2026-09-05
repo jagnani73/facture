@@ -52,12 +52,17 @@ describe('maturity', () => {
     expect((await h.store.getInvoice(invoiceId))?.status).toBe('matured');
   });
 
-  it('reports the cash leg as pending, because no debtor payment rail exists here', async () => {
+  it('reports the cash leg as pending, because a scheduled payout is not a payment', async () => {
     const result = await settlementService.settleAtMaturity(h.seeded.invoiceIds['INV-2033'] ?? '');
 
     expect(result.cashLeg.state).toBe('pending');
     expect(result.cashLeg.transaction).toBeNull();
     expect(result.cashLeg.explorerUrl).toBeNull();
+
+    // And it stays pending even though a payout WAS arranged. The schedule is an
+    // obligation waiting on the collection key; nobody has been paid until it executes.
+    expect(result.payout).not.toBeNull();
+    expect(result.payout?.executed).toBe(false);
   });
 
   it('gives the capital back so an exhausted mandate can quote again', async () => {
@@ -186,6 +191,126 @@ describe('maturity', () => {
     const result = await settlementService.settleAtMaturity(h.seeded.invoiceIds['INV-2033'] ?? '');
 
     expect(result.outcome).toBe('late');
+  });
+});
+
+/**
+ * The payout rail.
+ *
+ * A debtor here has no wallet, by design — that is what lets confirmation be a link with
+ * one sentence and two buttons. So the payout cannot be a transfer the debtor signs, and
+ * what maturity produces instead is an unsigned obligation drawn on the venue's collection
+ * account: an on-chain object saying who is owed what against which receivable, which
+ * executes when the venue signs to say the money arrived.
+ *
+ * The line these tests defend is that arranging a payout is not the same event as making
+ * one, and nothing on the maturity path may quietly promote the first into the second.
+ */
+describe('the maturity payout rail', () => {
+  it('addresses the obligation to whoever holds the paper now', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    const result = await settlementService.settleAtMaturity(invoiceId);
+
+    expect(h.schedule.scheduled).toHaveLength(1);
+    const request = h.schedule.scheduled[0];
+    expect(request?.invoiceId).toBe(invoiceId);
+    expect(request?.tradeId).toBe(result.tradeId);
+
+    // The payee is the CURRENT holder's Hedera account, read off the buyer the holding
+    // trade names — not the seller, and not whoever was matched first.
+    const holder = await h.store.getBuyer(result.holder.buyerId);
+    expect(request?.payeeAccount).toBe(holder?.hederaAccountId);
+    expect(result.payout?.payeeAccountId).toBe(holder?.hederaAccountId);
+  });
+
+  it('is an obligation and not a receipt', async () => {
+    const result = await settlementService.settleAtMaturity(h.seeded.invoiceIds['INV-2033'] ?? '');
+
+    /*
+     * The whole design in one assertion. A schedule that reported itself executed at the
+     * moment of creation would mean the payout fired without anyone signing for the
+     * debtor's money — which is what happens if the payout is ever drawn on the operator,
+     * since the operator's signature on the ScheduleCreate would already satisfy it.
+     */
+    expect(result.payout?.executed).toBe(false);
+    expect(result.payout?.scheduleId).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(result.payout?.explorerUrl).toContain(`/schedule/${result.payout?.scheduleId}`);
+    expect(result.payoutError).toBeNull();
+  });
+
+  it('denominates the payout the way the cash leg denominated the purchase', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    const invoice = await h.store.getInvoice(invoiceId);
+
+    const result = await settlementService.settleAtMaturity(invoiceId);
+
+    /*
+     * Face value is USD minor units (2 decimals) and the settlement asset is HBAR
+     * (tinybars, 8), so the payout is the face shifted by six — NOT the minor units passed
+     * through unchanged, which would read as tinybars and settle a hundred-millionth of the
+     * amount. Both legs go through the same conversion on the x402 client for exactly this
+     * reason.
+     */
+    expect(invoice?.faceValue).toBe(9_500_000n);
+    expect(h.schedule.scheduled[0]?.amountMinor).toBe(9_500_000n * 1_000_000n);
+    expect(result.payout?.amountMinor).toBe((9_500_000n * 1_000_000n).toString(10));
+  });
+
+  it('says there is no rail rather than inventing one, when none is configured', async () => {
+    h.schedule.disabled = true;
+
+    const result = await settlementService.settleAtMaturity(h.seeded.invoiceIds['INV-2033'] ?? '');
+
+    // No payout, and no error either: an unconfigured collection account is a deployment
+    // choice, not a fault, and the two must not be reported as the same thing.
+    expect(result.payout).toBeNull();
+    expect(result.payoutError).toBeNull();
+    expect(result.cashLeg.state).toBe('pending');
+  });
+
+  it('still matures the receivable when the rail is down, and says why', async () => {
+    h.schedule.fails = 'SCHEDULE_CREATE refused: INSUFFICIENT_PAYER_BALANCE';
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+
+    const result = await settlementService.settleAtMaturity(invoiceId);
+
+    /*
+     * A receivable has matured whether or not a payout could be arranged. The ledger write
+     * and the capital release happen before this call, so a broken rail must not be able to
+     * un-mature the invoice or strand a mandate's capital — and must not fail silently
+     * either, which is why the reason comes back rather than being logged and dropped.
+     */
+    expect(result.payout).toBeNull();
+    expect(result.payoutError).toContain('INSUFFICIENT_PAYER_BALANCE');
+    expect((await h.store.getInvoice(invoiceId))?.status).toBe('matured');
+  });
+
+  it('gives the mandate its capital back even when the rail is down', async () => {
+    h.schedule.fails = 'network unreachable';
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    const trade = await h.store.getTrade(h.seeded.tradeIds['TRD-4417'] ?? '');
+    const before = (await h.store.getMandate(trade?.mandateId ?? ''))?.allocatedMinor ?? 0n;
+
+    await settlementService.settleAtMaturity(invoiceId);
+
+    const after = (await h.store.getMandate(trade?.mandateId ?? ''))?.allocatedMinor ?? 0n;
+    expect(after).toBe(before - (trade?.proceedsMinor ?? 0n));
+  });
+
+  it('does not schedule a second obligation when maturity is observed twice', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+
+    await settlementService.settleAtMaturity(invoiceId);
+    const replay = await settlementService.settleAtMaturity(invoiceId);
+
+    /*
+     * Maturity is observable twice — a mirror-node replay, an operator pressing the button
+     * again — and two schedules against one receivable is two claims on the same face
+     * value. The replay reports the receivable as already recorded; it must not arrange a
+     * second payout.
+     */
+    expect(replay.alreadyRecorded).toBe(true);
+    expect(h.schedule.scheduled).toHaveLength(1);
   });
 });
 
