@@ -622,6 +622,31 @@ export const settlementService: SettlementService = {
           '— by someone calling reclaimPayout, which this venue does not do automatically — ' +
           'and this receivable needs a new sale rather than a retry of this one.',
       );
+    } else if (
+      existing.price !== priceUsdcMinor ||
+      existing.seller.toLowerCase() !== intent.sellerArcAddress.toLowerCase()
+    ) {
+      /*
+       * A binding that exists but does not match this trade.
+       *
+       * `executePayout` takes no amount and no payee: it pays `payout.price` to
+       * `payout.seller` off the stored binding, and that binding **cannot be corrected**.
+       * So proceeding here would move whatever the chain already agreed to while the venue
+       * wrote a receipt describing this trade's numbers — a proof view stating an amount and
+       * a payee that the transaction beside it contradicts, which is the one thing that
+       * screen exists to make impossible.
+       *
+       * It should not be reachable: a match id is derived from a trade id and every arming
+       * inserts a fresh trade. Reaching it means the derivation changed or a trade id
+       * repeated, and both are worth stopping for rather than paying through.
+       */
+      throw conflict(
+        'conflict',
+        `Trade ${intent.tradeId} is bound on chain to pay ${existing.price} to ` +
+          `${existing.seller}, but this trade is for ${priceUsdcMinor} to ` +
+          `${intent.sellerArcAddress}. A match binding cannot be changed, so this sale is ` +
+          'refused rather than settled against terms it does not match.',
+      );
     }
 
     /*
@@ -633,11 +658,7 @@ export const settlementService: SettlementService = {
     const secretHash = keccak256(secret);
     await store.updateTrade(intent.tradeId, { arcSecret: secret });
 
-    const payout = await escrow.executePayout({
-      tradeId: intent.tradeId,
-      attempt: 0,
-      secretHash,
-    });
+    const payout = await escrow.executePayout({ tradeId: intent.tradeId, secretHash });
     await store.updateTrade(intent.tradeId, {
       arcLockId: payout.lockId,
       cashTransaction: payout.transactionHash,

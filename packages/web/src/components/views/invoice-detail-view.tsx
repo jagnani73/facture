@@ -583,19 +583,46 @@ function SellPanel({
     return <SaleAwaitingPayment outcome={outcome} proceedsLabel={proceedsLabel} />;
   }
 
-  if (outcome !== null && outcome.ok) {
+  if (outcome !== null && outcome.ok && outcome.state === 'settled') {
+    /*
+     * The proof link belongs here more than anywhere else on the page.
+     *
+     * Until now this panel had none — while the *half-settled* panel, the ending nobody
+     * wants, linked to its proof. A seller who has just sold a receivable is exactly the
+     * person who wants to check both legs, and the venue publishes a page for it.
+     *
+     * It is conditional because the demo book has no trade behind it. A link to a proof that
+     * does not exist would be worse than no link on the one flow whose claim is checkability.
+     */
     return (
       <div className="mt-5 rounded-sm border border-pos/40 bg-pos-wash px-4 py-4">
         <p className="text-sm">
           Sold for <span className="num font-medium">{proceedsLabel}</span> to {mandateName}.
         </p>
         <p className="mt-1 text-xs text-muted">{outcome.note}</p>
-        <Link
-          href={`/book/${encodeURIComponent(invoiceId)}`}
-          className={`${buttonClasses('secondary', 'sm')} mt-3`}
-        >
-          See this invoice again
-        </Link>
+        {outcome.rail === 'arc-vault' ? (
+          <p className="mt-2 text-xs text-muted">
+            Your proceeds are locked for you in the Arc escrow, not yet in your wallet. Claim them
+            with the key that holds the paper — the proof view carries the lock and the preimage,
+            and the lock does not stay open indefinitely.
+          </p>
+        ) : null}
+        <div className="mt-3 flex flex-wrap gap-2">
+          {outcome.trade === null ? null : (
+            <Link
+              href={`/proof/${encodeURIComponent(outcome.trade.id)}`}
+              className={buttonClasses('secondary', 'sm')}
+            >
+              See both legs
+            </Link>
+          )}
+          <Link
+            href={`/book/${encodeURIComponent(invoiceId)}`}
+            className={buttonClasses('secondary', 'sm')}
+          >
+            See this invoice again
+          </Link>
+        </div>
       </div>
     );
   }

@@ -113,33 +113,46 @@ export type LockStatus = (typeof LOCK_STATUS)[number];
  * authentication — `IMandateVault` says so plainly, and the four bounds in its header are
  * what actually limit a compromised relay.
  */
-const domainId = (domain: string, tradeId: string, attempt: number): `0x${string}` =>
-  keccak256(toHex(`facture.${domain}.v1:${tradeId}:${attempt}`));
-
-/** One match per trade. Fixed at attempt 0, because a match binding cannot be replaced. */
-export const matchIdFor = (tradeId: string): `0x${string}` => domainId('match', tradeId, 0);
+const domainId = (domain: string, tradeId: string): `0x${string}` =>
+  keccak256(toHex(`facture.${domain}.v1:${tradeId}`));
 
 /**
- * Authorisation ids are single-use in the vault, shared across releases and payouts.
+ * ## Retrying is arming a new trade, and that is the whole mechanism
  *
- * Carries the attempt because a payout that reverted did NOT consume its authorisation — the
- * whole transaction rolls back — so reusing the id is safe, while a *succeeded* payout burns
- * it forever. Keeping them aligned with the lock id means one attempt number describes the
- * whole retry rather than two that can drift apart.
+ * An earlier version of these took an `attempt` number, and documented bumping it to recover
+ * from a squatted lock id. **Nothing ever bumped it** — every call site passed `0`, there was
+ * no retry loop, and the parameter described a recovery path that did not exist. It is gone
+ * rather than left as an unused hook, because a documented mechanism with no caller is worse
+ * than no mechanism: the next person reads it as a guarantee.
+ *
+ * The real recovery is simpler and already works. `prepareTrade` inserts a fresh trade row on
+ * every arming, so a retry has a new trade id, and therefore a new match id, a new
+ * authorisation id and a new lock id. A burned lock id can never be reused by the trade that
+ * burned it, and no other trade would ever derive it.
  */
-export const authIdFor = (tradeId: string, attempt: number): `0x${string}` =>
-  domainId('auth', tradeId, attempt);
+
+/** One match per trade, permanently: a match binding cannot be replaced once written. */
+export const matchIdFor = (tradeId: string): `0x${string}` => domainId('match', tradeId);
 
 /**
- * Lock ids are caller-supplied in a **permissionless, shared** escrow, so one can be squatted.
+ * Single-use in the vault, and shared across releases and payouts.
+ *
+ * A payout that reverted did NOT consume its authorisation — the whole transaction rolls back
+ * — so the id survives a failed attempt. A succeeded one burns it forever, which is caught
+ * earlier by the `executed` check on the binding.
+ */
+export const authIdFor = (tradeId: string): `0x${string}` => domainId('auth', tradeId);
+
+/**
+ * Caller-supplied in a **permissionless, shared** escrow, so one can in principle be squatted.
  *
  * `openLock` rejects any id it has ever seen — `Claimed` and `Refunded` included, since a lock
  * id is burned forever — and that revert propagates out of `executePayout` as
  * `DvpEscrow.LockExists`, decoded against the escrow's ABI rather than the vault's. The whole
- * call reverts, so nothing was consumed and the retry is free: bump the attempt.
+ * call reverts, so nothing is consumed and the sale is refused; the seller arms again and gets
+ * a new id with the new trade.
  */
-export const lockIdFor = (tradeId: string, attempt: number): `0x${string}` =>
-  domainId('lock', tradeId, attempt);
+export const lockIdFor = (tradeId: string): `0x${string}` => domainId('lock', tradeId);
 
 export interface ArcEscrow {
   /** Whether a vault is configured at all. False means funding is recorded, not verified. */
@@ -193,7 +206,6 @@ export interface ArcEscrow {
    */
   executePayout(input: {
     tradeId: string;
-    attempt: number;
     secretHash: `0x${string}`;
   }): Promise<{ transactionHash: string; lockId: string; authId: string }>;
 
@@ -478,12 +490,11 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
       return { transactionHash: hash, matchId };
     },
 
-    async executePayout({ tradeId, attempt, secretHash }) {
-      const authId = authIdFor(tradeId, attempt);
-      const lockId = lockIdFor(tradeId, attempt);
+    async executePayout({ tradeId, secretHash }) {
+      const authId = authIdFor(tradeId);
+      const lockId = lockIdFor(tradeId);
       const hash = await send('executePayout', [authId, matchIdFor(tradeId), lockId, secretHash], {
         tradeId,
-        attempt,
         lockId,
       });
       return { transactionHash: hash, lockId, authId };

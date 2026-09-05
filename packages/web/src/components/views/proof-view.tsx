@@ -248,9 +248,18 @@ function Proof({ record }: { record: ProofRecord }) {
           </div>
 
           <div className="bg-raised px-5 py-5">
+            {/*
+              The chain is named only once a rail has run.
+
+              The venue answers `chain: null` for a cash leg that has not settled, and the
+              decoder's fallback turns that into Arc — a reasonable display default, but on
+              this page it reads as a claim that the money is going to a specific chain when
+              the venue has not said so. An unsettled leg gets the plain label instead.
+            */}
             <Label className="mb-3">
-              Cash leg · {cashChain.name}
-              {cashChainId === null ? '' : ` · chain ${cashChainId}`}
+              {record.cashLeg.rail === null && trade.cashLeg.state === 'pending'
+                ? 'Cash leg'
+                : `Cash leg · ${cashChain.name}${cashChainId === null ? '' : ` · chain ${cashChainId}`}`}
             </Label>
             <Row term="State" value={<LegState state={trade.cashLeg.state} />} />
             {record.cashLeg.rail ? (

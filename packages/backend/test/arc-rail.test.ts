@@ -353,17 +353,26 @@ describe('when a vault settlement goes wrong', () => {
    * arguments — so a retry has to read the binding rather than re-send it.
    */
   it('does not bind a match twice when one already exists', async () => {
+    // The seeded seller's Arc address: the operator's own key, which also holds the paper.
+    const seller = '0x2Da63Ac0F6AE2C3059091d8DF38b3175a237ee71';
+    h = await createHarness({ arc: vault().escrow });
+
+    // Price the invoice first, so the pre-existing binding can name what this trade expects.
+    const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote${asOf}`);
+    const price = priceOf(BigInt(quote.body.quote.proceeds as string));
+
     const { escrow, calls } = vault({
-      payoutFor: (tradeId) =>
+      payoutFor: () =>
         Promise.resolve({
           matchId: '0xmatch',
           mandateId: 1n,
-          seller: '0xseller',
+          seller,
           executed: false,
-          price: 1n,
-          tradeId,
-        } as never),
+          price,
+        }),
     });
+    h.restore();
     h = await createHarness({ arc: escrow });
 
     const { armed } = await arm();
@@ -371,6 +380,32 @@ describe('when a vault settlement goes wrong', () => {
     expect(armed.status).toBe(200);
     expect(calls.registerMatch).toHaveLength(0);
     expect(calls.executePayout).toHaveLength(1);
+  });
+
+  /*
+   * `executePayout` takes no amount and no payee — it pays `payout.price` to `payout.seller`
+   * off a binding that cannot be corrected. Settling against a binding that does not match
+   * this trade would move one amount while the receipt claimed another, which is precisely
+   * what the proof view exists to make impossible.
+   */
+  it('refuses to settle against a binding that names different terms', async () => {
+    const { escrow, calls } = vault({
+      payoutFor: () =>
+        Promise.resolve({
+          matchId: '0xmatch',
+          mandateId: 1n,
+          seller: '0xsomeoneelse',
+          executed: false,
+          price: 1n,
+        }),
+    });
+    h = await createHarness({ arc: escrow });
+
+    const { armed } = await arm();
+
+    expect(armed.status).toBe(409);
+    expect(armed.body.detail).toContain('bound on chain to pay');
+    expect(calls.executePayout).toHaveLength(0);
   });
 
   /*
