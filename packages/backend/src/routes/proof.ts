@@ -17,6 +17,7 @@ import { explorer } from '../chain.js';
 import { getStore } from '../db/store.js';
 import { notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
+import { getScheduleAdapter } from '../services/schedule.js';
 import { readParams } from '../validate.js';
 import { money } from '../wire.js';
 
@@ -95,6 +96,27 @@ export interface TradeProof {
     payer: string | null;
     explorerUrl: string | null;
   };
+  /**
+   * Maturity: the third receipt, and the one that makes a resale legitimate.
+   *
+   * `null` until the receivable has matured — there is nothing to show, and an empty block
+   * would imply the question had been asked and answered. Once it exists it has two
+   * distinguishable states, because arranging a payout is not the same event as making one:
+   * `pending` is an obligation on the ledger waiting for the venue to sign that the debtor's
+   * money arrived, `settled` is a transfer that happened and can be checked.
+   */
+  maturity: {
+    scheduleId: string;
+    scheduleExplorerUrl: string;
+    state: 'pending' | 'settled';
+    executedAt: string | null;
+    transactionId: string | null;
+    explorerUrl: string | null;
+    /** The collection account the money left, read off the executed transfer. */
+    payer: string | null;
+    /** The holder credited, likewise read off the transfer rather than from the buyer row. */
+    payee: string | null;
+  } | null;
   /** Refusals recorded while pricing this invoice. Kept for the funders who were told no. */
   refusals: {
     mandateId: string;
@@ -120,6 +142,29 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
     store.listRefusalsForInvoice(trade.invoiceId),
   ]);
   if (!invoice) throw notFound(`Invoice ${trade.invoiceId}`);
+
+  /*
+   * Maturity, when there is one. The schedule id is the venue's record that an obligation
+   * was created; whether it became a payment is asked of the ledger rather than stored,
+   * because the signature that executes it happens outside this service.
+   */
+  const maturity: TradeProof['maturity'] =
+    trade.maturityScheduleId === null
+      ? null
+      : await (async () => {
+          const scheduleId = trade.maturityScheduleId as string;
+          const status = await getScheduleAdapter().payoutStatus(scheduleId);
+          return {
+            scheduleId,
+            scheduleExplorerUrl: explorer.hederaSchedule(scheduleId),
+            state: status.executed ? ('settled' as const) : ('pending' as const),
+            executedAt: status.executedAt,
+            transactionId: status.transactionId,
+            explorerUrl: link(status.transactionId, explorer.hederaTx),
+            payer: status.payerAccountId,
+            payee: status.payeeAccountId,
+          };
+        })();
 
   /*
    * Every link below is built from an identifier this service actually holds, and any
@@ -186,6 +231,7 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
             ? explorer.hederaTx(trade.cashTransaction)
             : explorer.arcTx(trade.cashTransaction),
     },
+    maturity: maturity,
     /** Kept for the funders who were told no, not only for the one who was matched. */
     refusals: refusals.map((row) => ({
       mandateId: row.mandateId,

@@ -160,6 +160,12 @@ export function fixtureProof(tradeId: string): ProofRecord | null {
       transaction: trade.cashLeg.reference ?? null,
       explorerUrl: null,
     },
+    /*
+     * Null, and deliberately not invented. The fixture book carries no matured receivable
+     * with a real scheduled payout behind it, and a fabricated schedule id on the one screen
+     * whose job is being checkable would point at nothing on HashScan.
+     */
+    payout: null,
     settlement: {
       protocol: proof.settlement.protocol,
       scheme: null,

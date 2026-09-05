@@ -348,6 +348,9 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
       transaction: proof.cashLeg.transaction,
       explorerUrl: proof.cashLeg.explorerUrl,
     },
+    // Passed straight through. The venue decides whether a receivable has matured and
+    // whether anyone has been paid; this source does not get a vote on either.
+    payout: proof.maturity,
     /*
      * The venue publishes each leg and names the scheme that bound them. `scheme` is
      * `exact` — that is the x402 scheme the payer signed under, not the protocol, and

@@ -12,6 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
+import { settlementService } from '../src/services/settlement.js';
 import { X402_HEADERS } from '../src/services/x402.js';
 import { call, createHarness, createRefusingGate, type Harness } from './helpers.js';
 
@@ -578,6 +579,42 @@ describe('trades and the proof view', () => {
     expect(res.body.pricing.faceValue).toBe('9500000');
     expect(res.body.pricing.proceedsMinor).toBe('9439616');
     expect(res.body.confirmation.decision).toBe('confirmed');
+  });
+
+  it('shows no maturity block until the receivable has matured', async () => {
+    const res = await call(h.app, 'GET', `/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+
+    // Null rather than an empty block: nothing has been arranged, and a present-but-empty
+    // maturity would imply the question had been asked and answered.
+    expect(res.body.maturity).toBeNull();
+  });
+
+  it('shows maturity as an obligation before anyone has been paid', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    await settlementService.settleAtMaturity(invoiceId);
+
+    const res = await call(h.app, 'GET', `/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+
+    expect(res.body.maturity.state).toBe('pending');
+    expect(res.body.maturity.scheduleExplorerUrl).toContain('/schedule/');
+    // No transfer to point at, so no link is invented for one.
+    expect(res.body.maturity.transactionId).toBeNull();
+    expect(res.body.maturity.explorerUrl).toBeNull();
+  });
+
+  it('shows maturity as a receipt once the holder has actually been paid', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    const matured = await settlementService.settleAtMaturity(invoiceId);
+    // Signed by someone, somewhere outside this service. That is what makes it a payment.
+    h.schedule.executedSchedules.add(matured.payout?.scheduleId ?? '');
+
+    const res = await call(h.app, 'GET', `/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+
+    expect(res.body.maturity.state).toBe('settled');
+    expect(res.body.maturity.transactionId).toBe('0.0.5512@1788337866.334186498');
+    expect(res.body.maturity.explorerUrl).toContain('/transaction/');
+    expect(res.body.maturity.payer).toBe('0.0.5599');
+    expect(res.body.maturity.payee).toBe('0.0.6098431');
   });
 
   it('never synthesises a link whose identifier is null', async () => {

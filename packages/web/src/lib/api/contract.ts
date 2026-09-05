@@ -256,6 +256,34 @@ function readIssuance(raw: unknown, path: string): InvoiceIssuance | undefined {
   };
 }
 
+/**
+ * The maturity receipt, when there is one.
+ *
+ * `state` is read strictly rather than defaulted: a maturity block that arrived without a
+ * state would otherwise render as an unpaid obligation, which is the wrong half of the only
+ * distinction this block exists to draw.
+ */
+function readMaturity(raw: unknown, path: string): TradeProofResponse['maturity'] {
+  if (raw === undefined || raw === null) return null;
+  const body = readObject(raw, path);
+  const scheduleId = readOptionalString(field(body, 'scheduleId'), `${path}.scheduleId`);
+  if (scheduleId === null) return null;
+
+  return {
+    scheduleId,
+    scheduleExplorerUrl: readOptionalString(
+      field(body, 'scheduleExplorerUrl'),
+      `${path}.scheduleExplorerUrl`,
+    ),
+    state: readEnum(field(body, 'state'), `${path}.state`, ['pending', 'settled'] as const),
+    executedAt: readOptionalString(field(body, 'executedAt'), `${path}.executedAt`),
+    transactionId: readOptionalString(field(body, 'transactionId'), `${path}.transactionId`),
+    explorerUrl: readOptionalString(field(body, 'explorerUrl'), `${path}.explorerUrl`),
+    payer: readOptionalString(field(body, 'payer'), `${path}.payer`),
+    payee: readOptionalString(field(body, 'payee'), `${path}.payee`),
+  };
+}
+
 /** True when the service actually sent a uniqueness hash rather than the decoder's stand-in. */
 export const hasUniquenessHash = (invoice: Invoice): boolean =>
   invoice.uniquenessHash !== '0x' && invoice.uniquenessHash.length > 2;
@@ -992,6 +1020,23 @@ export interface TradeProofResponse {
     payer: string | null;
     explorerUrl: string | null;
   };
+  /**
+   * Maturity: the third receipt, `null` until the receivable has matured.
+   *
+   * Two states, because arranging a payout is not the same event as making one. `pending`
+   * is an obligation sitting on the ledger waiting for the venue to sign that the debtor's
+   * money arrived; `settled` is a transfer that happened and can be checked.
+   */
+  maturity: {
+    scheduleId: string;
+    scheduleExplorerUrl: string | null;
+    state: 'pending' | 'settled';
+    executedAt: string | null;
+    transactionId: string | null;
+    explorerUrl: string | null;
+    payer: string | null;
+    payee: string | null;
+  } | null;
   refusals: {
     mandateId: string;
     reasonCode: string;
@@ -1041,6 +1086,7 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
   const assetLeg = readObject(field(body, 'assetLeg') ?? {}, `${path}.assetLeg`);
   const cashLeg = readObject(field(body, 'cashLeg') ?? {}, `${path}.cashLeg`);
   const refusals = field(body, 'refusals');
+  const maturityRaw = field(body, 'maturity');
 
   const decision = readOptionalString(
     field(confirmation, 'decision'),
@@ -1150,6 +1196,12 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
       payer: readOptionalString(field(cashLeg, 'payer'), `${path}.cashLeg.payer`),
       explorerUrl: readOptionalString(field(cashLeg, 'explorerUrl'), `${path}.cashLeg.explorerUrl`),
     },
+    /*
+     * Absent rather than empty when the receivable has not matured. A present-but-blank
+     * maturity block would read as "asked and answered with nothing", which is a different
+     * claim from "this has not happened yet".
+     */
+    maturity: readMaturity(maturityRaw, `${path}.maturity`),
     refusals:
       refusals === undefined
         ? []

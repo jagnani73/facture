@@ -254,6 +254,61 @@ function Proof({ record }: { record: ProofRecord }) {
           </div>
         </div>
 
+        {/*
+         * Maturity — the third receipt, and the one that makes a resale legitimate. Absent
+         * entirely until the receivable has matured, because a block saying "not yet" on
+         * every trade in the book would be noise on the one screen that has to stay
+         * readable.
+         *
+         * The two states are kept visibly apart. A scheduled payout is an obligation
+         * sitting on the ledger, not money that moved; it becomes a payment when the venue
+         * signs that the debtor's money arrived. Collapsing them here would put a receipt
+         * on screen for a transfer nobody had made.
+         */}
+        {record.payout ? (
+          <div className="border-t border-rule px-5 py-5">
+            <Label className="mb-3">Maturity · {HEDERA.name}</Label>
+            <Row
+              term="State"
+              value={
+                record.payout.state === 'settled' ? (
+                  <span className="text-pos">Holder paid at par</span>
+                ) : (
+                  <span className="text-muted">Obligation on the ledger, not yet signed</span>
+                )
+              }
+            />
+            <Row
+              term={record.payout.state === 'settled' ? 'Paid' : 'Payable'}
+              value={formatMoney(trade.faceValue)}
+            />
+            <Row term="Schedule" value={<Mono>{elide(record.payout.scheduleId, 12, 8)}</Mono>} />
+            {record.payout.payer ? (
+              <Row term="From" value={<Mono>{elide(record.payout.payer, 10, 6)}</Mono>} />
+            ) : null}
+            {record.payout.payee ? (
+              <Row term="To" value={<Mono>{elide(record.payout.payee, 10, 6)}</Mono>} />
+            ) : null}
+            {record.payout.executedAt ? (
+              <Row term="Paid at" value={formatDateTime(record.payout.executedAt)} />
+            ) : null}
+            {record.payout.transactionId ? (
+              <Row
+                term="Transaction"
+                value={<Mono>{elide(record.payout.transactionId, 12, 8)}</Mono>}
+              />
+            ) : null}
+            {record.payout.explorerUrl ? (
+              <Explorer href={record.payout.explorerUrl} label="Open the payment in HashScan" />
+            ) : record.payout.scheduleExplorerUrl ? (
+              <Explorer
+                href={record.payout.scheduleExplorerUrl}
+                label="Open the obligation in HashScan"
+              />
+            ) : null}
+          </div>
+        ) : null}
+
         {record.settlement ? (
           <div className="border-t border-rule px-5 py-5">
             <Label className="mb-3">What binds them</Label>

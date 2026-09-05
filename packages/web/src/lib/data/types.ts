@@ -357,6 +357,28 @@ export interface ProofRecord {
     transaction: string | null;
     explorerUrl: string | null;
   };
+  /**
+   * Maturity: the third receipt, and the one that makes a resale legitimate.
+   *
+   * `null` until the receivable has matured. Two states once it exists, because arranging a
+   * payout is not the same event as making one — `pending` is an obligation on the ledger
+   * waiting for the venue to sign that the debtor's money arrived, `settled` is a transfer
+   * that happened and can be checked on HashScan.
+   *
+   * Named `payout` rather than `maturity` because `instrument.maturity` already means the
+   * bond's maturity DATE, and two fields a page apart meaning different things under one
+   * word is how a screen starts lying quietly.
+   */
+  payout: {
+    scheduleId: string;
+    scheduleExplorerUrl: string | null;
+    state: 'pending' | 'settled';
+    executedAt: string | null;
+    transactionId: string | null;
+    explorerUrl: string | null;
+    payer: string | null;
+    payee: string | null;
+  } | null;
   /** What binds the two legs. Absent when the venue does not publish it. */
   settlement: {
     protocol: string;
