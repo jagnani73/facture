@@ -17,6 +17,7 @@ import { createLogger, rootLogger, setRootLogger } from './logger.js';
 import { initAtsAdapter } from './services/ats.js';
 import { createAtsComplianceGate, setComplianceGate } from './services/compliance.js';
 import { initArcEscrow } from './services/arc.js';
+import { initHcsPublisher } from './services/hcs.js';
 import { initIndexer } from './services/indexer.js';
 import { initPrivyVerifier } from './services/privy.js';
 import {
@@ -88,6 +89,15 @@ function boot(): void {
     vaultAddress: env.ARC_MANDATE_VAULT_ADDRESS,
     settlementPrivateKey: env.ARC_SETTLEMENT_PRIVATE_KEY,
     maxFeePerGasGwei: env.ARC_MAX_FEE_PER_GAS_GWEI,
+    logger: log,
+  });
+
+  initHcsPublisher({
+    // Unset records refusals without a consensus copy rather than faking one.
+    topicId: env.HCS_REFUSAL_TOPIC_ID,
+    operatorId: env.HEDERA_OPERATOR_ID,
+    operatorKey: env.HEDERA_OPERATOR_KEY,
+    network: hedera.network,
     logger: log,
   });
 

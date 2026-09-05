@@ -72,6 +72,12 @@ export const envSchema = z
     MATURITY_COLLECTION_ACCOUNT_ID: ACCOUNT_ID.optional(),
 
     /**
+     * The HCS topic refusal receipts are committed to. Unset means refusals are recorded and
+     * readable but not independently checkable — see `services/hcs.ts`.
+     */
+    HCS_REFUSAL_TOPIC_ID: ACCOUNT_ID.optional(),
+
+    /**
      * Privy, for seller sign-in. Unset disables the route rather than letting it accept an
      * unverified email — see `services/privy.ts`.
      *

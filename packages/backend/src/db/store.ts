@@ -266,6 +266,17 @@ export interface Store {
   updateTrade(id: string, patch: Partial<NewTradeRow>): Promise<TradeRow>;
 
   insertRefusals(rows: readonly NewRefusalReceiptRow[]): Promise<RefusalReceiptRow[]>;
+  /**
+   * Attach the consensus coordinates once a receipt's commitment is on the topic.
+   *
+   * Separate from the insert because the two happen at different times and only the first
+   * one is owed to the funder: the reason is recorded immediately, and the independently
+   * checkable copy lands when consensus does. See `services/hcs.ts`.
+   */
+  recordRefusalConsensus(
+    id: string,
+    consensus: { topicId: string; sequenceNumber: bigint; consensusAt: Date },
+  ): Promise<RefusalReceiptRow>;
   listRefusalsForInvoice(invoiceId: string): Promise<RefusalReceiptRow[]>;
 
   // --- ratings ------------------------------------------------------------------

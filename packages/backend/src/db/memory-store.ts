@@ -705,6 +705,22 @@ export class MemoryStore implements Store {
     return out;
   }
 
+  async recordRefusalConsensus(
+    id: string,
+    consensus: { topicId: string; sequenceNumber: bigint; consensusAt: Date },
+  ): Promise<RefusalReceiptRow> {
+    const row = this.refusals.get(id);
+    if (!row) throw notFound(`Refusal receipt ${id}`);
+    const next: RefusalReceiptRow = {
+      ...row,
+      hcsTopicId: consensus.topicId,
+      hcsSequenceNumber: consensus.sequenceNumber,
+      hcsConsensusAt: consensus.consensusAt,
+    };
+    this.refusals.set(id, next);
+    return clone(next);
+  }
+
   async listRefusalsForInvoice(invoiceId: string): Promise<RefusalReceiptRow[]> {
     return [...this.refusals.values()]
       .filter((r) => r.invoiceId === invoiceId)

@@ -16,6 +16,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { z } from 'zod';
 import { getStore } from '../db/store.js';
+import { publishRefusals } from '../services/hcs.js';
 import { badRequest, conflict, forbidden, isAppError, notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
 import { accountIdToEvmAddress } from '../services/ats.js';
@@ -439,7 +440,7 @@ async function recordRefusals(
     if (mandate) buyerOf.set(id, mandate.buyerId);
   }
 
-  await store.insertRefusals(
+  const inserted = await store.insertRefusals(
     live.refusals.flatMap((refusal) => {
       const buyerId = refusal.mandateId === null ? undefined : buyerOf.get(refusal.mandateId);
       if (refusal.mandateId === null || buyerId === undefined) return [];
@@ -455,6 +456,29 @@ async function recordRefusals(
         },
       ];
     }),
+  );
+
+  /*
+   * The reason is already recorded and readable; this attaches the copy a refused funder can
+   * check without trusting us. Awaited rather than fired and forgotten, so a receipt that did
+   * reach consensus carries its coordinates by the time the response is written — but
+   * `publishRefusals` never throws, so a topic that is down costs a consensus copy and not
+   * the refusal itself. What is published is a digest, not the reason: see `services/hcs.ts`
+   * for why a public topic must not carry one buyer's exposure.
+   */
+  await publishRefusals(
+    inserted.map((row) => ({
+      receiptId: row.id,
+      invoiceId: row.invoiceId,
+      mandateId: row.mandateId,
+      buyerId: row.buyerId,
+      reasonCode: row.reasonCode,
+      reasonText: row.reasonText,
+      ratingAtRefusal: row.ratingAtRefusal,
+      tenorDaysAtRefusal: row.tenorDaysAtRefusal,
+    })),
+    (receiptId, published) =>
+      store.recordRefusalConsensus(receiptId, published).then(() => undefined),
   );
 }
 

@@ -32,6 +32,11 @@ import type { ComplianceDecision, ComplianceGate } from '../src/services/complia
 import { setComplianceGate } from '../src/services/compliance.js';
 import { initIssuanceQueue } from '../src/services/issuance.js';
 import {
+  createDisabledHcsPublisher,
+  setHcsPublisher,
+  type HcsPublisher,
+} from '../src/services/hcs.js';
+import {
   setPrivyVerifier,
   type PrivyVerifier,
   type VerifiedSeller,
@@ -318,6 +323,8 @@ export interface HarnessOptions {
   privy?: PrivyVerifier;
   /** Absent means no vault: funding is recorded, not verified, as it is today. */
   arc?: ArcEscrow;
+  /** Absent means no topic: refusals are recorded without a consensus copy. */
+  hcs?: HcsPublisher;
 }
 
 /** What the stub verifier attests to when a test does not say otherwise. */
@@ -369,6 +376,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
   setComplianceGate(options.gate ?? createAllowingGate());
   setPrivyVerifier(options.privy ?? stubPrivy());
   setArcEscrow(options.arc ?? createDisabledArcEscrow());
+  setHcsPublisher(options.hcs ?? createDisabledHcsPublisher());
   setNotifier(silentNotifier);
 
   initIssuanceQueue({ minIntervalMs: 0, maxAttempts: 3, backoffBaseMs: 1 });
@@ -408,6 +416,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
       setComplianceGate(undefined);
       setPrivyVerifier(undefined);
       setArcEscrow(undefined);
+      setHcsPublisher(undefined);
       resetConfig();
     },
   };

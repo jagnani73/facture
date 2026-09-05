@@ -745,6 +745,23 @@ export class SqliteStore implements Store {
       .returning();
   }
 
+  async recordRefusalConsensus(
+    id: string,
+    consensus: { topicId: string; sequenceNumber: bigint; consensusAt: Date },
+  ): Promise<RefusalReceiptRow> {
+    const [row] = await this.#db
+      .update(refusalReceipts)
+      .set({
+        hcsTopicId: consensus.topicId,
+        hcsSequenceNumber: consensus.sequenceNumber,
+        hcsConsensusAt: consensus.consensusAt,
+      })
+      .where(eq(refusalReceipts.id, id))
+      .returning();
+    if (!row) throw notFound(`Refusal receipt ${id}`);
+    return row;
+  }
+
   async listRefusalsForInvoice(invoiceId: string): Promise<RefusalReceiptRow[]> {
     return this.#db
       .select()
