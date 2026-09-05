@@ -155,6 +155,7 @@ mandateRoutes.get('/', async (c) => {
   return c.json({
     mandates: rows.map((row) => {
       const deposited = deposits.get(row.id);
+      const required = escrow.requiredFor(row.fundedMinor, row.currency);
       return {
         ...wireMandate(row),
         /** Only an active mandate quotes; `funding` is not yet firm. */
@@ -167,11 +168,20 @@ mandateRoutes.get('/', async (c) => {
          * `backed` is deliberately not `deposited > 0`: a mandate counted as holding more
          * than the vault does is exactly the overclaim the funding check refuses, and a
          * partially-backed bid must not read as a funded one.
+         *
+         * Both figures are USDC ERC-20 minor units (6dp) and the field names say so, because
+         * the defect this replaced was two scales sharing one name. `requiredUsdcMinor` is
+         * what makes them comparable — it is the mandate's own committed capital put through
+         * the same conversion the cash leg settles through, so the comparison is like with
+         * like. Rendering either as the mandate's currency is off by four orders of
+         * magnitude, which is what the screen was doing.
          */
         escrow: {
           checked: escrow.enabled && deposited !== undefined,
-          deposited: deposited === undefined || deposited === null ? null : money(deposited),
-          backed: deposited !== undefined && deposited !== null && deposited >= row.fundedMinor,
+          depositedUsdcMinor:
+            deposited === undefined || deposited === null ? null : money(deposited),
+          requiredUsdcMinor: money(required),
+          backed: deposited !== undefined && deposited !== null && deposited >= required,
         },
       };
     }),
@@ -274,10 +284,19 @@ mandateRoutes.post('/:id/fund', async (c) => {
   if (escrow.enabled) {
     const deposited = await escrow.depositedFor(id);
     const wouldBeCommitted = existing.fundedMinor + body.amountMinor;
+    /*
+     * Converted before it is compared. The vault answers in USDC minor units at 6 decimals
+     * and a mandate is written in its own currency's minor units at 2, so the two are not
+     * the same number even when they read as one — $50,000.00 and 5 USDC are both
+     * `5000000`, and comparing them directly is how a mandate came to be counted as backed
+     * by ten-thousandth of its capital.
+     */
+    const required = escrow.requiredFor(wouldBeCommitted, existing.currency);
 
-    if (wouldBeCommitted > deposited) {
+    if (required > deposited) {
       throw badRequest(
-        `This mandate would be counted as holding ${wouldBeCommitted} but the vault holds ` +
+        `This mandate would be counted as holding ${wouldBeCommitted} ${existing.currency} ` +
+          `minor units, which needs ${required} USDC minor units on Arc, but the vault holds ` +
           `${deposited}. Capital has to arrive on Arc before the book will quote against it — ` +
           'a bid backed by a request body is not a firm bid.',
       );

@@ -17,7 +17,12 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { call, createHarness, type Harness } from './helpers.js';
-import { createDisabledArcEscrow, vaultMandateId, type ArcEscrow } from '../src/services/arc.js';
+import {
+  createDisabledArcEscrow,
+  usdcRequiredFor,
+  vaultMandateId,
+  type ArcEscrow,
+} from '../src/services/arc.js';
 
 let h: Harness;
 
@@ -25,10 +30,30 @@ afterEach(() => {
   h.restore();
 });
 
-/** A vault holding exactly `deposited` for every mandate. */
+/**
+ * Parts-per-million scale these tests convert at, matching the deployment default.
+ *
+ * Written out rather than imported so the arithmetic below is readable on the page: at 1 ppm
+ * a USD amount in cents becomes USDC minor units by dividing by 100, because the decimals
+ * shift multiplies by 10^4 and the scale divides by 10^6. So $50,000.00 — 5,000,000 cents —
+ * needs 50,000 USDC minor units, which is 0.05 USDC.
+ */
+const SCALE_PPM = 1;
+
+/** USDC minor units needed to back `amountMinor` US cents. Spelled out at each call site. */
+const needs = (amountMinor: bigint): bigint => usdcRequiredFor(amountMinor, 'USD', SCALE_PPM);
+
+/**
+ * A vault holding exactly `deposited` USDC minor units for every mandate.
+ *
+ * `requiredFor` delegates to the service's own conversion rather than reimplementing it. A
+ * stub that converted independently could agree with a broken service and disagree with a
+ * fixed one, which is how the original defect stayed invisible: the numbers matched.
+ */
 function stubVault(deposited: bigint): ArcEscrow {
   return {
     enabled: true,
+    requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, SCALE_PPM),
     depositedFor: () => Promise.resolve(deposited),
     buyerOf: () => Promise.resolve('0x1c755e95cb11e5d5af498bb0ea595b56e1adb035'),
     registerMandate: () => Promise.resolve({ transactionHash: '0xabc' }),
@@ -43,7 +68,7 @@ async function draftMandate(): Promise<string> {
       maxTenorDays: 60,
       annualisedYieldBps: 850,
       currency: 'USD',
-      exposureLimitMinor: '5000000',
+      exposureLimitMinor: '50000000',
     },
   });
   expect(res.status).toBe(201);
@@ -52,7 +77,8 @@ async function draftMandate(): Promise<string> {
 
 describe('funding with a vault configured', () => {
   it('credits capital the vault actually holds', async () => {
-    h = await createHarness({ arc: stubVault(5_000_000n) });
+    // 0.05 USDC, exactly what $50,000.00 converts to. Funding the cent above would refuse.
+    h = await createHarness({ arc: stubVault(needs(5_000_000n)) });
     const id = await draftMandate();
 
     const res = await call(h.app, 'POST', `/v1/mandates/${id}/fund`, {
@@ -67,11 +93,12 @@ describe('funding with a vault configured', () => {
 
   /* The whole point: a claim about someone else's ledger is not capital. */
   it('refuses to count more than the vault holds', async () => {
-    h = await createHarness({ arc: stubVault(5_000_000n) });
+    // One USDC minor unit short of backing $50,000.00.
+    h = await createHarness({ arc: stubVault(needs(5_000_000n) - 1n) });
     const id = await draftMandate();
 
     const res = await call(h.app, 'POST', `/v1/mandates/${id}/fund`, {
-      body: { amountMinor: '200000000', escrowRef: '0xdeadbeef' },
+      body: { amountMinor: '5000000', escrowRef: '0xdeadbeef' },
     });
 
     expect(res.status).toBe(400);
@@ -93,7 +120,8 @@ describe('funding with a vault configured', () => {
    * independently would wave both through.
    */
   it('compares the running total against the vault, not one request at a time', async () => {
-    h = await createHarness({ arc: stubVault(5_000_000n) });
+    // Backs $30,000 once. Two of them is $60,000 and the vault has not grown.
+    h = await createHarness({ arc: stubVault(needs(3_000_000n)) });
     const id = await draftMandate();
 
     const first = await call(h.app, 'POST', `/v1/mandates/${id}/fund`, {
@@ -162,12 +190,50 @@ describe('which bids are backed', () => {
     ).body.mandates.filter((m: { escrow?: unknown }) => m.escrow !== undefined);
 
   it('reports a fully deposited mandate as backed', async () => {
-    h = await createHarness({ arc: stubVault(5_000_000n) });
+    h = await createHarness({ arc: stubVault(needs(5_000_000n)) });
     const id = await draftMandate();
     await fund(id, '5000000');
 
     const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
-    expect(mandate.escrow).toEqual({ checked: true, deposited: '5000000', backed: true });
+    expect(mandate.escrow).toEqual({
+      checked: true,
+      depositedUsdcMinor: '50000',
+      requiredUsdcMinor: '50000',
+      backed: true,
+    });
+  });
+
+  /*
+   * The arithmetic, pinned as a literal rather than computed, because the digits are the
+   * whole finding: $50,000.00 is 5,000,000 US cents and 0.05 USDC is 50,000 USDC minor
+   * units, and the two were compared as though they were one number.
+   *
+   * A change to the conversion should fail here and be argued for, not land quietly — every
+   * mandate's funded status moves with it.
+   */
+  it('converts dollars to USDC rather than comparing the digits', async () => {
+    h = await createHarness({ arc: stubVault(needs(5_000_000n)) });
+    const id = await draftMandate();
+    await fund(id, '5000000');
+
+    const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
+    expect(mandate.committed).toBe('5000000');
+    expect(mandate.escrow.requiredUsdcMinor).toBe('50000');
+  });
+
+  /*
+   * The regression, stated as the case that used to be wrong. 0.1 USDC genuinely backs a
+   * $50,000 mandate at this scale, and the old comparison called it unbacked because
+   * 100,000 is less than 5,000,000 — the same two scales confused, in the direction that
+   * accuses a funded buyer rather than the one that flatters an unfunded one.
+   */
+  it('backs a mandate whose deposit the old digit comparison would have rejected', async () => {
+    h = await createHarness({ arc: stubVault(100_000n) });
+    const id = await draftMandate();
+    await fund(id, '5000000');
+
+    const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
+    expect(mandate.escrow.backed).toBe(true);
   });
 
   /*
@@ -176,7 +242,8 @@ describe('which bids are backed', () => {
    * not read as funded just because *some* capital is there.
    */
   it('does not call a partially deposited mandate backed', async () => {
-    h = await createHarness({ arc: stubVault(1_000_000n) });
+    // 0.001 USDC against a mandate needing 0.05 — a fiftieth of its capital.
+    h = await createHarness({ arc: stubVault(1_000n) });
     const id = await draftMandate();
     // Funded before the vault was consulted — how every seeded mandate got its balance.
     await h.store.fundMandate({
@@ -187,7 +254,8 @@ describe('which bids are backed', () => {
     });
 
     const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
-    expect(mandate.escrow.deposited).toBe('1000000');
+    expect(mandate.escrow.depositedUsdcMinor).toBe('1000');
+    expect(mandate.escrow.requiredUsdcMinor).toBe('50000');
     expect(mandate.escrow.backed).toBe(false);
   });
 
@@ -196,6 +264,7 @@ describe('which bids are backed', () => {
     h = await createHarness({
       arc: {
         enabled: true,
+        requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, SCALE_PPM),
         depositedFor: () => Promise.reject(new Error('rpc down')),
         buyerOf: () => Promise.resolve(null),
         registerMandate: () => Promise.resolve({ transactionHash: '0x' }),
@@ -204,7 +273,12 @@ describe('which bids are backed', () => {
     const id = await draftMandate();
 
     const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
-    expect(mandate.escrow).toEqual({ checked: true, deposited: null, backed: false });
+    expect(mandate.escrow).toEqual({
+      checked: true,
+      depositedUsdcMinor: null,
+      requiredUsdcMinor: '0',
+      backed: false,
+    });
   });
 
   it('says it did not check when no vault is configured', async () => {
@@ -212,7 +286,12 @@ describe('which bids are backed', () => {
     const id = await draftMandate();
 
     const mandate = (await mandates()).find((m: { id: string }) => m.id === id);
-    expect(mandate.escrow).toEqual({ checked: false, deposited: null, backed: false });
+    expect(mandate.escrow).toEqual({
+      checked: false,
+      depositedUsdcMinor: null,
+      requiredUsdcMinor: '0',
+      backed: false,
+    });
   });
 });
 

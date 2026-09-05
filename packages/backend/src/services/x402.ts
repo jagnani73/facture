@@ -24,6 +24,7 @@
 import { upstreamUnavailable } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { rootLogger } from '../logger.js';
+import { toSettlementAmount } from '../units.js';
 
 /** x402 v2 wire headers. Do not reintroduce `X-PAYMENT`. */
 export const X402_HEADERS = {
@@ -138,42 +139,6 @@ export const HBAR_ASSET = '0.0.0';
 
 /** Tinybars. */
 export const HBAR_DECIMALS = 8;
-
-/**
- * Converts an invoice amount into the settlement asset's smallest unit.
- *
- * Two conversions, kept separate on purpose because only one of them is arithmetic.
- *
- * The first is a real decimals change: invoice money is minor units of its currency (2 for
- * USD and EUR) and the asset has its own exponent (8 for HBAR, 6 for USDC). That part is
- * exact and stays in `bigint`.
- *
- * The second is a **declared convention, not a market rate**. One unit of invoice currency
- * is settled as one unit of the settlement asset. There is no FX here and none is implied;
- * a real deployment prices the cash leg against an actual rate. `scalePpm` then shrinks the
- * result so a testnet balance can cover it. Both are surfaced in the challenge description
- * so a reader of the proof view sees the convention rather than inferring a rate that was
- * never quoted.
- *
- * Before this existed the amount was the invoice's minor units passed through unchanged,
- * which silently read as tinybars — the same digits meaning a different thing by accident.
- */
-export const toSettlementAmount = (
-  amountMinor: bigint,
-  currencyDecimals: number,
-  assetDecimals: number,
-  scalePpm: number,
-): bigint => {
-  /*
-   * Shift first, scale second. The other order truncates: scaling 5,933,178 minor units by
-   * 1 ppm gives 5 before the decimals shift ever runs, so $59,331.78 settles as 0.05 rather
-   * than 0.0593 — a rounding error of the same order as the amount itself.
-   */
-  const shift = assetDecimals - currencyDecimals;
-  const shifted =
-    shift >= 0 ? amountMinor * 10n ** BigInt(shift) : amountMinor / 10n ** BigInt(-shift);
-  return (shifted * BigInt(scalePpm)) / 1_000_000n;
-};
 
 /**
  * Defaults for the (scheme, network) pair we settle on. `GET /supported` is the authority

@@ -91,6 +91,8 @@ function boot(): void {
     vaultAddress: env.ARC_MANDATE_VAULT_ADDRESS,
     settlementPrivateKey: env.ARC_SETTLEMENT_PRIVATE_KEY,
     maxFeePerGasGwei: env.ARC_MAX_FEE_PER_GAS_GWEI,
+    // The same scale the Hedera cash leg settles at, so one receivable costs one amount.
+    settlementScalePpm: env.X402_SETTLEMENT_SCALE_PPM,
     logger: log,
   });
 

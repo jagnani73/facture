@@ -3,7 +3,7 @@ import Link from 'next/link';
 import type { MandateEscrow, MandateRecord } from '@/lib/api/contract';
 import type { Mandate } from '@/lib/domain';
 import { unallocated } from '@/lib/domain';
-import { formatMoney, formatMoneyCompact, formatRate } from '@/lib/format';
+import { formatMoney, formatMoneyCompact, formatRate, formatUsdc } from '@/lib/format';
 import type { MandateMeta } from '@/lib/fixtures';
 import type { Position } from '@/lib/pricing';
 import { sumFace, weightedAverageRateBps } from '@/lib/pricing';
@@ -64,21 +64,31 @@ export function EscrowBadge({ escrow }: { escrow: MandateEscrow | undefined }) {
   if (!escrow?.checked) return null;
 
   const backed = escrow.backed;
+  /*
+   * `formatUsdc`, never `formatMoney`. These are USDC minor units at 6 decimals and the
+   * mandate's own figures are minor units at 2 — rendering the first with the second's
+   * formatter reported a vault holding 5 USDC as "Backed by $50,000.00", which is the
+   * venue's own claim about the mandate read back as though it were the chain's.
+   */
   return (
     <span
       title={
         backed
-          ? `Backed by ${formatMoney(escrow.deposited ?? 0n)} held in the Arc vault. Anyone can read that balance on chain; it is not our word for it.`
-          : escrow.deposited === null
+          ? `Backed by ${formatUsdc(escrow.depositedUsdcMinor ?? 0n)} held in the Arc vault against ${formatUsdc(escrow.requiredUsdcMinor)} required. Anyone can read that balance on chain; it is not our word for it.`
+          : escrow.depositedUsdcMinor === null
             ? 'The Arc vault could not be read just now, so this bid is unconfirmed rather than unbacked.'
-            : `The Arc vault holds ${formatMoney(escrow.deposited)} against this bid, which is less than it is counted as holding.`
+            : `The Arc vault holds ${formatUsdc(escrow.depositedUsdcMinor)} against this bid, which needs ${formatUsdc(escrow.requiredUsdcMinor)}.`
       }
       className={[
         'label-micro inline-flex h-5 items-center rounded-xs border px-1.5',
         backed ? 'border-pos/45 bg-pos-wash text-pos' : 'border-rule-strong bg-sunken text-muted',
       ].join(' ')}
     >
-      {backed ? 'Escrowed on Arc' : escrow.deposited === null ? 'Unconfirmed' : 'Not escrowed'}
+      {backed
+        ? 'Escrowed on Arc'
+        : escrow.depositedUsdcMinor === null
+          ? 'Unconfirmed'
+          : 'Not escrowed'}
     </span>
   );
 }

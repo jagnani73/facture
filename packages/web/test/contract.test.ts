@@ -24,6 +24,7 @@ import {
   readInvoiceRow,
   readLiveQuote,
   readMandate,
+  readMandateEscrow,
   readMoney,
   readPage,
   readPaymentRequired,
@@ -422,6 +423,56 @@ describe('readMandate', () => {
   it('falls back to the commitment when no per-debtor cap was set', () => {
     const { perDebtorLimit: _omitted, ...withoutCap } = MANDATE;
     expect(readMandate(withoutCap).maxPerDebtor).toBe(25_000_000n);
+  });
+
+  /*
+   * Both escrow figures are USDC ERC-20 minor units at 6 decimals, and a mandate's own money
+   * is minor units at 2. The decoder used to read a field called `deposited` and the screen
+   * rendered it with the dollar formatter, so a vault holding 5 USDC — 5,000,000 minor units
+   * — was reported as "Backed by $50,000.00". Identical digits, four orders of magnitude
+   * apart, which is why the field names now carry the unit.
+   */
+  it('reads both escrow figures as USDC minor units', () => {
+    const escrow = readMandateEscrow(
+      { checked: true, depositedUsdcMinor: '5000000', requiredUsdcMinor: '50000', backed: true },
+      'mandate.escrow',
+    );
+    expect(escrow).toEqual({
+      checked: true,
+      depositedUsdcMinor: 5_000_000n,
+      requiredUsdcMinor: 50_000n,
+      backed: true,
+    });
+  });
+
+  /* "We could not read the vault" is a third state, and must not render as "unbacked". */
+  it('keeps an unreadable vault balance null rather than zero', () => {
+    const escrow = readMandateEscrow(
+      { checked: true, depositedUsdcMinor: null, requiredUsdcMinor: '50000', backed: false },
+      'mandate.escrow',
+    );
+    expect(escrow?.depositedUsdcMinor).toBeNull();
+    expect(escrow?.requiredUsdcMinor).toBe(50_000n);
+  });
+
+  /*
+   * The required figure is what makes the deposited one mean anything, so an escrow block
+   * arriving without it is unreadable rather than defaulted. A zero here would report every
+   * bid as backed — the failure being fixed, arriving through the decoder instead.
+   */
+  it('refuses an escrow block with no required amount', () => {
+    expect(() =>
+      readMandateEscrow(
+        { checked: true, depositedUsdcMinor: '5000000', backed: true },
+        'mandate.escrow',
+      ),
+    ).toThrow(ApiError);
+  });
+
+  /** Absent entirely is the fixture book, which has no vault behind it. Not an error. */
+  it('reads an absent escrow block as absent', () => {
+    expect(readMandateEscrow(undefined, 'mandate.escrow')).toBeUndefined();
+    expect(readMandateEscrow(null, 'mandate.escrow')).toBeUndefined();
   });
 
   it('reads the per-debtor exposure ladder as money', () => {

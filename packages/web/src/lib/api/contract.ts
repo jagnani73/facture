@@ -315,17 +315,27 @@ export function readDebtor(raw: unknown, path = 'customer'): Debtor {
  * the book look firmer than it is.
  */
 /**
- * What the Arc vault actually holds behind a bid.
+ * What the Arc vault actually holds behind a bid, and what it would have to hold.
  *
- * Three states, not two, and the third is the one worth having. `deposited: null` with
- * `checked: true` means the vault could not be read — which must not render as "nobody
+ * Three states, not two, and the third is the one worth having. `depositedUsdcMinor: null`
+ * with `checked: true` means the vault could not be read — which must not render as "nobody
  * posted this", because that accuses a funded buyer of quoting on nothing. `backed` is
  * deliberately not `deposited > 0`: a mandate counted as holding more than the vault does is
  * an overclaim, and a partly-backed bid is not a funded one.
+ *
+ * **Both figures are USDC ERC-20 minor units — 6 decimals — and not the mandate's own
+ * currency.** The names say so because they used to not: the field was `deposited`, the
+ * screen rendered it with `formatMoney` at 2 decimals, and a vault holding 5 USDC was
+ * reported as "Backed by $50,000.00". Render these with `formatUsdc`, never `formatMoney`.
+ *
+ * `requiredUsdcMinor` is what makes the pair comparable — the mandate's committed capital
+ * put through the same conversion the cash leg settles at. Without it a reader has the
+ * vault's balance and no way to know whether it is enough.
  */
 export interface MandateEscrow {
   checked: boolean;
-  deposited: MinorUnits | null;
+  depositedUsdcMinor: MinorUnits | null;
+  requiredUsdcMinor: MinorUnits;
   backed: boolean;
 }
 
@@ -345,7 +355,11 @@ export function readMandateEscrow(raw: unknown, path: string): MandateEscrow | u
   const body = readObject(raw, path);
   return {
     checked: field(body, 'checked') === true,
-    deposited: readOptionalMoney(field(body, 'deposited'), `${path}.deposited`),
+    depositedUsdcMinor: readOptionalMoney(
+      field(body, 'depositedUsdcMinor'),
+      `${path}.depositedUsdcMinor`,
+    ),
+    requiredUsdcMinor: readMoney(field(body, 'requiredUsdcMinor'), `${path}.requiredUsdcMinor`),
     backed: field(body, 'backed') === true,
   };
 }

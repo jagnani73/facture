@@ -139,6 +139,15 @@ export const envSchema = z
      * Defaults to `1` — one millionth — because a testnet balance cannot cover a six-figure
      * receivable, and a demo that silently settles a coincidental number is worse than one
      * that scales openly.
+     *
+     * **This governs both rails, despite the `X402_` prefix**, and deliberately so: the Arc
+     * escrow converts a mandate's capital at the same scale the Hedera cash leg settles at,
+     * so one receivable costs the same money whichever way it goes. A second variable is how
+     * the two rails come to quote different prices for one invoice.
+     *
+     * Not renamed to match, for the reason `DATABASE_URL` was not: a rename falls back to
+     * this default on every deployment that still sets the old name, silently, which is the
+     * same class of failure as the unit mismatch this was widened to fix.
      */
     X402_SETTLEMENT_SCALE_PPM: z.coerce.number().int().positive().default(1),
 

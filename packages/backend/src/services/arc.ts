@@ -25,6 +25,19 @@
  * systems silently disagreeing about which mandate is which is exactly how capital ends up
  * credited to the wrong one.
  *
+ * ## The vault answers in USDC, and a mandate is written in dollars
+ *
+ * `balanceOf` returns USDC ERC-20 minor units — 6 decimals. A mandate's `fundedMinor` is
+ * minor units of its own currency — 2 decimals for USD and EUR. **These were compared
+ * directly**, so a mandate counted as holding $50,000.00 (5,000,000 cents) was read as
+ * backed by 5,000,000 USDC minor units, which is 5 USDC. Identical digits, four orders of
+ * magnitude apart, and the check passed.
+ *
+ * {@link ArcEscrow.requiredFor} is the boundary now: callers hand it money in an invoice
+ * currency and get back what the vault would have to hold. The conversion itself is
+ * {@link toSettlementAmount}, the same one the Hedera cash leg settles through, so a
+ * mandate is backed on Arc by exactly the amount a trade would cost on either rail.
+ *
  * ## What this does not do
  *
  * It does not move money. Depositing pulls USDC from `msg.sender`, so a deposit is the
@@ -33,12 +46,15 @@
  * to, and then read what arrived.
  */
 
+import type { Currency } from '@facture/shared';
+import { ARC_TESTNET, CURRENCY_DECIMALS } from '@facture/shared';
 import { createPublicClient, createWalletClient, http, keccak256, parseAbi, toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arcChain } from '../chain.js';
 import { badRequest } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { rootLogger } from '../logger.js';
+import { toSettlementAmount } from '../units.js';
 
 /**
  * A venue mandate UUID as the vault's key.
@@ -60,6 +76,14 @@ const VAULT_ABI = parseAbi([
 export interface ArcEscrow {
   /** Whether a vault is configured at all. False means funding is recorded, not verified. */
   readonly enabled: boolean;
+  /**
+   * USDC the vault would have to hold to back `amountMinor` of `currency`, in the same
+   * ERC-20 minor units (6dp) {@link depositedFor} answers in.
+   *
+   * The two are only comparable through here. Comparing a mandate's own minor units against
+   * a vault balance is a 10^4 error that looks like agreement, which is how it survived.
+   */
+  requiredFor(amountMinor: bigint, currency: string): bigint;
   /** USDC actually held for this mandate, in ERC-20 minor units (6dp). */
   depositedFor(mandateUuid: string): Promise<bigint>;
   /** The address a release would pay, or `null` when the mandate was never registered. */
@@ -72,8 +96,44 @@ export interface ArcEscrowConfig {
   readonly vaultAddress: string | undefined;
   readonly settlementPrivateKey: string;
   readonly maxFeePerGasGwei: number;
+  /**
+   * Parts-per-million scale on settled amounts, shared with the Hedera cash leg.
+   *
+   * Deliberately not its own variable. One receivable has to cost the same money whichever
+   * rail settles it, and a second knob is how the two rails come to disagree.
+   */
+  readonly settlementScalePpm: number;
   readonly logger?: Logger | undefined;
 }
+
+/** USDC on Arc, read through the ERC-20 interface. Never the 18-decimal gas accounting. */
+const USDC_DECIMALS = ARC_TESTNET.tokens.USDC.decimals;
+
+/**
+ * What the vault must hold to back an amount written in an invoice currency.
+ *
+ * Shared by both escrow implementations, including the disabled one — a deployment with no
+ * vault still has to answer what backing *would* mean, or the two would convert differently
+ * and the answer would depend on configuration.
+ *
+ * Exported so a test double converts the same way the service does. A stub with its own
+ * arithmetic is a test that passes while production is wrong, which is the shape of the
+ * defect this function exists to close.
+ */
+export const usdcRequiredFor = (amountMinor: bigint, currency: string, scalePpm: number): bigint =>
+  toSettlementAmount(
+    amountMinor,
+    CURRENCY_DECIMALS[currency as Currency] ?? 2,
+    USDC_DECIMALS,
+    scalePpm,
+    /*
+     * Up, unlike the payment leg. This is the amount capital has to REACH, so a remainder
+     * rounded away is backing the venue asked for and did not get. At 1 ppm the granularity
+     * is a dollar, so rounding down would require zero USDC for anything under $1.00 and an
+     * empty vault would back it — the exact overclaim this check exists to refuse.
+     */
+    'up',
+  );
 
 /**
  * No vault configured.
@@ -83,9 +143,10 @@ export interface ArcEscrowConfig {
  * not know, and `enabled` is how the route tells the two apart. Writing still refuses,
  * naming the variable, in the same shape as issuance with no ATS factory.
  */
-export function createDisabledArcEscrow(): ArcEscrow {
+export function createDisabledArcEscrow(scalePpm = 1): ArcEscrow {
   return {
     enabled: false,
+    requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, scalePpm),
     depositedFor: () => Promise.resolve(0n),
     buyerOf: () => Promise.resolve(null),
     registerMandate: () =>
@@ -99,7 +160,7 @@ export function createDisabledArcEscrow(): ArcEscrow {
 }
 
 export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
-  if (config.vaultAddress === undefined) return createDisabledArcEscrow();
+  if (config.vaultAddress === undefined) return createDisabledArcEscrow(config.settlementScalePpm);
 
   const address = config.vaultAddress as `0x${string}`;
   const log = (config.logger ?? rootLogger).child({ svc: 'arc' });
@@ -115,6 +176,10 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
 
   return {
     enabled: true,
+
+    requiredFor(amountMinor, currency) {
+      return usdcRequiredFor(amountMinor, currency, config.settlementScalePpm);
+    },
 
     async depositedFor(mandateUuid) {
       return read<bigint>('balanceOf', mandateUuid);

@@ -36,6 +36,34 @@ export interface MoneyOptions {
   symbol?: boolean;
 }
 
+/**
+ * Minor-unit exponent for USDC on its ERC-20 interface.
+ *
+ * Six, not the eighteen Arc's native gas accounting uses, and not the two invoice money
+ * uses. Mixing the last two is a 10^4 error that reads as agreement: a vault holding 5 USDC
+ * and a mandate committing $50,000.00 are both the digits `5000000`.
+ */
+export const USDC_DECIMALS = 6;
+
+const USDC_SCALE = 10n ** BigInt(USDC_DECIMALS);
+
+/**
+ * `formatUsdc(50_000n)` -> `"0.05 USDC"`
+ *
+ * A separate function from {@link formatMoney} rather than an option on it, because the two
+ * are never interchangeable and the failure is silent when they are confused. Trailing
+ * zeroes past the last significant digit are dropped — a testnet-scaled amount is mostly
+ * zeroes, and `0.050000 USDC` reads as precision that is not being claimed.
+ */
+export function formatUsdc(minor: MinorUnits): string {
+  const negative = minor < 0n;
+  const abs = negative ? -minor : minor;
+  const whole = abs / USDC_SCALE;
+  const fraction = (abs % USDC_SCALE).toString().padStart(USDC_DECIMALS, '0').replace(/0+$/, '');
+  const grouped = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${negative ? '-' : ''}${grouped}${fraction === '' ? '' : `.${fraction}`} USDC`;
+}
+
 /** `formatMoney(3_947_397n)` -> `"$39,473.97"` */
 export function formatMoney(minor: MinorUnits, options: MoneyOptions = {}): string {
   const { fractionDigits = 2, currency = 'USD', symbol = true } = options;
