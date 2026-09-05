@@ -333,6 +333,44 @@ describe('apiProof', () => {
    * chain before delivery, so the escrow knows exactly who the money is for — and the proof
    * view's `To` row has been hardcoded null since it was written.
    */
+  /*
+   * The preimage and the escrow address both have to survive to the screen, because the
+   * seller builds and signs the claim themselves — `DvpEscrow.claim` checks
+   * `msg.sender == beneficiary`, so the venue cannot collect for them even holding the
+   * secret. A lock that reaches the page without either is a payout nobody can take.
+   */
+  it('carries what a seller needs to build the claim themselves', async () => {
+    answer(
+      proof({
+        cashLeg: {
+          chain: 'arc-testnet',
+          rail: 'arc-vault',
+          scheme: 'vault-payout',
+          network: 'arc:testnet',
+          asset: '0xusdc',
+          transaction: '0xpayout',
+          payer: '0xbuyer',
+          settledAmountMinor: 50_000n,
+          explorerUrl: null,
+          lock: {
+            lockId: '0xlock',
+            status: 'locked',
+            beneficiary: '0xseller',
+            amountMinor: 50_000n,
+            claimableUntil: '2026-09-04T10:00:00.000Z',
+            secret: '0xsecret',
+            escrowAddress: '0xescrow',
+            explorerUrl: null,
+          },
+        },
+      }),
+    );
+
+    const lock = (await apiProof(TRADE_ID)).cashLeg.lock;
+    expect(lock?.secret).toBe('0xsecret');
+    expect(lock?.escrowAddress).toBe('0xescrow');
+  });
+
   it('takes the cash-leg payee from the escrow lock', async () => {
     answer(
       proof({
@@ -352,6 +390,8 @@ describe('apiProof', () => {
             beneficiary: '0xseller',
             amountMinor: 50_000n,
             claimableUntil: '2026-09-04T10:00:00.000Z',
+            secret: '0xsecret',
+            escrowAddress: '0xescrow',
             explorerUrl: null,
           },
         },

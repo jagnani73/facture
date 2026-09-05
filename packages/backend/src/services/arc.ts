@@ -211,6 +211,14 @@ export interface ArcEscrow {
 
   /** The escrow's own view of a lock. `null` for an id it has never seen. */
   lockOf(lockId: string): Promise<EscrowLock | null>;
+  /**
+   * Where payouts land, read off the vault's immutable rather than configured.
+   *
+   * Published because the seller has to send `claim` to it themselves — the escrow
+   * checks `msg.sender == beneficiary`, so nobody can collect on their behalf, and a
+   * seller who cannot see the address cannot act on the lock.
+   */
+  escrowAddress(): Promise<string>;
 }
 
 /** `MandateVault.Payout`. The binding a payout is measured against. */
@@ -297,6 +305,7 @@ export function createDisabledArcEscrow(scalePpm = 1): ArcEscrow {
     registerMandate: () => Promise.reject(noVault('Registering a mandate')),
     payoutFor: () => Promise.resolve(null),
     lockOf: () => Promise.resolve(null),
+    escrowAddress: () => Promise.reject(noVault('Reading the payout escrow')),
     registerMatch: () => Promise.reject(noVault('Binding a payout')),
     executePayout: () => Promise.reject(noVault('Paying a seller on Arc')),
   };
@@ -498,6 +507,10 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
         lockId,
       });
       return { transactionHash: hash, lockId, authId };
+    },
+
+    async escrowAddress() {
+      return paymentEscrow();
     },
 
     async lockOf(lockId) {

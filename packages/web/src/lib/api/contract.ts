@@ -350,6 +350,16 @@ export interface CashLegLock {
   beneficiary: string | null;
   amountMinor: MinorUnits | null;
   claimableUntil: string | null;
+  /**
+   * The preimage that releases the lock, and not a credential.
+   *
+   * `claim` checks the caller as well as the hash, so the secret alone moves nothing — and
+   * the escrow publishes it in the clear the moment anyone claims. It is on the wire because
+   * the seller needs it to build their own transaction.
+   */
+  secret: string | null;
+  /** The `DvpEscrow` the claim is sent to. Without it the seller cannot build the call. */
+  escrowAddress: string | null;
   explorerUrl: string | null;
 }
 
@@ -401,6 +411,8 @@ export function readCashLegLock(value: unknown, path: string): CashLegLock | nul
     beneficiary: readOptionalString(field(body, 'beneficiary'), `${path}.beneficiary`),
     amountMinor: readOptionalMoney(field(body, 'amountMinor'), `${path}.amountMinor`),
     claimableUntil: readOptionalString(field(body, 'claimableUntil'), `${path}.claimableUntil`),
+    secret: readOptionalString(field(body, 'secret'), `${path}.secret`),
+    escrowAddress: readOptionalString(field(body, 'escrowAddress'), `${path}.escrowAddress`),
     explorerUrl: readOptionalString(field(body, 'explorerUrl'), `${path}.explorerUrl`),
   };
 }

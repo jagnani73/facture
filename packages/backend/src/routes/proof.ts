@@ -131,6 +131,14 @@ export interface TradeProof {
        * A single delivery of the only key is not a delivery mechanism.
        */
       secret: string | null;
+      /**
+       * The `DvpEscrow` to send `claim` to.
+       *
+       * Published because the seller sends that transaction themselves — the escrow
+       * checks the caller, so the venue cannot collect for them — and an address the
+       * screen does not carry is a claim nobody can make.
+       */
+      escrowAddress: string | null;
       explorerUrl: string | null;
     } | null;
   };
@@ -235,16 +243,19 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
       ? null
       : await (async () => {
           const lockId = trade.arcLockId as string;
+          const escrow = getArcEscrow();
+          const escrowAddress = await escrow.escrowAddress().catch(() => null);
           const base = {
             lockId,
             beneficiary: null,
             amountMinor: null,
             claimableUntil: null,
             secret: trade.arcSecret,
+            escrowAddress,
             explorerUrl: link(trade.cashTransaction, explorer.arcTx),
           };
           try {
-            const lock = await getArcEscrow().lockOf(lockId);
+            const lock = await escrow.lockOf(lockId);
             if (lock === null) return { ...base, status: 'unknown' };
             return {
               lockId,
@@ -253,6 +264,7 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
               amountMinor: money(lock.amount),
               claimableUntil: new Date(lock.timeout * 1000).toISOString(),
               secret: trade.arcSecret,
+              escrowAddress,
               explorerUrl: base.explorerUrl,
             };
           } catch {

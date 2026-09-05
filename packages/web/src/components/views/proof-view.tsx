@@ -22,6 +22,7 @@ import {
   halfSettledLegs,
   settlementStateOf,
 } from '@/lib/settlement';
+import { ClaimPayout } from '@/components/claim-payout';
 import { Failure, Pending } from '@/components/ui/async';
 import { Card, CardHead, Label, PageHeader, Row, buttonClasses } from '@/components/ui/primitives';
 
@@ -357,6 +358,12 @@ function Proof({ record }: { record: ProofRecord }) {
               {record.cashLeg.lock.explorerUrl ? (
                 <Explorer href={record.cashLeg.lock.explorerUrl} label="Open in ArcScan" />
               ) : null}
+              {/*
+                Renders only for the seller whose wallet IS the beneficiary — the component
+                returns null for everyone else, because `claim` checks the caller and
+                offering a button that reverts is worse than offering none.
+              */}
+              <ClaimPayout lock={record.cashLeg.lock} />
             </div>
           )}
         </div>

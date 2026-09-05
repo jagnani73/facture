@@ -412,6 +412,7 @@ export function fakeArcEscrow(overrides: Partial<ArcEscrow> = {}): ArcEscrow {
     executePayout: () =>
       Promise.resolve({ transactionHash: '0xarc-payout', lockId: '0xlock', authId: '0xauth' }),
     lockOf: () => Promise.resolve(null),
+    escrowAddress: () => Promise.resolve('0xescrow'),
     ...overrides,
   };
 }
