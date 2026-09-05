@@ -800,7 +800,28 @@ export class SqliteStore implements Store {
           .get();
         if (!current) throw notFound(`Customer ${input.debtorId}`);
 
-        if (inserted.length === 0) return { debtor: current, alreadyRecorded: true };
+        if (inserted.length === 0) {
+          /*
+           * The row that won. Read inside the same transaction that lost the insert, so the
+           * outcome reported back is the one the ledger actually holds rather than the one
+           * this call proposed — that difference is what tells a replayed default from a
+           * default arriving on top of a payment, and the two are otherwise identical from
+           * outside.
+           */
+          const existing = tx
+            .select()
+            .from(settlementOutcomes)
+            .where(
+              and(
+                eq(settlementOutcomes.debtorId, input.debtorId),
+                eq(settlementOutcomes.invoiceId, input.invoiceId),
+              ),
+            )
+            .limit(1)
+            .get();
+          if (!existing) throw notFound(`Settlement outcome for receivable ${input.invoiceId}`);
+          return { debtor: current, alreadyRecorded: true, recorded: existing.outcome };
+        }
 
         // The accumulator moves in JS, not in SQL. `settled_face_value` is a TEXT money
         // column and `col + ?` would make SQLite do float arithmetic on it. Safe to
@@ -821,7 +842,7 @@ export class SqliteStore implements Store {
           .get();
         if (!debtor) throw notFound(`Customer ${input.debtorId}`);
 
-        return { debtor, alreadyRecorded: false };
+        return { debtor, alreadyRecorded: false, recorded: input.outcome };
       }, IMMEDIATE),
     );
   }

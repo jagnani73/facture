@@ -143,6 +143,17 @@ export interface RecordOutcomeResult {
    * be observed twice; a rating may only move once per receivable.
    */
   readonly alreadyRecorded: boolean;
+  /**
+   * The outcome that actually stands on the ledger for this receivable — the one this call
+   * wrote, or the one that was already there.
+   *
+   * Without it `alreadyRecorded` is the only thing a caller learns from a conflict, and
+   * "some outcome exists" is not enough to tell a replayed default from a default landing
+   * on top of a payment. Those two look identical from outside and one of them is the
+   * ledger being contradicted, so declaring a default has to be able to see which it is
+   * before it moves the invoice. `settlement_outcomes` had no reader at all until this.
+   */
+  readonly recorded: SettlementOutcome;
 }
 
 export interface IssuanceJobPatch {

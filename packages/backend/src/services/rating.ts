@@ -203,6 +203,16 @@ export function accumulate(
  */
 export interface RecordedOutcome extends RatingAssessment {
   alreadyRecorded: boolean;
+  /**
+   * The outcome the ledger holds for this receivable, which on a replay is NOT necessarily
+   * the one the caller passed in.
+   *
+   * The ledger is written once per receivable and is the authority afterwards. A caller
+   * that reports its own proposed outcome instead would tell a seller their customer paid
+   * on time on a call that wrote nothing — and, worse, would let a default be declared
+   * against a receivable already recorded as paid without either side noticing.
+   */
+  recorded: SettlementOutcome;
 }
 
 export interface RatingService {
@@ -261,7 +271,7 @@ export const ratingService: RatingService = {
    */
   async recordOutcome(input) {
     const store = getStore();
-    const { debtor, alreadyRecorded } = await store.recordOutcome({
+    const { debtor, alreadyRecorded, recorded } = await store.recordOutcome({
       debtorId: input.debtorId,
       invoiceId: input.invoiceId,
       outcome: input.outcome,
@@ -273,6 +283,6 @@ export const ratingService: RatingService = {
     if (!alreadyRecorded && debtor.rating !== assessment.rating) {
       await store.updateDebtorRating(debtor.id, assessment.rating);
     }
-    return { ...assessment, alreadyRecorded };
+    return { ...assessment, alreadyRecorded, recorded };
   },
 };

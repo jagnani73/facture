@@ -161,6 +161,40 @@ describe('money is TEXT, not INTEGER', () => {
     expect(replay.debtor.settledFaceValue).toBe(face);
     expect(replay.debtor.settledOnTime).toBe(1);
   });
+
+  it('reports the outcome the ledger holds when a later call proposes another', async () => {
+    const ids = await parties();
+    const face = 6_400_00n;
+    const invoice = await store.insertInvoice(invoiceRow(ids, face));
+
+    await store.recordOutcome({
+      debtorId: ids.debtorId,
+      invoiceId: invoice.id,
+      outcome: 'on_time',
+      faceValue: face,
+      at: new Date('2026-12-04T00:00:00.000Z'),
+    });
+
+    /*
+     * Declaring a default over a receivable already recorded as paid. The insert loses to the
+     * unique index and nothing moves — which is right — but `alreadyRecorded` alone cannot
+     * tell that from a replayed default, and one of those contradicts a settled fact that the
+     * customer has already been credited for. So the row that WON is read back inside the
+     * same transaction, and it is what the caller refuses on.
+     */
+    const clash = await store.recordOutcome({
+      debtorId: ids.debtorId,
+      invoiceId: invoice.id,
+      outcome: 'default',
+      faceValue: face,
+      at: new Date('2026-12-20T00:00:00.000Z'),
+    });
+
+    expect(clash.alreadyRecorded).toBe(true);
+    expect(clash.recorded).toBe('on_time');
+    expect(clash.debtor.defaulted).toBe(0);
+    expect(clash.debtor.settledOnTime).toBe(1);
+  });
 });
 
 describe('the foreign_keys pragma is actually on', () => {

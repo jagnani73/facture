@@ -42,7 +42,7 @@ import { getNotifier } from '../services/notifier.js';
 import { quoteEngine } from '../services/quote-engine.js';
 import { ratingService } from '../services/rating.js';
 import { settlementService } from '../services/settlement.js';
-import { readJson, readParams, readQuery } from '../validate.js';
+import { readJson, readOptionalJson, readParams, readQuery } from '../validate.js';
 import { moneyString, wireInvoice, wireQuote, wireRefusalReceipt } from '../wire.js';
 
 const uuidParam = z.object({ id: z.uuid() });
@@ -78,6 +78,22 @@ const confirmationDecisionBody = z.object({
   decision: z.enum(['confirmed', 'disputed']),
   /** Required when disputing: the seller needs to know what to fix. */
   note: z.string().min(1).max(500).optional(),
+});
+
+/**
+ * The one thing maturity cannot work out for itself: when the debtor's money landed.
+ *
+ * The debtor pays into the venue's collection account off chain, by whatever rail they
+ * already use, so this is a fact only the venue holds. It is the sole input to the
+ * on-time/late call, and stating it is what stops that call being made against the clock —
+ * see `settleAtMaturity`, where reading the button-press time instead used to record a
+ * receivable matured a week late as a customer who paid late.
+ *
+ * Optional, and absent is not a synonym for "now": a receivable that is already past due is
+ * refused rather than guessed at.
+ */
+const matureBody = z.object({
+  paidAt: z.iso.datetime().optional(),
 });
 
 export const invoiceRoutes = new Hono<AppEnv>();
@@ -376,11 +392,20 @@ invoiceRoutes.post('/:id/confirmation-request', async (c) => {
  * is the venue's statement that the debtor's money arrived, and that is a separate act from
  * the receivable maturing — so `payout` is an obligation anyone can look up, not a receipt.
  *
- * Operator-triggered, because nothing observes debtor payments here.
+ * Operator-triggered, because nothing observes debtor payments here. Which is also why
+ * **`paidAt` is on the request**: the same absence that makes the cash leg `pending` means
+ * this service cannot see when the money landed, and that date is the only input to whether
+ * the customer paid on time. Absent is allowed while the receivable is not yet past due, and
+ * refused after — the answer used to be taken from the clock, which recorded a receivable
+ * matured late as a customer who paid late.
  */
 invoiceRoutes.post('/:id/mature', async (c) => {
   const { id } = readParams(c, uuidParam);
-  const result = await settlementService.settleAtMaturity(id);
+  const body = await readOptionalJson(c, matureBody);
+
+  const result = await settlementService.settleAtMaturity(id, {
+    ...(body.paidAt === undefined ? {} : { paidAt: new Date(body.paidAt) }),
+  });
 
   // Read back rather than patched locally: `settleAtMaturity` moves the invoice to
   // `matured`, and the row is the authority on whether it did.
@@ -394,6 +419,13 @@ invoiceRoutes.post('/:id/mature', async (c) => {
     outcome: result.outcome,
     /** True when this receivable had already matured, so nothing moved a second time. */
     alreadyRecorded: result.alreadyRecorded,
+    /**
+     * When the debtor's money landed, as the venue stated it — echoed so a reader can see
+     * what the `on_time` / `late` call was actually made against rather than assuming it
+     * was made against the clock. Null when the venue did not state one, which is only
+     * possible while the receivable is not yet past due.
+     */
+    paidAt: body.paidAt ?? null,
     assetLeg: result.assetLeg,
     cashLeg: result.cashLeg,
     /**
@@ -404,6 +436,58 @@ invoiceRoutes.post('/:id/mature', async (c) => {
     /** Why there is no payout when there should have been one. */
     payoutError: result.payoutError,
     maturedAt: result.settledAt,
+    proofUrl: `/v1/trades/${result.tradeId}/proof`,
+  });
+});
+
+/**
+ * Default: the debtor never paid, and the venue says so.
+ *
+ * The other end of the rating loop, and the half that makes the rest of it worth reading. A
+ * grade earned from settled history only prices anything if the bad history is in it — every
+ * invoice a customer pays tightens their curve, and the market prices its own mistakes back
+ * in only because a write-off marks them permanently and widens it for every seller
+ * afterwards. Nothing wrote that mark before this route existed, and maturing an overdue
+ * unpaid receivable recorded it as `late`: a default entered in the ledger as a payment.
+ *
+ * **An act, not a timer**, exactly as the maturity payout is. A scheduled payout becomes a
+ * payment when the collection key signs, because only the venue watches the collection
+ * account and only the venue can say the debtor's money arrived. A receivable becomes a
+ * default when an operator presses this, for the mirror of that reason: only the venue can
+ * say the money is never coming. A clock left to decide it would mark customers permanently
+ * for payments three days in the post, and there is no route that takes a mark back.
+ *
+ * Safe to press twice — the rating ledger is keyed per receivable — and refused rather than
+ * applied where the ledger already says the invoice was paid.
+ */
+invoiceRoutes.post('/:id/default', async (c) => {
+  const { id } = readParams(c, uuidParam);
+  const result = await settlementService.recordDefault(id);
+
+  // Read back rather than patched locally, matching the maturity route: `recordDefault`
+  // moves the invoice to `defaulted`, and the row is the authority on whether it did.
+  const invoice = await getStore().getInvoice(id);
+  if (!invoice) throw notFound(`Invoice ${id}`);
+
+  return c.json({
+    invoice: wireInvoice(invoice),
+    /** Who is out the money: whoever held the paper, not whoever bought it first. */
+    holder: result.holder,
+    outcome: result.outcome,
+    /** True when this receivable was already written off, so nothing moved a second time. */
+    alreadyRecorded: result.alreadyRecorded,
+    /**
+     * What the holder paid and will not get back.
+     *
+     * The mandate's allocation is NOT released against it. Maturity releases because the
+     * face value came in; here the position closes at zero and the buyer takes the loss, so
+     * giving the capacity back would let the bid quote again on money that is gone.
+     */
+    lossMinor: result.lossMinor,
+    faceValueMinor: result.faceValueMinor,
+    /** The mark itself. `D`, and no amount of good behaviour afterwards clears it. */
+    rating: result.rating,
+    declaredAt: result.declaredAt,
     proofUrl: `/v1/trades/${result.tradeId}/proof`,
   });
 });

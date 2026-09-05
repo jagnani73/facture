@@ -25,6 +25,7 @@ import {
   resumeIssuance,
   symbolFor,
 } from '../src/services/issuance.js';
+import { ratingService } from '../src/services/rating.js';
 import { EXPIRED_AFTER_SECONDS, settlementService } from '../src/services/settlement.js';
 import { call, createHarness, type Harness } from './helpers.js';
 
@@ -46,6 +47,18 @@ afterEach(() => {
 });
 
 const asOf = `?asOf=${encodeURIComponent(MARKET_NOW_ISO)}`;
+
+/*
+ * MF-2033 falls due on 2026-09-12 and the grace is the rest of that day, so these three
+ * instants are the whole on-time/late question: a venue maturing the receivable long after
+ * it fell due, a payment made on the day, and a payment made after it. They are named
+ * because the point of every test below is WHICH of them the outcome is computed from —
+ * the answer used to be the first one, which is a fact about the venue's admin rather than
+ * about the customer.
+ */
+const WELL_AFTER_DUE = '2026-10-03T11:00:00.000Z';
+const PAID_ON_THE_DAY = '2026-09-12T09:00:00.000Z';
+const PAID_LATE = '2026-09-19T09:00:00.000Z';
 
 describe('maturity', () => {
   it('routes to the current holder and marks the invoice matured', async () => {
@@ -193,10 +206,18 @@ describe('maturity', () => {
     expect(result.outcome).toBe('on_time');
   });
 
-  it('counts the day after the due date as late', async () => {
+  it('counts a payment the day after the due date as late', async () => {
     vi.setSystemTime(new Date('2026-09-13T00:30:00.000Z'));
 
-    const result = await settlementService.settleAtMaturity(h.seeded.invoiceIds['INV-2033'] ?? '');
+    /*
+     * The stated payment date, not the clock. This test used to pass without the second
+     * argument, which meant it asserted that maturing a receivable half an hour past the
+     * deadline recorded the customer as having paid late — with nothing on the path
+     * establishing that they had paid at all. See `when a payment counts as late` below.
+     */
+    const result = await settlementService.settleAtMaturity(h.seeded.invoiceIds['INV-2033'] ?? '', {
+      paidAt: new Date('2026-09-13T00:15:00.000Z'),
+    });
 
     expect(result.outcome).toBe('late');
   });
@@ -413,6 +434,359 @@ describe('POST /v1/invoices/:id/mature', () => {
     const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2041')}/mature`);
 
     expect(res.status).toBe(409);
+    expect(res.body.detail).toContain('never settled');
+  });
+
+  it('takes the payment date on the wire and prices the outcome off it', async () => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2033')}/mature`, {
+      body: { paidAt: PAID_LATE },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.outcome).toBe('late');
+    // Echoed back, so a reader can see what the on-time call was made against rather than
+    // assuming it was made against the clock — which is what it used to be made against.
+    expect(res.body.paidAt).toBe(PAID_LATE);
+  });
+
+  it('refuses to guess when a past-due receivable arrives with no payment date', async () => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2033')}/mature`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.detail).toContain('past due');
+    expect(res.body.detail).toContain('paidAt');
+  });
+});
+
+/**
+ * The on-time / late distinction, which used to be a statement about the venue's admin.
+ *
+ * `late` was decided by comparing the DUE DATE against the moment the operator pressed the
+ * maturity button. Nothing on that path establishes that the debtor paid at all, so an
+ * overdue receivable matured after the fact — including one that was never going to be paid
+ * — was written to the rating ledger as a customer who paid late. That is a permanent
+ * widening of their curve for every seller afterwards, sourced from when someone got round
+ * to clicking.
+ *
+ * The debtor pays into the venue's collection account off chain, so the date the money
+ * landed is stated rather than observed. Everything below is about that one input.
+ */
+describe('when a payment counts as late', () => {
+  /** MF-2033 falls due on the 12th; the grace is the rest of that day and no more. */
+  const invoiceId = (): string => h.seeded.invoiceIds['INV-2033'] ?? '';
+  const debtorId = (): string => h.seeded.debtorIds['DBT-LUMEN'] ?? '';
+
+  it('is late only when the venue says the money landed after the due date', async () => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+    const before = await h.store.getDebtor(debtorId());
+
+    const result = await settlementService.settleAtMaturity(invoiceId(), {
+      paidAt: new Date(PAID_LATE),
+    });
+
+    expect(result.outcome).toBe('late');
+    expect((await h.store.getDebtor(debtorId()))?.settledLate).toBe((before?.settledLate ?? 0) + 1);
+  });
+
+  it('is on time for a payment made on the due date, however late the venue records it', async () => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+    const before = await h.store.getDebtor(debtorId());
+
+    /*
+     * The case the old comparison got wrong every time. The debtor paid at nine in the
+     * morning on the day the invoice fell due; the venue matured it three weeks later. The
+     * customer paid on time and the ledger has to say so.
+     */
+    const result = await settlementService.settleAtMaturity(invoiceId(), {
+      paidAt: new Date(PAID_ON_THE_DAY),
+    });
+
+    expect(result.outcome).toBe('on_time');
+    const after = await h.store.getDebtor(debtorId());
+    expect(after?.settledOnTime).toBe((before?.settledOnTime ?? 0) + 1);
+    expect(after?.settledLate).toBe(before?.settledLate);
+  });
+
+  it('refuses a past-due receivable with no payment date rather than calling it late', async () => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+    const before = await h.store.getDebtor(debtorId());
+
+    await expect(settlementService.settleAtMaturity(invoiceId())).rejects.toThrow(/past due/);
+
+    /*
+     * And it refuses before writing anything. "We do not know whether this was paid" is not
+     * a rating input, and half-recording one would be worse than the guess it replaced:
+     * the ledger is written once per receivable and the first write is the one that stands.
+     */
+    const after = await h.store.getDebtor(debtorId());
+    expect(after?.settledLate).toBe(before?.settledLate);
+    expect(after?.settledOnTime).toBe(before?.settledOnTime);
+    expect((await h.store.getInvoice(invoiceId()))?.status).toBe('sold');
+  });
+
+  it('still needs no payment date while the receivable is not yet past due', async () => {
+    // Unchanged, and it is the ordinary case: there is no instant left at which the payment
+    // could have been late, so nothing has to be stated for the answer to be sound.
+    const result = await settlementService.settleAtMaturity(invoiceId());
+
+    expect(result.outcome).toBe('on_time');
+  });
+
+  it('refuses a payment date that has not happened yet', async () => {
+    await expect(
+      settlementService.settleAtMaturity(invoiceId(), { paidAt: new Date(WELL_AFTER_DUE) }),
+    ).rejects.toThrow(/in the future/);
+  });
+
+  it('refuses a payment date from before the invoice was raised', async () => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+
+    await expect(
+      settlementService.settleAtMaturity(invoiceId(), {
+        paidAt: new Date('2026-07-01T00:00:00.000Z'),
+      }),
+    ).rejects.toThrow(/before invoice/);
+  });
+
+  it('reports what the ledger holds, not what the second call worked out', async () => {
+    await settlementService.settleAtMaturity(invoiceId());
+
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+    const replay = await settlementService.settleAtMaturity(invoiceId(), {
+      paidAt: new Date(PAID_LATE),
+    });
+
+    /*
+     * The ledger is written once per receivable and is the authority afterwards, because it
+     * is what the curve reads. A replay that reported its own recomputed answer would tell a
+     * seller their customer paid late on a call that wrote nothing.
+     */
+    expect(replay.alreadyRecorded).toBe(true);
+    expect(replay.outcome).toBe('on_time');
+    expect((await h.store.getDebtor(debtorId()))?.settledLate).toBe(0);
+  });
+});
+
+/**
+ * Writing a receivable off.
+ *
+ * The other end of the rating loop, and the half that makes the rest of it worth reading: a
+ * grade earned from settled history prices nothing unless the bad history is in it. Before
+ * this existed `SettlementOutcome: 'default'` had no producer and no route wrote
+ * `invoices.status = 'defaulted'`, so the permanent mark the whole self-correcting argument
+ * rests on was unreachable — and maturing an overdue unpaid receivable recorded it as
+ * `late`, which is a write-off entered in the ledger as a payment.
+ */
+describe('default', () => {
+  const invoiceId = (): string => h.seeded.invoiceIds['INV-2033'] ?? '';
+  const debtorId = (): string => h.seeded.debtorIds['DBT-LUMEN'] ?? '';
+
+  /** Nothing may be written off before it has actually failed to be paid. */
+  beforeEach(() => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+  });
+
+  it('marks the customer permanently and moves the invoice to defaulted', async () => {
+    const result = await settlementService.recordDefault(invoiceId());
+
+    expect(result.outcome).toBe('default');
+    expect(result.rating.grade).toBe('D');
+    expect(result.rating.permanentlyMarked).toBe(true);
+    expect((await h.store.getInvoice(invoiceId()))?.status).toBe('defaulted');
+    expect((await h.store.getDebtor(debtorId()))?.defaulted).toBe(1);
+  });
+
+  it('names who took the loss, and how much of it', async () => {
+    const trade = await h.store.getTrade(h.seeded.tradeIds['TRD-4417'] ?? '');
+
+    const result = await settlementService.recordDefault(invoiceId());
+
+    expect(result.holder.buyerId).toBe(h.seeded.buyerIds['BUY-ASHGROVE']);
+    expect(result.lossMinor).toBe(trade?.proceedsMinor.toString(10));
+    expect(result.faceValueMinor).toBe('9500000');
+  });
+
+  it('marks the customer once, however many times it is declared', async () => {
+    await settlementService.recordDefault(invoiceId());
+    const once = await h.store.getDebtor(debtorId());
+
+    /*
+     * A default is declared by a person pressing a button, and a person presses a button
+     * twice. Idempotency here is the same unique index maturity relies on — `(debtor_id,
+     * invoice_id)` on the settlement-outcome ledger — so the second declaration finds the
+     * fact already written and moves nothing.
+     */
+    const replay = await settlementService.recordDefault(invoiceId());
+    const twice = await h.store.getDebtor(debtorId());
+
+    expect(replay.alreadyRecorded).toBe(true);
+    expect(replay.outcome).toBe('default');
+    expect(twice?.defaulted).toBe(once?.defaulted);
+    expect(twice?.defaulted).toBe(1);
+    expect((await h.store.getInvoice(invoiceId()))?.status).toBe('defaulted');
+  });
+
+  it('does not hand the mandate back capital the buyer lost', async () => {
+    const trade = await h.store.getTrade(h.seeded.tradeIds['TRD-4417'] ?? '');
+    const before = await h.store.getMandate(trade?.mandateId ?? '');
+
+    await settlementService.recordDefault(invoiceId());
+
+    /*
+     * The opposite of maturity, deliberately. Maturity releases because the face value came
+     * in and the position closed whole; here it closes at zero and the buyer takes the loss,
+     * so releasing would let the bid quote again on money that is gone.
+     */
+    const after = await h.store.getMandate(trade?.mandateId ?? '');
+    expect(after?.allocatedMinor).toBe(before?.allocatedMinor);
+  });
+
+  it('refuses a receivable that has already matured', async () => {
+    await settlementService.settleAtMaturity(invoiceId(), { paidAt: new Date(PAID_ON_THE_DAY) });
+
+    await expect(settlementService.recordDefault(invoiceId())).rejects.toThrow(
+      /already matured — the debtor paid it/,
+    );
+    expect((await h.store.getDebtor(debtorId()))?.defaulted).toBe(0);
+    expect((await h.store.getInvoice(invoiceId()))?.status).toBe('matured');
+  });
+
+  it('refuses to overwrite a settlement already on the rating ledger', async () => {
+    /*
+     * The case only the ledger can distinguish. A maturity that wrote its outcome and died
+     * before moving the invoice leaves `on_time` on the ledger and `sold` on the row — from
+     * outside, identical to a default that tore in the same place. Going ahead would move
+     * the invoice to `defaulted` over a ledger saying the customer paid, and the accumulator
+     * would side with the payment for ever.
+     */
+    await h.store.recordOutcome({
+      debtorId: debtorId(),
+      invoiceId: invoiceId(),
+      outcome: 'on_time',
+      faceValue: 9_500_000n,
+      at: new Date(PAID_ON_THE_DAY),
+    });
+
+    await expect(settlementService.recordDefault(invoiceId())).rejects.toThrow(
+      /already recorded on the rating ledger as paid on time/,
+    );
+    expect((await h.store.getInvoice(invoiceId()))?.status).toBe('sold');
+    expect((await h.store.getDebtor(debtorId()))?.defaulted).toBe(0);
+  });
+
+  it('refuses a receivable that is not yet overdue', async () => {
+    vi.setSystemTime(new Date(MARKET_NOW_ISO));
+
+    await expect(settlementService.recordDefault(invoiceId())).rejects.toThrow(/not due until/);
+    expect((await h.store.getDebtor(debtorId()))?.defaulted).toBe(0);
+  });
+
+  it('refuses an invoice the lifecycle does not allow to be written off', async () => {
+    /*
+     * MF-2041 is confirmed and unsold. The refusal comes from the invoice machine in
+     * `@facture/shared` rather than a list of statuses copied into this service — a copy is
+     * how the two come to disagree, and the disagreement shows up as a permanent mark on a
+     * customer whose invoice nobody ever bought.
+     */
+    await expect(
+      settlementService.recordDefault(h.seeded.invoiceIds['INV-2041'] ?? ''),
+    ).rejects.toThrow(/cannot go from confirmed to defaulted/);
+  });
+
+  it('refuses a receivable that never settled', async () => {
+    /*
+     * MF-2043 is disputed, which the lifecycle DOES allow to default — a dispute resolved
+     * against the seller, or simply never paid. It was never sold, so there is no position
+     * to write off: the rating ledger is one row per settled receivable, and a grade built
+     * from invoices the venue never priced or delivered would be a record of the seller's
+     * collections rather than of the customer.
+     */
+    await expect(
+      settlementService.recordDefault(h.seeded.invoiceIds['INV-2043'] ?? ''),
+    ).rejects.toThrow(/never settled/);
+  });
+
+  it('will not let a written-off receivable be matured afterwards', async () => {
+    await settlementService.recordDefault(invoiceId());
+
+    /*
+     * The reverse guard, and it has to be the ledger's rather than the invoice status's: a
+     * maturity that got past it would release the mandate's capital and replace a permanent
+     * mark with a payment, which is the same corruption in the other direction.
+     */
+    await expect(
+      settlementService.settleAtMaturity(invoiceId(), { paidAt: new Date(PAID_LATE) }),
+    ).rejects.toThrow(/recorded as defaulted/);
+    expect((await h.store.getInvoice(invoiceId()))?.status).toBe('defaulted');
+    expect((await h.store.getDebtor(debtorId()))?.settledLate).toBe(0);
+  });
+
+  it('widens the customer for every seller afterwards, not just this one', async () => {
+    await settlementService.recordDefault(invoiceId());
+
+    // The mark is on the customer, and `D` ranks BELOW `UNRATED` in `@facture/shared` — so a
+    // mandate written with the widest floor a buyer can pick still refuses them.
+    const assessment = await ratingService.ratingFor(debtorId());
+    expect(assessment.rating).toBe('D');
+    expect(assessment.permanentlyMarked).toBe(true);
+    expect(assessment.nextGradeAt).toBeNull();
+
+    // And the stored projection moved with it. The book's list screen renders that column
+    // rather than recomputing per row, so a grade left behind there is a customer still
+    // being quoted at their old price on the one screen a seller actually looks at.
+    expect((await h.store.getDebtor(debtorId()))?.rating).toBe('D');
+  });
+});
+
+describe('POST /v1/invoices/:id/default', () => {
+  const invoiceOf = (label: string): string => h.seeded.invoiceIds[label] ?? '';
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+  });
+
+  it('runs the path end to end and reports the mark', async () => {
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2033')}/default`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.invoice.status).toBe('defaulted');
+    expect(res.body.outcome).toBe('default');
+    expect(res.body.holder.buyerId).toBe(h.seeded.buyerIds['BUY-ASHGROVE']);
+    expect(res.body.rating.grade).toBe('D');
+    expect(res.body.rating.permanentlyMarked).toBe(true);
+    expect(res.body.proofUrl).toBe(`/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+  });
+
+  it('is safe to press twice', async () => {
+    await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2033')}/default`);
+    const again = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2033')}/default`);
+
+    expect(again.status).toBe(200);
+    expect(again.body.alreadyRecorded).toBe(true);
+    expect((await h.store.getDebtor(h.seeded.debtorIds['DBT-LUMEN'] ?? ''))?.defaulted).toBe(1);
+  });
+
+  it('refuses a matured receivable in words, not a bare error', async () => {
+    await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2033')}/mature`, {
+      body: { paidAt: PAID_ON_THE_DAY },
+    });
+
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2033')}/default`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('conflict');
+    expect(res.body.detail).toContain('the debtor paid it');
+  });
+
+  it('refuses an invoice that never sold, in words', async () => {
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2043')}/default`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('conflict');
     expect(res.body.detail).toContain('never settled');
   });
 });

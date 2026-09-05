@@ -739,8 +739,12 @@ export class MemoryStore implements Store {
     if (!debtor) throw notFound(`Customer ${input.debtorId}`);
 
     const key = `${input.debtorId}:${input.invoiceId}`;
-    if (this.outcomes.has(key)) {
-      return { debtor: clone(debtor), alreadyRecorded: true };
+    const existing = this.outcomes.get(key);
+    if (existing !== undefined) {
+      // The outcome the ledger holds, not the one this call proposed. A caller that only
+      // learns "something was already here" cannot tell a replayed default from a default
+      // landing on top of a payment, and one of those contradicts a settled fact.
+      return { debtor: clone(debtor), alreadyRecorded: true, recorded: existing.outcome };
     }
 
     this.outcomes.set(key, {
@@ -766,7 +770,7 @@ export class MemoryStore implements Store {
       lastSettlementAt: input.at,
     };
     this.debtors.set(next.id, next);
-    return { debtor: clone(next), alreadyRecorded: false };
+    return { debtor: clone(next), alreadyRecorded: false, recorded: input.outcome };
   }
 
   // --- issuance and indexing ----------------------------------------------------

@@ -21,8 +21,8 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import type { Currency, SettlementLegState } from '@facture/shared';
-import { CURRENCY_DECIMALS } from '@facture/shared';
+import type { Currency, Rating, SettlementLegState } from '@facture/shared';
+import { CURRENCY_DECIMALS, transitionInvoice } from '@facture/shared';
 import { keccak256 } from 'viem';
 import { explorer } from '../chain.js';
 import { getConfig } from '../config.js';
@@ -232,6 +232,53 @@ export interface MaturityResult extends SettlementResult {
   alreadyRecorded: boolean;
 }
 
+/**
+ * When the debtor's money landed in the venue's collection account.
+ *
+ * The one input the on-time/late distinction takes, and a fact only the venue holds: the
+ * debtor pays off chain, by whatever rail they already use, so nothing in this service can
+ * observe it. Absent means the venue has not stated it — which is a different thing from
+ * "it was late", and used to be recorded as the same thing.
+ */
+export interface MaturityObservation {
+  paidAt?: Date | undefined;
+}
+
+/**
+ * A receivable that will never be paid, and what it cost.
+ *
+ * Deliberately not a {@link SettlementResult}: nothing settled. There are no legs, no
+ * transaction and no payout, because the whole content of a default is that the money did
+ * not move and is not coming.
+ */
+export interface DefaultResult {
+  invoiceId: string;
+  /** The trade that bought the paper. Whoever holds it now is who takes the loss. */
+  tradeId: string;
+  holder: { buyerId: string; mandateId: string; name: string | null };
+  /**
+   * What the holder paid and will not get back, minor units.
+   *
+   * Reported rather than released. See the note in `recordDefault` on why the mandate's
+   * allocation stays where it is.
+   */
+  lossMinor: string;
+  /** Face value the debtor owed and did not pay. */
+  faceValueMinor: string;
+  /** Always `default` — a mismatch with the ledger is refused before it gets this far. */
+  outcome: SettlementOutcome;
+  /**
+   * True when this receivable was already in the ledger as a default, so nothing moved.
+   *
+   * A default is declared by a person pressing a button, and a person presses a button
+   * twice. The permanent mark on the customer must land exactly once regardless.
+   */
+  alreadyRecorded: boolean;
+  /** The customer's grade after the mark. `D`, permanently, once anything has defaulted. */
+  rating: { debtorId: string; grade: Rating; permanentlyMarked: boolean; reason: string };
+  declaredAt: string;
+}
+
 /** One expired armed trade, and what unwinding it gave back. */
 export interface ReclaimedTrade {
   tradeId: string;
@@ -295,7 +342,17 @@ export interface SettlementService {
    * whoever bought it first. Without this the paper cannot legitimately change hands,
    * because a second buyer would have no way to be paid.
    */
-  settleAtMaturity(invoiceId: string): Promise<MaturityResult>;
+  settleAtMaturity(invoiceId: string, observed?: MaturityObservation): Promise<MaturityResult>;
+  /**
+   * The debtor never paid, and the venue says so.
+   *
+   * An explicit act rather than a timer, for the same reason the payout is: a receivable
+   * falling overdue is not evidence that the money is never coming, and only the venue can
+   * make that call because only the venue watches the collection account. A clock that
+   * defaulted customers on its own would mark them permanently for a payment three days in
+   * the post.
+   */
+  recordDefault(invoiceId: string): Promise<DefaultResult>;
 }
 
 /**
@@ -1260,7 +1317,7 @@ export const settlementService: SettlementService = {
    * settlement is exactly what `ScheduleCreateTransaction` is for, and it is not a
    * streaming primitive.
    */
-  async settleAtMaturity(invoiceId) {
+  async settleAtMaturity(invoiceId, observed = {}) {
     const store = getStore();
     const invoice = await store.getInvoice(invoiceId);
     if (!invoice) throw notFound(`Invoice ${invoiceId}`);
@@ -1280,16 +1337,87 @@ export const settlementService: SettlementService = {
     }
 
     const now = new Date();
-    const outcome: SettlementOutcome =
-      now.getTime() <= onTimeDeadline(invoice.dueAt).getTime() ? 'on_time' : 'late';
 
-    const { alreadyRecorded } = await ratingService.recordOutcome({
+    /*
+     * `late` means the debtor paid after the due date. It used to mean something else.
+     *
+     * The comparison here was `now` against the due date — the instant the OPERATOR pressed
+     * the button, not the instant the money landed — so a receivable matured a week after it
+     * fell due was written to the rating ledger as a late payment whether the debtor had
+     * paid early, paid on the day, or never paid at all. That is a permanent widening of a
+     * customer's curve for every seller afterwards, sourced from the venue's own admin
+     * timing. `late` was doing duty as the fallback for "we do not know yet", which is the
+     * one thing a rating input must never be.
+     *
+     * The debtor pays into the venue's collection account off chain, so the date the money
+     * landed is a fact only the venue holds and nothing here can observe. It is therefore
+     * stated, not inferred:
+     *
+     * - stated -> compare THAT against the due date. This is the only path that can produce
+     *   `late`, and it produces `on_time` just as readily for a payment made on the day.
+     * - not stated, receivable not yet past due -> `on_time`. There is no instant left at
+     *   which the payment could have been late; the deadline has not passed.
+     * - not stated, receivable past due -> refused below. Guessing in either direction is a
+     *   permanent claim about a customer made from no evidence, and there is a route for
+     *   the other answer: if the money is never coming, that is a default, not a late
+     *   payment recorded as one.
+     */
+    const deadline = onTimeDeadline(invoice.dueAt);
+    if (observed.paidAt === undefined && now.getTime() > deadline.getTime()) {
+      throw conflict(
+        'conflict',
+        `Invoice ${invoiceId} fell due on ${invoice.dueAt.toISOString().slice(0, 10)} and is ` +
+          'past due, so whether it was paid on time is not something this call can work out. ' +
+          'Say when the money landed with `paidAt`, or record a default if it never will.',
+      );
+    }
+    const paidAt = observed.paidAt ?? now;
+
+    /*
+     * A stated payment date is a claim about the past, and it is the claim the permanent
+     * half of the rating ladder is computed from. A date in the future would record a
+     * payment nobody has made; a date before the invoice was raised would record one against
+     * an invoice that did not exist. Both would decide `late` as confidently as a real one.
+     */
+    if (paidAt.getTime() > now.getTime()) {
+      throw badRequest(
+        `A payment cannot have landed at ${paidAt.toISOString()}, which is in the future.`,
+      );
+    }
+    if (paidAt.getTime() < invoice.issuedAt.getTime()) {
+      throw badRequest(
+        `A payment cannot have landed at ${paidAt.toISOString()}, before invoice ${invoiceId} ` +
+          `was raised on ${invoice.issuedAt.toISOString().slice(0, 10)}.`,
+      );
+    }
+
+    const outcome: SettlementOutcome = paidAt.getTime() <= deadline.getTime() ? 'on_time' : 'late';
+
+    const { alreadyRecorded, recorded } = await ratingService.recordOutcome({
       debtorId: invoice.debtorId,
       invoiceId,
       outcome,
       faceValue: invoice.faceValue,
-      at: now,
+      at: paidAt,
     });
+
+    /*
+     * A defaulted receivable does not un-default.
+     *
+     * `recordOutcome` writes once per receivable and reports what the ledger actually holds,
+     * so this is reachable only when a default was declared first — and `recordOutcome` will
+     * have written nothing, which is what makes refusing here safe rather than half-done.
+     * Without the check the release and the status write below would run, handing the
+     * mandate back capital it lost and replacing a permanent mark with a payment.
+     */
+    if (recorded === 'default') {
+      throw conflict(
+        'conflict',
+        `Invoice ${invoiceId} is recorded as defaulted on the rating ledger. A receivable ` +
+          'that was written off cannot be matured; correcting that is a decision about the ' +
+          "customer's permanent record, not a second press of this button.",
+      );
+    }
 
     /*
      * The ledger write is the first of two steps and the invoice status is the marker for
@@ -1424,7 +1552,7 @@ export const settlementService: SettlementService = {
       invoiceId,
       tradeId: holderTrade.id,
       holder: holderTrade.buyerId,
-      outcome,
+      outcome: recorded,
       alreadyRecorded,
       scheduleId: payout?.scheduleId ?? null,
     });
@@ -1436,7 +1564,14 @@ export const settlementService: SettlementService = {
         mandateId: holderTrade.mandateId,
         name: holder?.name ?? null,
       },
-      outcome,
+      /*
+       * What the ledger holds, not what this call computed. On a replay the two can differ
+       * — the first call may have been given a payment date and the second not — and the
+       * ledger is the authority, because it is what the curve reads. Reporting the local
+       * computation would tell a seller their customer paid on time on a call that wrote
+       * nothing.
+       */
+      outcome: recorded,
       alreadyRecorded,
       assetLeg: {
         chain: 'hedera',
@@ -1484,6 +1619,176 @@ export const settlementService: SettlementService = {
       payout,
       payoutError,
       settledAt: now.toISOString(),
+    };
+  },
+
+  /**
+   * The debtor never paid, and the venue says so.
+   *
+   * **This is the only thing that produces `SettlementOutcome: 'default'`, and it is the
+   * half of the rating loop the product's central claim rests on.** A rating earned from
+   * settled history is only worth reading if the bad history is in it: every invoice a
+   * customer pays tightens their curve, and the market prices its own mistakes back in only
+   * because a default marks them permanently and widens it for every seller afterwards.
+   * Until this existed nothing wrote that mark, and maturing an overdue unpaid receivable
+   * recorded it as `late` — a write-off entered in the ledger as a payment.
+   *
+   * **Declared, never inferred from a clock.** This follows the maturity payout exactly: a
+   * schedule becomes a payment when the collection key signs, because only the venue can say
+   * the debtor's money landed; a receivable becomes a default when someone presses this,
+   * because only the venue can say it never will. A timer that marked customers on its own
+   * would mark them for a payment three days in the post, and the mark does not come off.
+   *
+   * **What it deliberately does NOT do is give the mandate its capital back.** Maturity
+   * releases the allocation because the face value came in and the position closed whole. In
+   * a default the position closes at zero — non-recourse, the buyer takes the loss — so
+   * releasing here would hand a bid capital it no longer has and let it quote again on
+   * money that is gone. The allocation stays put, which is what makes the mandate's headroom
+   * reflect the loss. Writing that capital off properly means decrementing what the buyer
+   * committed as well as what it allocated, and there is no store operation that does both;
+   * `lossMinor` reports the figure rather than pretending it moved.
+   */
+  async recordDefault(invoiceId) {
+    const store = getStore();
+    const invoice = await store.getInvoice(invoiceId);
+    if (!invoice) throw notFound(`Invoice ${invoiceId}`);
+
+    /*
+     * The lifecycle decides what may be defaulted, and it lives in `@facture/shared` rather
+     * than in a list written out here — a hand-copied set of statuses is how the two come to
+     * disagree, and the disagreement would show up as either a permanent mark on a customer
+     * whose invoice was never sold, or a `matured` receivable being written off after the
+     * fact. `matured` is terminal in that table, so this is also the guard that stops a
+     * default landing on a receivable that was actually paid.
+     *
+     * A receivable already `defaulted` is not a transition; it is the replay, and it falls
+     * through to the ledger below, which is the thing that makes this idempotent.
+     */
+    if (invoice.status !== 'defaulted') {
+      const move = transitionInvoice(invoice.status, 'defaulted');
+      if (!move.ok) {
+        throw conflict(
+          'conflict',
+          invoice.status === 'matured'
+            ? `Invoice ${invoiceId} has already matured — the debtor paid it. A default ` +
+                'cannot be declared against a receivable that settled.'
+            : move.error.reason,
+        );
+      }
+    }
+
+    /*
+     * The position that takes the loss: the newest settled trade, the same holder lookup
+     * maturity uses. Whoever holds the paper now is who is out the money, not whoever bought
+     * it first.
+     *
+     * A receivable nobody bought cannot be defaulted here, and that is the ledger's rule
+     * rather than a limitation: `settlement_outcomes` is one row per SETTLED receivable, and
+     * a rating built out of invoices the venue never priced, matched or delivered would be a
+     * record of the seller's collections rather than of the customer's behaviour.
+     */
+    const settled = await store.listTrades({ invoiceId, status: 'settled', limit: 50 });
+    const holderTrade = [...settled].sort(
+      (a, b) => (b.settledAt?.getTime() ?? 0) - (a.settledAt?.getTime() ?? 0),
+    )[0];
+    if (!holderTrade) {
+      throw conflict(
+        'conflict',
+        `Invoice ${invoiceId} has never settled, so there is no position to write off and ` +
+          'nothing the rating ledger can record.',
+      );
+    }
+
+    /*
+     * Not yet overdue is not a default.
+     *
+     * The mark is permanent and it is read by every seller who ever invoices this customer
+     * afterwards, so the receivable has to have actually failed to be paid before one can be
+     * declared. A debtor who has until Friday has not defaulted on Tuesday, however
+     * confident anyone is about Friday.
+     */
+    const now = new Date();
+    const deadline = onTimeDeadline(invoice.dueAt);
+    if (invoice.status !== 'defaulted' && now.getTime() <= deadline.getTime()) {
+      throw conflict(
+        'conflict',
+        `Invoice ${invoiceId} is not due until ${invoice.dueAt.toISOString().slice(0, 10)}, ` +
+          'so it cannot have been defaulted on yet. A default is a permanent mark on the ' +
+          'customer and there is no way to take one back.',
+      );
+    }
+
+    /*
+     * The ledger write is the fact, and it is written before the invoice moves — same order
+     * as maturity, for the same reason. `recordOutcome` is keyed on `(debtor_id, invoice_id)`
+     * and writes once, so pressing this twice marks the customer once.
+     */
+    const { alreadyRecorded, recorded, ...assessment } = await ratingService.recordOutcome({
+      debtorId: invoice.debtorId,
+      invoiceId,
+      outcome: 'default',
+      faceValue: invoice.faceValue,
+      at: now,
+    });
+
+    /*
+     * A settlement already on the ledger is not overwritten, and cannot be.
+     *
+     * Reachable when a maturity recorded its outcome and died before moving the invoice —
+     * the row says `on_time`, the invoice still says `sold`, and from outside that is
+     * indistinguishable from a default that tore in the same place. `recordOutcome` wrote
+     * nothing in this case, so refusing costs no repair; going ahead would move the invoice
+     * to `defaulted` over a ledger that says the customer paid, and the two would disagree
+     * permanently with the accumulator siding with the payment.
+     */
+    if (recorded !== 'default') {
+      throw conflict(
+        'conflict',
+        `Invoice ${invoiceId} is already recorded on the rating ledger as paid ` +
+          `${recorded === 'on_time' ? 'on time' : 'late'}. A default cannot overwrite a ` +
+          'settlement that was already recorded — the customer has been credited for it.',
+      );
+    }
+
+    /*
+     * The invoice follows the ledger, and a replay that finds it already moved does nothing.
+     * The other order — status first — would let a run that died in between report a default
+     * the accumulator never saw, which is the same lie as the one this route exists to fix.
+     */
+    if (invoice.status !== 'defaulted') {
+      await store.updateInvoice(invoiceId, { status: 'defaulted' });
+    }
+
+    rootLogger.warn('receivable written off', {
+      invoiceId,
+      tradeId: holderTrade.id,
+      holder: holderTrade.buyerId,
+      mandateId: holderTrade.mandateId,
+      lossMinor: holderTrade.proceedsMinor.toString(10),
+      alreadyRecorded,
+    });
+
+    const holder = await store.getBuyer(holderTrade.buyerId);
+
+    return {
+      invoiceId,
+      tradeId: holderTrade.id,
+      holder: {
+        buyerId: holderTrade.buyerId,
+        mandateId: holderTrade.mandateId,
+        name: holder?.name ?? null,
+      },
+      lossMinor: holderTrade.proceedsMinor.toString(10),
+      faceValueMinor: invoice.faceValue.toString(10),
+      outcome: recorded,
+      alreadyRecorded,
+      rating: {
+        debtorId: invoice.debtorId,
+        grade: assessment.rating,
+        permanentlyMarked: assessment.permanentlyMarked,
+        reason: assessment.reason,
+      },
+      declaredAt: now.toISOString(),
     };
   },
 };
