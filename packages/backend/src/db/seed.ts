@@ -104,8 +104,36 @@ const SELLER = {
   label: 'SEL-MERIDIAN',
   name: 'Meridian Fabrication',
   email: 'accounts@meridianfab.co',
-  hederaAccountId: '0.0.5512',
-  arcAddress: '0x2Ee0aB7c4915dF6b83C0a1E5d724Bf9068A3c17D',
+  /*
+   * The operator's own account, not a demo number, and the two columns below are one key.
+   *
+   * This said `0.0.5512` — fictional, matching the seeded trade history's `0.0.5512@…`
+   * references. The live database does not: settlement resolves a seller's account through
+   * `accountIdToEvmAddress`, and a fictional id converts to a long-zero address that holds
+   * nothing, so the row had to be corrected by hand before anything could settle against it.
+   * A fresh seed reproducing the value someone already had to fix is a manual step nobody
+   * wrote down. Operator and seller are the same account in this build, so the honest value
+   * is the operator's, and it is what the running database already holds.
+   *
+   * The seeded *trades* keep their fictional `0.0.5512@…` references. Those are demo history
+   * and never happened; who the seller is, is a fact about the party.
+   */
+  hederaAccountId: '0x2Da63Ac0F6AE2C3059091d8DF38b3175a237ee71',
+  /*
+   * Real, and derived rather than invented — unlike four of the five buyer addresses below.
+   *
+   * This is the operator's ECDSA alias, and operator and seller are the same account in this
+   * build. An EVM address comes from the key rather than from a chain, so the one key that
+   * holds the paper on Hedera controls this same address on Arc. It matters because
+   * `MandateVault` pays a match's seller into the Arc escrow claimable by that address alone:
+   * an invented one is a payout that settles, reports success, and pays nobody until it is
+   * reclaimed to the buyer a day later.
+   *
+   * A seller who signs in gets their address from Privy instead, which is the same property
+   * seen from the other end — Privy is asked for no chains, and the address it derives is the
+   * same on every one of them.
+   */
+  arcAddress: '0x2Da63Ac0F6AE2C3059091d8DF38b3175a237ee71',
 } as const;
 
 interface BuyerSpec {

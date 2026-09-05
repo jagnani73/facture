@@ -36,6 +36,13 @@
       "when": 1788367825910,
       "tag": "0004_harrow_point_real_arc_wallet",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1788429090575,
+      "tag": "0005_meridian_real_arc_wallet",
+      "breakpoints": true
     }
   ]
 }

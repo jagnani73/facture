@@ -52,6 +52,25 @@ describe('the seeded book', () => {
     });
   });
 
+  /*
+   * The seller's Arc address is where a sale's proceeds land once the vault pays out:
+   * `MandateVault` locks a payout claimable by that address and no other, so an invented one
+   * is a payout that settles, reports success, and pays nobody until it is reclaimed to the
+   * buyer a day later. Four of the five seeded buyer addresses are invented and say so; this
+   * one must not be.
+   *
+   * The check is that it is the *same key* as the Hedera side rather than merely non-empty,
+   * because "looks like an address" is exactly what the invented one also satisfied. An EVM
+   * address is derived from the key rather than from a chain, so one ECDSA key controls the
+   * same address on Arc as on Hedera — which is what makes this derivable rather than chosen.
+   */
+  it('gives the seller an Arc address its own key controls', async () => {
+    const seller = await h.store.getSeller(h.seeded.sellerId);
+
+    expect(seller?.arcAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(seller?.arcAddress?.toLowerCase()).toBe(seller?.hederaAccountId?.toLowerCase());
+  });
+
   it('derives mandate allocation from settled trades rather than a stored number', async () => {
     const mandateId = h.seeded.mandateIds['MND-03'] ?? '';
     const mandate = await h.store.getMandate(mandateId);
