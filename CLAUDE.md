@@ -617,6 +617,33 @@ product.
 - Proven against a rival claim, not just our own: a receivable with **no row in this
   database** was claimed on chain and then refused at listing with 409.
 
+### Resolved: the invoice registry carries the confirmation
+
+`InvoiceRegistry` (`0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7`) is the second deployed
+contract in the live path. `isConfirmed(invoiceId)` is a public view, which is what moves
+"the debtor confirmed this" from a column only the venue can see to something a buyer can
+check — and that confirmation is exactly what justifies advancing the full face value with
+no holdback.
+
+- **It composes with the uniqueness registry rather than duplicating it.** `list` verifies
+  the hash against `UniquenessRegistry` instead of trusting its caller, so an invoice cannot
+  be listed before its receivable is claimed. Both therefore run after issuance, in that
+  order, and the ordering is the contract's rather than a convention chosen here.
+- **`list` cannot express `Confirmed`.** It always writes `Draft`; confirmation is a separate
+  transition because it is a separate real-world event. A dispute writes nothing — the
+  lifecycle does not move backwards, so a mistaken `Confirmed` would be a permanent public
+  claim that a customer agreed to an invoice they had just rejected.
+- **No new disclosure.** Face value and due date are already public on the bond itself
+  (`maxSupply` and maturity), so this is an index over facts the instrument carries.
+- **Neither write may cost anything real.** A chain that refuses a confirmation must not cost
+  the debtor their answer, and a refused listing must not fail an issuance. Both are tested,
+  because the natural way to write either is a bare `await`.
+
+**Still unwired: `MandateBook`, the Hedera `DvpEscrow`, and `AtsComplianceGate`** — three of
+six. The book is the interesting one: it reads rating and confirmation _from the invoice
+registry_ rather than taking them as arguments, which is what makes its refusals mean
+anything, and that registry is now populated.
+
 ## Cut list
 
 Ordered by what leaves the product most intact, not by which track is cheapest to lose. A prize is

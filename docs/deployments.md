@@ -138,6 +138,33 @@ to be checkable cannot have history quietly deleted from underneath it. The cons
 know about are that the demo book holds **29 invoices, two named MF-2052**, and two debtors
 called Petra Foods Group — the seeded one rated `B`, the accidental one `UNRATED`.
 
+## The invoice registry, in the live path — 2026-09-03
+
+`InvoiceRegistry` at `0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7` is the second deployed
+contract the running product calls. Reading it back: 5,075 bytes matching the table,
+`owner()` the operator's alias, `uniquenessRegistry()` returning `0x8eb9f001…` — the exact
+registry wired the same day — and the operator **already an attester**, so no grant was
+needed.
+
+|                        |                                                                      |
+| ---------------------- | -------------------------------------------------------------------- |
+| invoice                | MF-2052, `4af57501-ba14-50b8-bc7f-11f07edfea13`                      |
+| `list`                 | `0xea2bf309c9142033cd3edee84beeb71a401f08003f0a5d2fff898d21b380070e` |
+| `setStatus(Confirmed)` | `0x10b35612b7f88d6e9c7094bded16b0751a3c10201fac4d2b48afb62e59f2dcbd` |
+| before                 | `listed: false, confirmed: false`                                    |
+| after                  | **`listed: true, confirmed: true`**                                  |
+
+`isConfirmed(invoiceId)` is a public view, so the confirmation the product's risk argument
+rests on — full advance, no holdback, because dispute risk was removed — is now checkable by
+someone who has not agreed to trust the venue.
+
+Listing cannot run before the uniqueness claim: `list` verifies the hash against the
+uniqueness registry rather than trusting its caller. That ordering is the contract's.
+
+**Nothing new is disclosed.** The face value and due date go on chain here and are already
+public — issuance sets the bond's `maxSupply` to the face value and its maturity to the due
+date. Identifiers are opaque `bytes32`, and no customer name or email is written.
+
 ## Refusal receipts on HCS — 2026-09-03
 
 |               |                                                                |
