@@ -61,16 +61,35 @@ function SignInControl() {
     return <span className="label-micro text-muted">Signing in…</span>;
   }
 
+  /*
+   * A failure offers both directions, and the second one is the important one.
+   *
+   * Retrying is right when the venue was unreachable. It is useless when Privy holds a session
+   * it will not issue an identity token for, which is the failure that used to hang here
+   * forever — signing in again re-enters the same state. Signing out drops the session and
+   * returns to the demo book, which is where the app is meant to sit and the only state a
+   * viewer can get useful work out of without an account.
+   */
   if (state.status === 'failed') {
     return (
-      <button
-        type="button"
-        onClick={signIn}
-        title={state.message}
-        className="label-micro h-7 rounded-xs border border-neg/45 bg-neg-wash px-2 text-neg transition-colors"
-      >
-        Sign-in failed
-      </button>
+      <span className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={signIn}
+          title={state.message}
+          className="label-micro h-7 rounded-xs border border-neg/45 bg-neg-wash px-2 text-neg transition-colors"
+        >
+          Sign-in failed
+        </button>
+        <button
+          type="button"
+          onClick={signOut}
+          title="Drop the session and go back to the shared demo book."
+          className="label-micro h-7 rounded-xs border border-rule px-2 text-muted transition-colors hover:border-rule-strong hover:text-ink"
+        >
+          Sign out
+        </button>
+      </span>
     );
   }
 

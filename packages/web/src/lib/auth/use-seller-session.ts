@@ -33,7 +33,27 @@ import { ApiError } from '@/lib/api/problem';
  * separately, and the identity token can still be `null` on the render where `authenticated`
  * first turns true — so this waits for the token rather than firing a request that would be
  * refused for having no credential.
+ *
+ * **The wait is bounded, and it was not.** A session Privy reports as authenticated whose
+ * identity token never arrives left this permanently in `signing-in`: no request was ever
+ * made, so nothing could fail, and the masthead read "Signing in…" forever. Found by opening
+ * the app in a browser carrying a stale session rather than by reading this file, because
+ * every test signs in cleanly and never reaches the state.
+ *
+ * It is a dead end rather than a slow path: `signing-in` offers no way back, the demo book is
+ * the signed-out state, and a viewer cannot reach it again without clearing site data. So an
+ * identity token that has not arrived within {@link IDENTITY_TOKEN_TIMEOUT_MS} is reported as
+ * a failure that names itself, and every failure offers a way out.
  */
+
+/**
+ * How long an authenticated session may go without producing an identity token.
+ *
+ * Generous on purpose. The token genuinely does lag `authenticated` by a render or two on a
+ * normal sign-in, and turning that into an error would be worse than the hang. What this
+ * bounds is the case where it is never coming.
+ */
+const IDENTITY_TOKEN_TIMEOUT_MS = 10_000;
 
 export type SellerSessionState =
   | { status: 'unavailable' }
@@ -79,10 +99,22 @@ export function useSellerSession(): SellerSession {
       return;
     }
 
-    // Authenticated, but the credential has not arrived yet. Not a failure; not yet a request.
+    /*
+     * Authenticated, but the credential has not arrived yet. Not a failure, and not yet a
+     * request — but bounded, because a token that is never coming is indistinguishable from
+     * one that is late, and only one of the two ends on its own.
+     */
     if (identityToken === null) {
       setState({ status: 'signing-in' });
-      return;
+      const timer = setTimeout(() => {
+        setState({
+          status: 'failed',
+          message:
+            'Privy reports you as signed in but did not produce an identity token, so the ' +
+            'venue was never asked who you are. Signing out returns you to the demo book.',
+        });
+      }, IDENTITY_TOKEN_TIMEOUT_MS);
+      return () => clearTimeout(timer);
     }
 
     if (asked.current === identityToken) return;

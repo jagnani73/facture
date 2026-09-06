@@ -43,6 +43,19 @@ import { Card, CardHead, Label, PageHeader, Row, buttonClasses } from '@/compone
 
 const HEDERA = CHAINS[ASSET_CHAIN];
 
+/**
+ * Whether a `locked` payout can still be taken by the seller.
+ *
+ * A missing timeout answers `false` — that is "the escrow did not tell us when this closes",
+ * and inventing a closure from an absent field would be the same overclaim in the other
+ * direction. The lock's own status stays the primary fact; this only splits `locked` in two.
+ */
+function lockWindowClosed(claimableUntil: string | null): boolean {
+  if (claimableUntil === null) return false;
+  const closes = Date.parse(claimableUntil);
+  return Number.isFinite(closes) && closes <= Date.now();
+}
+
 export function ProofView({ tradeId }: { tradeId: string }) {
   const proof = useProof(tradeId);
 
@@ -325,13 +338,27 @@ function Proof({ record }: { record: ProofRecord }) {
           {record.cashLeg.lock === null ? null : (
             <div className="bg-raised px-5 py-5">
               <Label className="mb-3">Payout escrow · {CHAINS[CASH_CHAIN].name}</Label>
+              {/*
+                `locked` means two different things either side of the timeout, and saying only
+                the first is the overclaim this page exists to avoid. Past `claimableUntil` the
+                seller can no longer take it — `claim` reverts — and the capital moves only if
+                someone calls `reclaimPayout`, which returns it to the buyer and which this
+                build does not wire. "Not yet claimed" would read as money still coming.
+              */}
               <Row
                 term="State"
                 value={
                   record.cashLeg.lock.status === 'claimed' ? (
                     <span className="text-pos">Seller has taken the payout</span>
                   ) : record.cashLeg.lock.status === 'locked' ? (
-                    <span className="text-muted">Locked for the seller, not yet claimed</span>
+                    lockWindowClosed(record.cashLeg.lock.claimableUntil) ? (
+                      <span className="text-muted">
+                        The claim window closed with the payout unclaimed; it can now only be
+                        returned to the buyer
+                      </span>
+                    ) : (
+                      <span className="text-muted">Locked for the seller, not yet claimed</span>
+                    )
                   ) : record.cashLeg.lock.status === 'refunded' ? (
                     <span className="text-muted">Unclaimed; returned to the buyer</span>
                   ) : (
