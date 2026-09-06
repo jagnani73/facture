@@ -74,6 +74,15 @@ export const arcChain = defineChain({
 });
 
 /**
+ * HashScan's path for a deployed contract, in either identity a Hedera contract has —
+ * `0.0.x` or `0x…`. Written once because two callers want it for the same reason: an ATS
+ * security and the venue's own registries are contracts in exactly the same sense, and a
+ * second copy of this template is how one of them ends up on a path that 404s.
+ */
+const hederaContractUrl = (idOrAddress: string): string =>
+  `${hedera.explorerUrl}/contract/${idOrAddress}`;
+
+/**
  * Explorer links. The tx and address forms come straight from shared so the backend and
  * the web app cannot build different URLs for the same receipt; the token and topic forms
  * are HashScan paths shared does not model, built off its explorer base rather than a
@@ -93,7 +102,12 @@ export const explorer = {
    * field is what made the wrong path look right. This is the link on the proof view, whose
    * whole job is being checkable somewhere that is not us.
    */
-  hederaSecurity: (id: string): string => `${hedera.explorerUrl}/contract/${id}`,
+  hederaSecurity: hederaContractUrl,
+  /**
+   * One of the venue's own contracts — the registries a reader goes to when they decline to
+   * take a claim on this service's word, which is the whole premise of the proof view.
+   */
+  hederaContract: hederaContractUrl,
   /** A scheduled transaction, which is how a maturity payout is visible before it executes. */
   hederaSchedule: (id: string): string => `${hedera.explorerUrl}/schedule/${id}`,
   hederaTopicMessage: (topicId: string, seq: number): string =>

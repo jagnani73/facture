@@ -11,13 +11,17 @@
  * difference between an audit view and a receipt we printed ourselves.
  */
 
+import type { RegulationKey } from '@facture/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { explorer } from '../chain.js';
+import { REGULATION_TYPE } from '../db/schema.js';
 import { getStore } from '../db/store.js';
 import { notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
 import { getArcEscrow } from '../services/arc.js';
+import { regulationKeyFor } from '../services/ats.js';
+import { getInvoiceRegistry } from '../services/invoice-registry.js';
 import { getScheduleAdapter } from '../services/schedule.js';
 import { readParams } from '../validate.js';
 import { money } from '../wire.js';
@@ -34,11 +38,43 @@ export interface TradeProof {
     /** The ATS zero-coupon bond. Maturity = due date, principal = face, rate = 0. */
     securityId: string | null;
     securityExplorerUrl: string | null;
+    /**
+     * The SEC regulation this instrument was actually deployed under, per invoice.
+     *
+     * Per invoice and not per deployment, because those two disagreed once: MF-2052's row
+     * said Reg D 506(c) and its bond went out `1/0`, Reg S, since `deployBond` took the
+     * venue's config where the job carried the row. The row is what deploys now, so it is
+     * the one thing on this screen that can be checked against the instrument's own
+     * calldata — which is exactly what a reader would have had to do to find that defect.
+     */
+    regulation: RegulationKey | null;
   };
   /** How the debtor acknowledged their own accounts payable. */
   confirmation: {
     decision: 'confirmed' | 'disputed' | null;
     decidedAt: string | null;
+  };
+  /**
+   * What the `InvoiceRegistry` contract says, asked on every request rather than remembered.
+   *
+   * The `confirmation` block above is a column only the venue can see, and it is carrying
+   * the heaviest claim on this screen: dispute risk is what a factor holds back against, and
+   * the debtor's acknowledgement is the whole reason Facture advances the full face value
+   * with none. `isConfirmed(invoiceId)` is a public view, so the reader can stop taking that
+   * on trust — which is the difference between this and every "verified" badge a service
+   * prints about itself.
+   */
+  registry: {
+    /**
+     * `false` means no registry is configured, or the node could not be read. It is **not**
+     * a negative answer, and the two fields below are null rather than false when it is —
+     * `RegistryAnswer` draws that line and this screen would be the worst place to lose it.
+     */
+    checked: boolean;
+    listed: boolean | null;
+    confirmed: boolean | null;
+    contractAddress: string | null;
+    explorerUrl: string | null;
   };
   /**
    * The pre-match decision, taken against the security's own ControlList and Kyc facets
@@ -273,6 +309,25 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
         })();
 
   /*
+   * The chain's own account of this invoice.
+   *
+   * `lookup` never throws — that is its stated contract and both implementations keep it —
+   * so a registry that is unreachable costs the reader a second opinion and never the proof
+   * view. An unanswered question stays unanswered here rather than collapsing into `false`:
+   * reporting an unreadable node as "not confirmed" would contradict, on the same screen,
+   * the confirmation the venue is certain of.
+   */
+  const invoiceRegistry = getInvoiceRegistry();
+  const answer = await invoiceRegistry.lookup(invoice.id);
+  const registry: TradeProof['registry'] = {
+    checked: answer.checked,
+    listed: answer.checked ? answer.listed : null,
+    confirmed: answer.checked ? answer.confirmed : null,
+    contractAddress: invoiceRegistry.address,
+    explorerUrl: link(invoiceRegistry.address, explorer.hederaContract),
+  };
+
+  /*
    * Every link below is built from an identifier this service actually holds, and any
    * identifier that is null produces a null link rather than a URL. An explorer link that
    * 404s is worse than an absent one: this is the one screen whose whole purpose is that a
@@ -288,11 +343,13 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
       isin: invoice.isin,
       securityId: invoice.securityId,
       securityExplorerUrl: link(invoice.securityId, explorer.hederaSecurity),
+      regulation: regulationOnWire(invoice.regulationType),
     },
     confirmation: {
       decision: invoice.confirmationDecision,
       decidedAt: iso(invoice.confirmationDecidedAt),
     },
+    registry,
     compliance: {
       decision: trade.complianceDecision,
       checkedAt: iso(trade.complianceCheckedAt),
@@ -374,6 +431,26 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
 });
 
 const iso = (value: Date | null): string | null => value?.toISOString() ?? null;
+
+/** The column's own vocabulary, guarded the way shared guards `RegulationKey`. */
+const isStoredRegulation = (value: string): value is (typeof REGULATION_TYPE)[number] =>
+  (REGULATION_TYPE as readonly string[]).includes(value);
+
+/**
+ * The stored spelling onto the one a reader's decoder accepts.
+ *
+ * The column is kebab (`reg-s`) and `@facture/shared`'s `RegulationKey` is not (`REG_S`), so
+ * this is a translation and not a cast — and it is done here, once, rather than by widening
+ * either enum to hold both spellings. The refusal vocabulary already cost this repo the
+ * split that comes of two sides naming one thing differently, and `regulationKeyFor` is
+ * reused rather than restated for the same reason: a second copy is what drifts.
+ *
+ * `null` for anything else. The enum on the column is TypeScript's belief and not SQLite's —
+ * nothing in the database enforces it — and a proof view naming the wrong offering is worse
+ * than one naming none, since a declaration is not something the venue can correct later.
+ */
+const regulationOnWire = (stored: string): RegulationKey | null =>
+  isStoredRegulation(stored) ? regulationKeyFor(stored) : null;
 
 /** A link only exists when its identifier does. */
 const link = (id: string | null, build: (value: string) => string): string | null =>

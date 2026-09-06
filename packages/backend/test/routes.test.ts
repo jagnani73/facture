@@ -10,7 +10,9 @@
  * not implemented.
  */
 
+import { isRegulationKey } from '@facture/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { InvoiceRow } from '../src/db/schema.js';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
 import { settlementService } from '../src/services/settlement.js';
 import { X402_HEADERS } from '../src/services/x402.js';
@@ -616,6 +618,51 @@ describe('trades and the proof view', () => {
     expect(res.body.pricing.faceValue).toBe('9500000');
     expect(res.body.pricing.proceedsMinor).toBe('9439616');
     expect(res.body.confirmation.decision).toBe('confirmed');
+  });
+
+  /*
+   * The stored spelling and the published one are two vocabularies for one declaration, and
+   * the published one is what a reader's decoder validates against. This is the sibling of
+   * the pin in `ats.test.ts`, which fixes the same three stored values onto the enum pair the
+   * deployed factory checks: one end of the mapping faces the chain, this one faces the
+   * screen, and a wrong pairing at either end declares an offering the venue cannot afterwards
+   * correct. Pinned per value rather than spot-checked on the seeded row, since every live row
+   * reads `reg-s` and the other two would go untested.
+   */
+  it('names the regulation in the vocabulary the reader validates against', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+
+    for (const [stored, published] of [
+      ['reg-s', 'REG_S'],
+      ['reg-d-506b', 'REG_D_506_B'],
+      ['reg-d-506c', 'REG_D_506_C'],
+    ] as const) {
+      await h.store.updateInvoice(invoiceId, { regulationType: stored });
+      const res = await call(h.app, 'GET', `/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+
+      expect(res.body.invoice.regulation).toBe(published);
+      /*
+       * Against shared's own guard as well as the literal. The web decoder refuses whatever
+       * `isRegulationKey` refuses, so a spelling only this test and the route agreed on would
+       * render as nothing at all — which is the split this pairing exists to prevent.
+       */
+      expect(isRegulationKey(res.body.invoice.regulation)).toBe(true);
+    }
+  });
+
+  /*
+   * Nothing in SQLite enforces that column: `text({ enum })` is drizzle's belief and the
+   * database will hold whatever a migration or a hand-edit leaves there. A regulation this
+   * service cannot spell is reported as absent, never guessed at.
+   */
+  it('declares no regulation rather than the wrong one', async () => {
+    const invoiceId = h.seeded.invoiceIds['INV-2033'] ?? '';
+    await h.store.updateInvoice(invoiceId, {
+      regulationType: 'reg-a' as InvoiceRow['regulationType'],
+    });
+
+    const res = await call(h.app, 'GET', `/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+    expect(res.body.invoice.regulation).toBeNull();
   });
 
   it('shows no maturity block until the receivable has matured', async () => {

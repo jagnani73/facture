@@ -23,7 +23,11 @@ import {
   createDisabledInvoiceRegistry,
   registryId,
   type InvoiceRegistry,
+  type RegistryAnswer,
 } from '../src/services/invoice-registry.js';
+
+/** The registry this venue actually deployed. A reader checks these answers against it. */
+const REGISTRY_ADDRESS = '0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7';
 
 let h: Harness;
 
@@ -37,7 +41,10 @@ interface Recorded {
 }
 
 /** A registry that records what it was asked to do, and can be told to fail. */
-function recordingRegistry(fail: 'none' | 'list' | 'status' = 'none'): {
+function recordingRegistry(
+  fail: 'none' | 'list' | 'status' = 'none',
+  answer: RegistryAnswer = { checked: true, listed: true, confirmed: false },
+): {
   registry: InvoiceRegistry;
   seen: Recorded;
 } {
@@ -46,7 +53,8 @@ function recordingRegistry(fail: 'none' | 'list' | 'status' = 'none'): {
     seen,
     registry: {
       enabled: true,
-      lookup: () => Promise.resolve({ checked: true, listed: true, confirmed: false }),
+      address: REGISTRY_ADDRESS,
+      lookup: () => Promise.resolve(answer),
       list: (input) => {
         if (fail === 'list') return Promise.reject(new Error('CONTRACT_REVERT_EXECUTED'));
         seen.listed.push(input.invoiceId);
@@ -169,6 +177,73 @@ describe('with no registry configured', () => {
       createDisabledInvoiceRegistry().setStatus('any', INVOICE_STATUS.Confirmed),
     ).rejects.toMatchObject({
       detail: expect.stringContaining('HEDERA_INVOICE_REGISTRY_ADDRESS'),
+    });
+  });
+});
+
+/**
+ * The registry had a reader nowhere in the repo: the venue wrote `list` and `setStatus` and
+ * never asked the contract anything back, which made it a write-only record — unlike the
+ * uniqueness registry, whose read is what makes its refusal real.
+ *
+ * The proof view is the right reader, because it is the one screen whose stated purpose is
+ * that a reader need not trust this service. Debtor confirmation is what justifies advancing
+ * the full face value with no holdback, and until now that claim rested on a column only the
+ * venue could see, on a screen built to be checked.
+ */
+describe('the proof view asks the registry', () => {
+  it('reports what the chain says, and where to go and ask it', async () => {
+    const { registry } = recordingRegistry('none', {
+      checked: true,
+      listed: true,
+      confirmed: true,
+    });
+    h = await createHarness({ invoiceRegistry: registry });
+
+    const res = await call(h.app, 'GET', `/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.registry).toEqual({
+      checked: true,
+      listed: true,
+      confirmed: true,
+      contractAddress: REGISTRY_ADDRESS,
+      explorerUrl: `https://hashscan.io/testnet/contract/${REGISTRY_ADDRESS}`,
+    });
+  });
+
+  /*
+   * A registry saying no is a different fact from a registry that could not be reached, and
+   * this is the screen where collapsing them would do the most damage: `confirmed: false`
+   * beside the venue's own `confirmation.decision === 'confirmed'` reads as the venue being
+   * caught out, when all that happened is that a node did not answer.
+   */
+  it('answers "not checked" rather than "not confirmed" when it cannot be read', async () => {
+    const { registry } = recordingRegistry('none', { checked: false });
+    h = await createHarness({ invoiceRegistry: registry });
+
+    const res = await call(h.app, 'GET', `/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+
+    expect(res.body.registry.checked).toBe(false);
+    expect(res.body.registry.listed).toBeNull();
+    expect(res.body.registry.confirmed).toBeNull();
+    // The venue's own answer is untouched by the chain's silence.
+    expect(res.body.confirmation.decision).toBe('confirmed');
+  });
+
+  /* No registry configured is no address, and an address we do not hold is no link. */
+  it('offers no link to a registry this deployment does not have', async () => {
+    h = await createHarness({ invoiceRegistry: createDisabledInvoiceRegistry() });
+
+    const res = await call(h.app, 'GET', `/v1/trades/${h.seeded.tradeIds['TRD-4417']}/proof`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.registry).toEqual({
+      checked: false,
+      listed: null,
+      confirmed: null,
+      contractAddress: null,
+      explorerUrl: null,
     });
   });
 });

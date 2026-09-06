@@ -94,6 +94,15 @@ export type RegistryAnswer =
 
 export interface InvoiceRegistry {
   readonly enabled: boolean;
+  /**
+   * The contract the answers below come from, so a reader can put the same question to it.
+   *
+   * Unlike the Arc escrow's address this is configuration rather than something read off a
+   * chain, so it is a value and not a promise — there is nothing here to be unreachable and
+   * nothing to cache. `null` when no registry is configured: a proof view that linked to an
+   * address the venue does not hold would be offering a dead link as its evidence.
+   */
+  readonly address: string | null;
   /** Never throws. */
   lookup(invoiceId: string): Promise<RegistryAnswer>;
   list(input: ListInvoiceInput): Promise<{ transactionHash: string }>;
@@ -121,6 +130,7 @@ export function createDisabledInvoiceRegistry(): InvoiceRegistry {
 
   return {
     enabled: false,
+    address: null,
     lookup: () => Promise.resolve({ checked: false }),
     list: () => refuse('Listing a receivable on chain'),
     setStatus: () => refuse('Recording a status change on chain'),
@@ -159,6 +169,7 @@ export function createInvoiceRegistry(config: InvoiceRegistryConfig): InvoiceReg
 
   return {
     enabled: true,
+    address,
 
     async lookup(invoiceId) {
       const id = registryId(invoiceId);
