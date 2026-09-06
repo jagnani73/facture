@@ -181,7 +181,7 @@ book is what quotes.
 
 **`http://localhost:3000/book/068ac953-19e4-5254-96ea-0b06b8f479f8`** (MF-2047) · about 3 minutes
 
-Vantage Clinical, rated D. Seven mandates considered, none matching, no price — and seven sentences
+Orrin Metalworks, rated D. Seven mandates considered, none matching, no price — and seven sentences
 saying why, one per bid:
 
 > The customer is rated D, and this mandate takes UNRATED or better.

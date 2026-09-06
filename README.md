@@ -290,8 +290,11 @@ works this way today, where a price is a phone call and a wait.
 ### The sale
 
 Face $40,000, sixty days, 12.5% annualised, discount $821.92, proceeds $39,178.08 &mdash; 2.05% of
-face, against the 2&ndash;5% the same seller pays a factoring house today. Confirm, and it settles in seconds
-against the best mandate that accepts this customer, accepts this tenor, and has exposure left.
+face, against the 2&ndash;5% the same seller pays a factoring house today. The customer confirms, the
+seller offers it into the book, and it settles in seconds against the best mandate that accepts this
+customer, accepts this tenor, and has exposure left. Offering is the seller's own act: a confirmed
+invoice is priced, a listed one is for sale, and arming a trade refuses anything that is not
+listed.
 
 ### Buyers do not browse
 
