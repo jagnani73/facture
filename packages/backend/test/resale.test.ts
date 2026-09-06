@@ -16,14 +16,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
 import { currentHolderTrade, isResale, sellingPartyIdOf, sellingPartyOf } from '../src/parties.js';
 import type { TradeRow } from '../src/db/schema.js';
-import { call, createHarness, RESALE_SIGNER, type Harness } from './helpers.js';
+import { asResaleSigner, call, createHarness, RESALE_SIGNER, type Harness } from './helpers.js';
 
 let h: Harness;
 
 beforeEach(async () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date(MARKET_NOW_ISO));
-  h = await createHarness({ env: RESALE_SIGNER('0.0.6098431') });
+  h = await createHarness({ env: RESALE_SIGNER });
 });
 
 afterEach(() => {
@@ -218,6 +218,9 @@ describe('the resale offer', () => {
    */
   it('puts sold paper back on the book, where it prices on its remaining tenor', async () => {
     const id = h.seeded.invoiceIds['INV-2033'] ?? '';
+
+    const holder = currentHolderTrade(await h.store.listTrades({ invoiceId: id, limit: 100 }));
+    asResaleSigner(h, holder?.buyerId ?? '');
 
     const listed = await call(h.app, 'POST', `/v1/invoices/${id}/list`);
     expect(listed.status).toBe(200);

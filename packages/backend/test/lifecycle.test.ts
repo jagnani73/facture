@@ -14,7 +14,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
-import { call, createHarness, listInvoice, RESALE_SIGNER, type Harness } from './helpers.js';
+import { currentHolderTrade } from '../src/parties.js';
+import {
+  asResaleSigner,
+  call,
+  createHarness,
+  listInvoice,
+  RESALE_SIGNER,
+  type Harness,
+} from './helpers.js';
 
 let h: Harness;
 
@@ -31,6 +39,13 @@ afterEach(() => {
 
 const asOf = `?asOf=${encodeURIComponent(MARKET_NOW_ISO)}`;
 const invoice = (label: string): string => h.seeded.invoiceIds[label] ?? '';
+
+/** Put the resale signer's address on whoever currently holds this invoice's paper. */
+async function makeHolderSignable(harness: Harness, invoiceId: string): Promise<void> {
+  const holder = currentHolderTrade(await harness.store.listTrades({ invoiceId, limit: 100 }));
+  if (!holder) throw new Error(`Invoice ${invoiceId} has no holder to sign for.`);
+  asResaleSigner(harness, holder.buyerId);
+}
 
 describe('POST /v1/invoices/:id/list', () => {
   it('offers a confirmed invoice into the book', async () => {
@@ -119,7 +134,7 @@ describe('POST /v1/invoices/:id/list', () => {
 
   it('refuses to relist paper the venue holds no key for, naming the holder', async () => {
     // A signer that is a real account, but not the one holding INV-2033.
-    const other = await createHarness({ env: RESALE_SIGNER('0.0.6098455') });
+    const other = await createHarness({ env: RESALE_SIGNER });
     try {
       const id = other.seeded.invoiceIds['INV-2033'] ?? '';
       const res = await call(other.app, 'POST', `/v1/invoices/${id}/list`);
@@ -134,9 +149,10 @@ describe('POST /v1/invoices/:id/list', () => {
 
   it('relists sold paper when the holder is one the venue can sign for', async () => {
     // Ashgrove holds INV-2033, and this is Ashgrove's account.
-    const resale = await createHarness({ env: RESALE_SIGNER('0.0.6098431') });
+    const resale = await createHarness({ env: RESALE_SIGNER });
     try {
       const id = resale.seeded.invoiceIds['INV-2033'] ?? '';
+      await makeHolderSignable(resale, id);
       const res = await call(resale.app, 'POST', `/v1/invoices/${id}/list`);
 
       expect(res.status).toBe(200);
@@ -195,9 +211,10 @@ describe('POST /v1/invoices/:id/delist', () => {
    * who to pay from the newest live settled trade.
    */
   it('returns relisted paper to sold when its holder withdraws the offer', async () => {
-    const resale = await createHarness({ env: RESALE_SIGNER('0.0.6098431') });
+    const resale = await createHarness({ env: RESALE_SIGNER });
     try {
       const id = resale.seeded.invoiceIds['INV-2033'] ?? '';
+      await makeHolderSignable(resale, id);
       const listed = await call(resale.app, 'POST', `/v1/invoices/${id}/list`);
       expect(listed.body.invoice.status).toBe('listed');
 

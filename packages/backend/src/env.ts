@@ -65,7 +65,7 @@ export const envSchema = z
       }),
     ATS_FACTORY_ID: ACCOUNT_ID.optional(),
     /**
-     * The key that signs a resale's ATS hold, and the account it belongs to.
+     * The key that signs a resale's ATS hold.
      *
      * **This is custody, and it is named rather than dressed up.** `createHoldByPartition`
      * acts on the caller's own tokens, so a holder reselling has to sign the hold on their
@@ -74,11 +74,18 @@ export const envSchema = z
      * would sign this themselves; in this build the venue holds the key for the one buyer
      * that has one, and the resale route refuses any other holder rather than pretending.
      *
-     * Unset disables resale, the same shape as issuance with no `ATS_FACTORY_ID`. Half the
-     * pair is refused by name below: an account id with no key reads like a working
-     * configuration and can never sign anything.
+     * **The key alone, with no account id beside it.** The first version took both and
+     * compared the configured id against the holder's — which failed against the live book
+     * on the first attempt, because an ECDSA Hedera account has TWO EVM addresses and the
+     * two sides had different ones: `0.0.10314099` converts to its long-zero form, while
+     * the buyer's row holds the alias derived from the public key. To a Solidity mapping
+     * those are unrelated keys, which is the trap already recorded for control-list grants.
+     * Deriving the address from the key removes the mismatch by construction, and it is
+     * also the address that will actually sign — so the listing check and the hold check
+     * cannot disagree.
+     *
+     * Unset disables resale, the same shape as issuance with no `ATS_FACTORY_ID`.
      */
-    RESALE_SIGNER_ACCOUNT_ID: ACCOUNT_ID.optional(),
     RESALE_SIGNER_PRIVATE_KEY: z
       .string()
       .min(1)
@@ -275,29 +282,6 @@ export const envSchema = z
         message:
           'needs PRIVY_APP_ID and PRIVY_APP_SECRET. Attaching a policy is an authenticated ' +
           'call, so an id on its own scopes no wallet while looking as though it does.',
-      });
-    }
-
-    /*
-     * The resale signer is all-or-nothing, for the reason the agent's Hedera pair is.
-     * Either half alone looks exactly like a deployment with resale switched on, and
-     * neither half can place a hold: an id names an account nothing can sign for, and a key
-     * with no id has no holder to check itself against.
-     */
-    if (
-      (env.RESALE_SIGNER_ACCOUNT_ID === undefined) !==
-      (env.RESALE_SIGNER_PRIVATE_KEY === undefined)
-    ) {
-      ctx.addIssue({
-        code: 'custom',
-        path: [
-          env.RESALE_SIGNER_ACCOUNT_ID === undefined
-            ? 'RESALE_SIGNER_ACCOUNT_ID'
-            : 'RESALE_SIGNER_PRIVATE_KEY',
-        ],
-        message:
-          'is required alongside its pair. Half a resale signer cannot place a hold, and ' +
-          'unset is how resale is disabled — so half of it is neither on nor off.',
       });
     }
 

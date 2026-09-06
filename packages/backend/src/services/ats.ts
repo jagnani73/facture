@@ -341,6 +341,17 @@ export interface HoldReceipt {
 }
 
 /**
+ * The EVM address a resale signer will sign as.
+ *
+ * Exported so the listing route can refuse a holder the venue cannot sign for BEFORE the
+ * invoice goes back on the book, and refuse it for the same reason `submitAsHolder` would.
+ * Two derivations of one address is how the two come to disagree, so there is one.
+ */
+export function resaleSignerAddress(key: string): Address {
+  return privateKeyToAccount((key.startsWith('0x') ? key : `0x${key}`) as Hex).address;
+}
+
+/**
  * `createHoldByPartition`'s arguments, built once and used twice — encoded into calldata for
  * the SDK path, and passed as values to the relay path's simulation. Deriving the second
  * from the first would mean decoding calldata back into arguments, which is a second place

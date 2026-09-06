@@ -92,17 +92,30 @@ export const TEST_ENV: Record<string, string> = {
 export const FEE_PAYER = '0.0.98';
 
 /**
- * A resale signer pair for {@link HarnessOptions.env}.
+ * A resale signer for {@link HarnessOptions.env}, and the address it signs as.
  *
- * Both halves, always, because the env schema refuses one on its own — an account id with
- * no key reads like a working configuration and can never sign a hold. The key is not the
- * account's real one and does not need to be: every test that gets far enough to sign runs
- * against the recording ATS adapter.
+ * The key is the whole configuration: the venue derives the holder it can sign for from it
+ * rather than taking an account id beside it, because an ECDSA Hedera account has two EVM
+ * addresses and a configured `0.0.x` compares as the long-zero one while a buyer's row holds
+ * the alias. That mismatch refused the only holder the live venue could sign for, on the
+ * first real attempt.
+ *
+ * So a test that wants a holder the venue CAN sign for has to put
+ * {@link RESALE_SIGNER_ADDRESS} on that buyer — which is the true precondition rather than a
+ * fixture convenience, and {@link asResaleSigner} does it.
  */
-export const RESALE_SIGNER = (accountId: string): Record<string, string> => ({
-  RESALE_SIGNER_ACCOUNT_ID: accountId,
-  RESALE_SIGNER_PRIVATE_KEY: `0x${'c'.repeat(64)}`,
-});
+export const RESALE_SIGNER_KEY = `0x${'c'.repeat(64)}`;
+export const RESALE_SIGNER_ADDRESS = '0xe8acf143AFbF8B1371A20ea934D334180190Eac1';
+export const RESALE_SIGNER: Record<string, string> = {
+  RESALE_SIGNER_PRIVATE_KEY: RESALE_SIGNER_KEY,
+};
+
+/** Make `buyerId` the holder this venue holds a key for. */
+export function asResaleSigner(h: Harness, buyerId: string): void {
+  const row = h.store.buyers.get(buyerId);
+  if (!row) throw new Error(`No buyer ${buyerId} to make the resale signer.`);
+  h.store.buyers.set(buyerId, { ...row, hederaAccountId: RESALE_SIGNER_ADDRESS });
+}
 
 export interface Harness {
   app: ReturnType<typeof createApp>;

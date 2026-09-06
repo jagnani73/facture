@@ -29,7 +29,7 @@ import type { InvoiceRow, SellerRow } from '../db/schema.js';
 import { getStore } from '../db/store.js';
 import { rootLogger } from '../logger.js';
 import { currentHolderTrade } from '../parties.js';
-import { accountIdToEvmAddress } from '../services/ats.js';
+import { accountIdToEvmAddress, resaleSignerAddress } from '../services/ats.js';
 import { INVOICE_STATUS, getInvoiceRegistry } from '../services/invoice-registry.js';
 import { claimedByAnother, getUniquenessRegistry } from '../services/uniqueness.js';
 import { badRequest, conflict, duplicateReceivable, notFound } from '../errors.js';
@@ -443,8 +443,8 @@ invoiceRoutes.post('/:id/list', async (c) => {
     }
 
     const holderBuyer = await store.getBuyer(holder.buyerId);
-    const signerAccount = getConfig().env.RESALE_SIGNER_ACCOUNT_ID;
-    if (signerAccount === undefined) {
+    const signerKey = getConfig().env.RESALE_SIGNER_PRIVATE_KEY;
+    if (signerKey === undefined) {
       throw conflict(
         'conflict',
         'Reselling is not enabled on this deployment. A resale needs the holder to sign the ' +
@@ -453,12 +453,17 @@ invoiceRoutes.post('/:id/list', async (c) => {
     }
 
     /*
-     * Compared as EVM addresses, never as strings. A buyer's Hedera account is on file in
-     * either of its two forms — the `0.0.x` id or the ECDSA alias — and the same account
-     * spelled two ways would refuse a holder the venue can perfectly well sign for.
+     * Compared against the address the KEY derives, not against a configured account id.
+     *
+     * An ECDSA Hedera account has two EVM addresses — the alias from the public key, and the
+     * long-zero from the account number — and they are unrelated keys to a Solidity mapping.
+     * Comparing a configured `0.0.x` against a buyer's stored alias refused the one holder
+     * this venue can actually sign for, on the first live attempt. The key derives the alias,
+     * which is the address that holds the tokens and the address that will sign, so this
+     * check and the one inside `createHold` cannot disagree.
      */
     const holderAddress = accountIdToEvmAddress(holderBuyer?.hederaAccountId);
-    if (holderAddress.toLowerCase() !== accountIdToEvmAddress(signerAccount).toLowerCase()) {
+    if (holderAddress.toLowerCase() !== resaleSignerAddress(signerKey).toLowerCase()) {
       throw conflict(
         'conflict',
         `This paper is held by ${holderBuyer?.name ?? holder.buyerId}, and the venue holds ` +
@@ -599,13 +604,22 @@ invoiceRoutes.post('/:id/delist', async (c) => {
     listed: false,
     alreadyDelisted: false,
     /*
-     * Said explicitly because the seller is likely to expect the opposite. Withdrawing an
-     * offer does not withdraw the price — the book still quotes a confirmed invoice, which
-     * is what lets a seller see what they would get before deciding to offer it again.
+     * Two outcomes, two sentences, because the difference is one a seller would otherwise
+     * discover from a missing price.
+     *
+     * Unsold paper goes back to `confirmed`, which is quotable — withdrawing an offer does
+     * not withdraw the price, and saying so matters because a seller expects the opposite.
+     * A withdrawn RESALE goes back to `sold`, which is NOT in
+     * `QUOTABLE_INVOICE_STATUSES`, so it carries no price until it is offered again. The
+     * old copy claimed the first for both and was false on exactly the path this route had
+     * just learned to take.
      */
     message:
-      'This invoice is off the book. It is still confirmed, so it still carries a price; ' +
-      'it just cannot be sold until you list it again.',
+      target === 'confirmed'
+        ? 'This invoice is off the book. It is still confirmed, so it still carries a price; ' +
+          'it just cannot be sold until you list it again.'
+        : 'This position is off the book. You still hold the paper, and it carries no price ' +
+          'until you offer it again.',
   });
 });
 
