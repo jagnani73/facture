@@ -1008,3 +1008,70 @@ the pattern it produces is the venue's own:
 returns 392,094 and the venue quotes 392,093: the book **floors** the discount and
 `@facture/shared` **ceils** it, each deliberately, in opposite parties' favour. So the venue
 compares the reason code and publishes both prices, rather than treating a mismatch as a refusal.
+
+## A receivable that has not been sold yet — MF-2080, 2026-09-06
+
+Every other instrument in this document is spent. All eight receivables with a real bond behind
+them are `sold` or `matured`, and the five `confirmed` invoices left in the book point at
+`0.0.67…` fixtures that were never deployed — so the venue could be shown pricing and refusing,
+and could not be shown selling. This one exists to close that gap: it is listed, it is priced, and
+nothing has taken it.
+
+|            |                                                                    |
+| ---------- | ------------------------------------------------------------------ |
+| invoice    | MF-2080, `e04e8e68-3cbd-4407-b4d7-6c2be7f31d4c`, $20,000 face      |
+| customer   | Petra Foods Group, rated **B**                                     |
+| due        | 2026-10-16, 40 days                                                |
+| instrument | `0.0.10391953` / `0xd531fa1c68e445367c171f6d054bfa16ac329490`      |
+| ISIN       | `USKOMFRL9QD0`, Reg S                                              |
+| supply     | 2,000,000 units, held by the seller                                |
+| status     | `listed` — offered, priced, unsold                                 |
+| quote      | **$19,813.69 at 850 bps over 40 days**                             |
+| matched by | `8b879d02…`, Harrow Point's escrowed mandate, so it settles on Arc |
+
+**The customer was chosen so the funded mandate wins.** A B rating excludes the two mandates with
+an `A` floor, which are also the two tightest bids at 800 and 675 bps. What is left is led by
+Harrow Point at 850, and that is the one mandate with capital actually posted in the Arc vault — so
+a sale here settles out of escrow with no signature, opens a `DvpEscrow` lock the seller can claim
+with their own Privy wallet, and can then be matured. It is the only route through the product
+that exercises all of it.
+
+Petra Foods rather than Calder & Roe for a duller reason: the funded mandate already carries
+$14,842.80 of exposure to Calder & Roe against a $30,000 per-debtor cap, and $0 against Petra
+Foods, so the cap does not bind.
+
+### What it cost, and what each step proved
+
+Ten preparation transactions plus the issuance, all first-attempt:
+
+- `deployBond` — one attempt, no retry. The instrument existed about thirty seconds after the
+  invoice was created.
+- The debtor confirmed **through the link the venue minted**, opened as given. That is the first
+  time that has been possible: until the same day, the link pointed at the JSON endpoint and
+  `docs/demo.md` told a presenter to rebuild the URL by hand.
+- `prepare-security` ran the four role grants, two control-list entries, `addIssuer`, two KYC
+  grants and the mint. `totalSupply` and the seller's balance both read `0` immediately after and
+  `2,000,000` eight seconds later, which is the relay lag this file already records rather than a
+  failure.
+- The book then priced it at 850 bps with **`mandatesBarredByInstrument: 0`** and four refusals
+  underneath — two on rating, two on debtor concentration, each a sentence.
+
+### The on-chain book was asked, and agreed
+
+`MandateBook.previewMatch` against all seven mandates, the first invoice listed on the registry
+since the book was wired:
+
+| mandate | the book                | the venue               |
+| ------- | ----------------------- | ----------------------- |
+| 1, 3    | `RATING_BELOW_MANDATE`  | `RATING_BELOW_MANDATE`  |
+| 5       | `DEBTOR_CONCENTRATION`  | `DEBTOR_CONCENTRATION`  |
+| 7       | takes it at **1981370** | takes it at **1981369** |
+
+One minor unit apart, on a receivable neither side had seen before. The book floors the discount
+and `@facture/shared` ceils it, each deliberately and in opposite parties' favour, which is why the
+venue compares the reason code rather than the number.
+
+**Mandate 4 is where they part company, and it is not a rounding difference.** The venue refuses it
+with $5,035.62 left against a $40,000 debtor cap; the book takes it. `_debtorExposure` is written
+by `tryMatch`, which is not wired, so the book tests every concentration limit against zero
+recorded exposure. Its rating, tenor and registry verdicts are the ones worth reading.

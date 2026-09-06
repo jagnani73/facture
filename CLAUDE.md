@@ -1508,6 +1508,16 @@ registry wiring and were never listed on it.
   prices 392,094 against the venue's 392,093. Refusing on a price mismatch would reject good
   trades for a rounding rule. **Compare the reason code, not the number**, and render a
   disagreement rather than resolving it.
+- **Its exposure refusals are a floor, not a mirror, and this is structural.** `_debtorExposure`
+  and `allocated` are written by `tryMatch`, which is not wired, so the book evaluates every
+  concentration and exposure test against **zero recorded exposure**. Seen live on MF-2080: the
+  venue refused mandate 4 with $5,035.62 left against a $40,000 cap, and the book took the same
+  match, because as far as it knows that mandate has spent nothing. It still refused mandate 5,
+  whose cap is smaller than the price at its own rate — so the check is real, it is just weaker
+  in one direction. **`RATING_BELOW_MANDATE`, `TENOR_EXCEEDS_MANDATE`, `INVOICE_UNKNOWN` and
+  `INVOICE_NOT_CONFIRMED` are the verdicts worth reading**, because those are the ones measured
+  against `InvoiceRegistry` rather than against a balance nothing updates.
+
 - **Three states, never two.** No book configured, a mandate never posted, and a node that would
   not answer are all `checked: false`. Folding any of them into `ok: false` prints a refusal the
   chain never made — the `/health` cursor mistake, `ComplianceDecision.determinate` and the proof
