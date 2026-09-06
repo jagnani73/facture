@@ -91,6 +91,19 @@ export const TEST_ENV: Record<string, string> = {
 
 export const FEE_PAYER = '0.0.98';
 
+/**
+ * A resale signer pair for {@link HarnessOptions.env}.
+ *
+ * Both halves, always, because the env schema refuses one on its own — an account id with
+ * no key reads like a working configuration and can never sign a hold. The key is not the
+ * account's real one and does not need to be: every test that gets far enough to sign runs
+ * against the recording ATS adapter.
+ */
+export const RESALE_SIGNER = (accountId: string): Record<string, string> => ({
+  RESALE_SIGNER_ACCOUNT_ID: accountId,
+  RESALE_SIGNER_PRIVATE_KEY: `0x${'c'.repeat(64)}`,
+});
+
 export interface Harness {
   app: ReturnType<typeof createApp>;
   store: MemoryStore;
@@ -362,6 +375,15 @@ export interface HarnessOptions {
   mandateBook?: MandateBook;
   /** Absent means no registry: terms and confirmation stay inside the database. */
   invoiceRegistry?: InvoiceRegistry;
+  /**
+   * Extra environment, merged over {@link TEST_ENV}.
+   *
+   * For settings whose ABSENCE is the default and whose presence changes a route's answer —
+   * the resale signer is the first. Enabling it in `TEST_ENV` would make every other test
+   * run against a deployment that permits resales, which is not the shape most of them are
+   * asserting.
+   */
+  env?: Record<string, string>;
 }
 
 /** What the stub verifier attests to when a test does not say otherwise. */
@@ -482,7 +504,7 @@ export function fakeArcEscrow(overrides: Partial<ArcEscrow> = {}): ArcEscrow {
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   resetConfig();
-  loadConfig(TEST_ENV);
+  loadConfig({ ...TEST_ENV, ...options.env });
   setRootLogger(createLogger('error', { svc: 'test' }));
 
   const store = createMemoryStore();

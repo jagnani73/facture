@@ -23,11 +23,13 @@
 import { randomBytes } from 'node:crypto';
 import type { Currency, Rating, SettlementLegState } from '@facture/shared';
 import { CURRENCY_DECIMALS, transitionInvoice } from '@facture/shared';
-import { keccak256 } from 'viem';
+import { keccak256, type Address } from 'viem';
+import type { TradeRow } from '../db/schema.js';
 import { explorer } from '../chain.js';
 import { getConfig } from '../config.js';
 import { transitionTo } from '../db/status.js';
 import { getStore } from '../db/store.js';
+import { currentHolderTrade, sellingPartyIdOf, sellingPartyOf } from '../parties.js';
 import { badRequest, conflict, internalError, notFound, upstreamUnavailable } from '../errors.js';
 import { rootLogger } from '../logger.js';
 import { getArcEscrow } from './arc.js';
@@ -61,6 +63,18 @@ export interface DvpIntent {
   /** ATS security for this invoice, native id `0.0.x`. */
   securityId: string;
   sellerHederaAccountId: string;
+  /**
+   * The key that signs the asset leg when the paper is being RESOLD.
+   *
+   * Absent on a first sale, where the venue is the holder and signs with the operator key.
+   * Present on a resale, because `createHoldByPartition` acts on the caller's own tokens
+   * and the units are in the previous buyer's account — see {@link HoldRequest.holderKey}
+   * for why no operator route to this exists on the deployed instrument.
+   *
+   * Carried on the intent rather than looked up inside `prepare` so that the decision about
+   * whose paper this is happens once, at arming, in the same place that resolved the seller.
+   */
+  sellerHolderKey?: string | undefined;
   /**
    * Where a vault payout lands. Bound into `registerMatch` and unchangeable afterwards, so
    * an address nobody controls is a sale that settles and pays nobody.
@@ -534,6 +548,70 @@ export const buildTradeChallenge = (input: {
  * legs are on chain and checkable there, so an unavailable topic costs the convenience of a
  * consensus coordinate rather than the trade.
  */
+/**
+ * The EVM address whose position a trade's asset leg acts on.
+ *
+ * `executeHold` and `releaseHold` both take a `tokenHolder`, and getting it wrong is not a
+ * revert you can read: the hold identifier is `(partition, tokenHolder, holdId)`, so a wrong
+ * holder addresses a hold that does not exist. Before resales this was always the
+ * originator, and reading it off `trade.sellerId` was right by accident of there being only
+ * one possibility.
+ *
+ * These two paths run in a later request than the one that armed the trade, so the intent is
+ * gone and the row is the only source. {@link sellingPartyOf} is what reads it.
+ */
+async function sellSideAddress(trade: TradeRow): Promise<Address> {
+  const store = getStore();
+  const party = sellingPartyOf(trade);
+  const row =
+    party.kind === 'originator'
+      ? await store.getSeller(party.sellerId)
+      : await store.getBuyer(party.buyerId);
+  return accountIdToEvmAddress(row?.hederaAccountId);
+}
+
+/**
+ * Hand the position over: retire the previous holder's claim on a receivable that has just
+ * been resold.
+ *
+ * Runs on both rails at the moment the cash commits, beside the write that marks the invoice
+ * sold, because those are the same event seen from two sides — the receivable is spoken for,
+ * and whoever used to hold it no longer does.
+ *
+ * **Reads the ledger rather than taking the superseded trade as an argument.** The x402 rail
+ * settles in a different request from the one that armed it, so the intent is long gone by
+ * then; and a caller passing the position to retire is a caller that can pass the wrong one.
+ * The previous holder is whatever the newest live settled trade on this invoice is, which is
+ * the same rule {@link settleAtMaturity} and `recordDefault` already resolve a holder by.
+ *
+ * A first sale finds nothing and does nothing, which is what makes this safe to call
+ * unconditionally on both rails rather than behind a resale flag that could disagree with
+ * the row.
+ */
+async function handOverPosition(invoiceId: string, settledTradeId: string): Promise<void> {
+  const store = getStore();
+  const previous = currentHolderTrade(
+    (await store.listTrades({ invoiceId, limit: 100 })).filter((t) => t.id !== settledTradeId),
+  );
+  if (previous === null) return;
+
+  const { superseded } = await store.supersedePosition({
+    tradeId: previous.id,
+    mandateId: previous.mandateId,
+    amount: previous.proceedsMinor,
+    rail: previous.cashRail,
+    at: new Date(),
+  });
+
+  rootLogger.info('position handed over', {
+    invoiceId,
+    from: previous.id,
+    to: settledTradeId,
+    mandateId: previous.mandateId,
+    superseded,
+  });
+}
+
 async function commitMatch(input: {
   tradeId: string;
   invoiceId: string;
@@ -716,6 +794,7 @@ export const settlementService: SettlementService = {
       holderEvmAddress: sellerEvmAddress,
       toEvmAddress: accountIdToEvmAddress(intent.buyerHederaAccountId),
       escrowEvmAddress: operatorEvmAddress(getConfig().env.HEDERA_OPERATOR_KEY),
+      holderKey: intent.sellerHolderKey,
       units: position,
       expiresAt: new Date(Date.now() + VAULT_HOLD_WINDOW_SECONDS * 1000),
     });
@@ -827,6 +906,7 @@ export const settlementService: SettlementService = {
      */
     await store.updateInvoice(intent.invoiceId, { status: 'sold' });
     await store.setQuoteStatus(intent.quoteId, 'accepted');
+    await handOverPosition(intent.invoiceId, intent.tradeId);
 
     const cashLeg: CashLegReceipt = {
       chain: 'arc',
@@ -966,6 +1046,7 @@ export const settlementService: SettlementService = {
       toEvmAddress: accountIdToEvmAddress(intent.buyerHederaAccountId),
       // The venue is the escrow agent for the challenge window, and nothing longer.
       escrowEvmAddress: operatorEvmAddress(getConfig().env.HEDERA_OPERATOR_KEY),
+      holderKey: intent.sellerHolderKey,
       units: position,
       expiresAt,
     });
@@ -1085,14 +1166,14 @@ export const settlementService: SettlementService = {
     };
 
     const invoice = await store.getInvoice(trade.invoiceId);
-    const seller = await store.getSeller(trade.sellerId);
+    const sellerAddress = await sellSideAddress(trade);
     const buyer = await store.getBuyer(trade.buyerId);
 
     let assetLeg: AssetLegReceipt;
     try {
       const executed = await getAtsAdapter().executeHold({
         securityId: invoice?.securityId ?? '',
-        holderEvmAddress: accountIdToEvmAddress(seller?.hederaAccountId),
+        holderEvmAddress: sellerAddress,
         toEvmAddress: accountIdToEvmAddress(buyer?.hederaAccountId),
         holdId: trade.holdId,
         units,
@@ -1148,12 +1229,19 @@ export const settlementService: SettlementService = {
     });
     await store.setQuoteStatus(trade.quoteId, 'accepted');
     await store.updateInvoice(trade.invoiceId, { status: 'sold' });
+    await handOverPosition(trade.invoiceId, trade.id);
     await commitMatch({
       tradeId: trade.id,
       invoiceId: trade.invoiceId,
       mandateId: trade.mandateId,
       buyerId: trade.buyerId,
-      sellerId: trade.sellerId,
+      /*
+       * The party that sold, not the originator. The commitment is the public record of who
+       * traded with whom, and on a resale `trade.sellerId` names a business that parted with
+       * this receivable once already. The Arc rail says the same thing by taking it off the
+       * intent, which arming resolved the same way.
+       */
+      sellerId: sellingPartyIdOf(trade),
       faceValue: trade.faceValue,
       proceedsMinor: trade.proceedsMinor,
       rail: 'x402',
@@ -1238,10 +1326,9 @@ export const settlementService: SettlementService = {
         );
       }
       const invoice = await store.getInvoice(trade.invoiceId);
-      const seller = await store.getSeller(trade.sellerId);
       const released = await getAtsAdapter().releaseHold({
         securityId: invoice?.securityId ?? '',
-        holderEvmAddress: accountIdToEvmAddress(seller?.hederaAccountId),
+        holderEvmAddress: await sellSideAddress(trade),
         holdId: trade.holdId,
         units: trade.unitsMinor,
       });
@@ -1375,9 +1462,9 @@ export const settlementService: SettlementService = {
      * book silently matures nothing while reporting that the invoice never sold.
      */
     const settled = await store.listTrades({ invoiceId, status: 'settled', limit: 50 });
-    const holderTrade = [...settled].sort(
-      (a, b) => (b.settledAt?.getTime() ?? 0) - (a.settledAt?.getTime() ?? 0),
-    )[0];
+    // The newest live settled trade. Identical to the sort this replaced while a receivable
+    // could only sell once; `parties.ts` is where that rule lives now that it can sell twice.
+    const holderTrade = currentHolderTrade(settled);
     if (!holderTrade) {
       throw conflict('conflict', `Invoice ${invoiceId} has never settled, so nothing matures.`);
     }
@@ -1808,9 +1895,9 @@ export const settlementService: SettlementService = {
      * record of the seller's collections rather than of the customer's behaviour.
      */
     const settled = await store.listTrades({ invoiceId, status: 'settled', limit: 50 });
-    const holderTrade = [...settled].sort(
-      (a, b) => (b.settledAt?.getTime() ?? 0) - (a.settledAt?.getTime() ?? 0),
-    )[0];
+    // The newest live settled trade. Identical to the sort this replaced while a receivable
+    // could only sell once; `parties.ts` is where that rule lives now that it can sell twice.
+    const holderTrade = currentHolderTrade(settled);
     if (!holderTrade) {
       throw conflict(
         'conflict',

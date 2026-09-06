@@ -417,6 +417,36 @@ export const trades = sqliteTable(
       .notNull()
       .references(() => buyers.id),
 
+    /**
+     * Set when this trade is a RESALE, naming the previous holder who sold it.
+     *
+     * `seller_id` keeps pointing at the invoice's originator, because that stays true
+     * forever and several things read it for exactly that meaning — issuance, the
+     * confirmation link, the seller-scoped book. What changes on a resale is who is
+     * *selling in this trade*, and that party is a buyer: they arrived here by purchasing
+     * the paper, so they have a row in `buyers` and none in `sellers`.
+     *
+     * Two columns for one concept is the cost of not overloading `seller_id` with a party
+     * from a different table. Nothing should read either column directly to answer "who is
+     * selling" — {@link sellingPartyOf} is the one place that decides, so the fallback
+     * cannot be spelled two different ways in two call sites.
+     */
+    resellerBuyerId: text('reseller_buyer_id').references(() => buyers.id),
+
+    /**
+     * When a later settled trade took this position over.
+     *
+     * A resale leaves two settled trades against one invoice, and without this the exposure
+     * aggregate counts both: the previous holder's mandate keeps carrying a debtor
+     * concentration it no longer has, while the new holder carries their own. One
+     * receivable, two buyers, both charged for it.
+     *
+     * Written at the moment the resale's cash commits, in the same transaction that frees
+     * the previous holder's allocation — the two facts are the same fact, and a crash
+     * between them would leave a mandate quoting against capital that is gone.
+     */
+    supersededAt: instant('superseded_at'),
+
     faceValue: bigintText('face_value').notNull(),
     proceedsMinor: bigintText('proceeds_minor').notNull(),
     annualisedYieldBps: integer('annualised_yield_bps').notNull(),

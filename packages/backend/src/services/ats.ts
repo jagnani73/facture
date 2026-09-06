@@ -42,12 +42,14 @@ import {
 import { REGULATIONS, type RegulationKey } from '@facture/shared';
 import {
   createPublicClient,
+  createWalletClient,
   encodeFunctionData,
   http,
   type Address,
   type Hex,
   type PublicClient,
 } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import { hedera } from '../chain.js';
 import { badRequest, upstreamUnavailable } from '../errors.js';
 import type { Logger } from '../logger.js';
@@ -311,6 +313,25 @@ export interface HoldRequest {
   readonly escrowEvmAddress: Address;
   readonly units: bigint;
   readonly expiresAt: Date;
+  /**
+   * The holder's own key, when the holder is not the venue. Absent on a first sale.
+   *
+   * **`createHoldByPartition` acts on the CALLER's own tokens**, so a resale cannot be held
+   * by the operator: after the first sale the units sit in the buyer's account, and the
+   * venue calling would place a hold against its own zero balance.
+   *
+   * There is no operator route to this, and that was established against the deployed
+   * diamond rather than assumed. `operatorCreateHoldByPartition` and
+   * `controllerCreateHoldByPartition` both answer `FunctionNotFound` (`0x5416eb98`), and so
+   * does `operatorTransferByPartition`. `authorizeOperatorByPartition` and
+   * `isOperatorForPartition` **do** exist — which is the trap, because authorising the venue
+   * as an ERC-1400 operator succeeds and then has nothing to spend the authority on. It is
+   * the same shape as granting the README's role hash: the call works and confers nothing.
+   *
+   * So the holder signs. The hold still names the venue as `escrow`, which is what lets
+   * settlement execute it exactly as it does a first sale.
+   */
+  readonly holderKey?: string | undefined;
 }
 
 export interface HoldReceipt {
@@ -318,6 +339,23 @@ export interface HoldReceipt {
   readonly transactionId: string;
   readonly consensusAt: string;
 }
+
+/**
+ * `createHoldByPartition`'s arguments, built once and used twice — encoded into calldata for
+ * the SDK path, and passed as values to the relay path's simulation. Deriving the second
+ * from the first would mean decoding calldata back into arguments, which is a second place
+ * for the tuple shape to be wrong.
+ */
+type HoldArgs = readonly [
+  Hex,
+  {
+    readonly amount: bigint;
+    readonly expirationTimestamp: bigint;
+    readonly escrow: Address;
+    readonly to: Address;
+    readonly data: Hex;
+  },
+];
 
 export interface AtsAdapter {
   deployBond(job: IssuanceJob): Promise<DeployedSecurity>;
@@ -452,6 +490,92 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
       log.warn('hedera submission failed', { what, contractId, err });
       throw err;
     }
+  }
+
+  /**
+   * A hold placed by the holder's own key, over the JSON-RPC relay.
+   *
+   * The relay rather than the SDK because the SDK client is built once with the operator as
+   * its operator, and this call must be signed by somebody else. `invoice-registry.ts` and
+   * `mandate-book.ts` already sign Hedera contract calls this way and the pattern is
+   * key-agnostic by construction — `privateKeyToAccount` takes whatever key it is handed.
+   *
+   * **The hold id comes from a simulation, not from the receipt.** `writeContract` yields a
+   * transaction hash and the return value is not in the receipt, so the `(bool, uint256)`
+   * that `createHoldByPartition` answers has to be read by calling it first. The simulation
+   * also fails loudly on an instrument that would reject the hold, which is worth having
+   * before a transaction is paid for. The assumption it rests on is that no second hold
+   * against the same holder on the same instrument lands in between — every invoice is its
+   * own instrument carrying one position, so the window is not a real one here, but it is an
+   * assumption rather than a guarantee and a multi-position instrument would break it.
+   */
+  async function submitAsHolder(
+    request: HoldRequest,
+    calldata: Hex,
+    args: HoldArgs,
+  ): Promise<HoldReceipt> {
+    const address = accountIdToEvmAddress(request.securityId);
+    const key = request.holderKey as string;
+    const account = privateKeyToAccount((key.startsWith('0x') ? key : `0x${key}`) as Hex);
+
+    if (account.address.toLowerCase() !== request.holderEvmAddress.toLowerCase()) {
+      /*
+       * Refused rather than attempted. The key would sign perfectly well and place a hold on
+       * whatever position IT holds, which is a hold on the wrong paper reported as a
+       * successful trade — the failure this whole seam exists to avoid.
+       */
+      throw badRequest(
+        `The configured resale signer is ${account.address}, but the paper is held by ` +
+          `${request.holderEvmAddress}. Nothing was held.`,
+      );
+    }
+
+    const wallet = createWalletClient({ account, transport: http(hedera.jsonRpcUrl) });
+
+    let holdId: string;
+    try {
+      const { result } = await reader.simulateContract({
+        address,
+        abi: ATS_ABI,
+        functionName: 'createHoldByPartition',
+        args,
+        account,
+      });
+      holdId = (result as readonly [boolean, bigint])[1].toString();
+    } catch (err) {
+      throw upstreamUnavailable(
+        'Hedera',
+        `The holder's hold on ${request.securityId} was refused before it was submitted: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const hash = await wallet.sendTransaction({
+      to: address,
+      data: calldata,
+      gas: BigInt(config.gasLimit),
+      chain: null,
+    });
+
+    /*
+     * Await the receipt and check `status`. `writeContract` returning is not the transaction
+     * succeeding — the lesson `deployBond` and the second uniqueness claim both taught, and
+     * the one that would otherwise report a reverted hold as a delivered one.
+     */
+    const receipt = await reader.waitForTransactionReceipt({ hash });
+    if (receipt.status !== 'success') {
+      throw upstreamUnavailable(
+        'Hedera',
+        `The holder's hold on ${request.securityId} reverted (${hash}). Nothing was held.`,
+      );
+    }
+
+    const block = await reader.getBlock({ blockNumber: receipt.blockNumber });
+    return {
+      holdId,
+      transactionId: hash,
+      consensusAt: new Date(Number(block.timestamp) * 1000).toISOString(),
+    };
   }
 
   return {
@@ -598,20 +722,25 @@ export function createHederaAtsAdapter(config: AtsAdapterConfig): AtsAdapter {
     },
 
     async createHold(request) {
+      const args: HoldArgs = [
+        DEFAULT_PARTITION,
+        {
+          amount: request.units,
+          expirationTimestamp: BigInt(Math.floor(request.expiresAt.getTime() / 1000)),
+          escrow: request.escrowEvmAddress,
+          to: request.toEvmAddress,
+          data: '0x',
+        },
+      ];
       const calldata = encodeFunctionData({
         abi: ATS_ABI,
         functionName: 'createHoldByPartition',
-        args: [
-          DEFAULT_PARTITION,
-          {
-            amount: request.units,
-            expirationTimestamp: BigInt(Math.floor(request.expiresAt.getTime() / 1000)),
-            escrow: request.escrowEvmAddress,
-            to: request.toEvmAddress,
-            data: '0x',
-          },
-        ],
+        args,
       });
+
+      if (request.holderKey !== undefined) {
+        return await submitAsHolder(request, calldata, args);
+      }
 
       const receipt = await submit(request.securityId, calldata, 'createHoldByPartition');
       return {

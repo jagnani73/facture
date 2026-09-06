@@ -28,6 +28,8 @@ import { getConfig } from '../config.js';
 import type { InvoiceRow, SellerRow } from '../db/schema.js';
 import { getStore } from '../db/store.js';
 import { rootLogger } from '../logger.js';
+import { currentHolderTrade } from '../parties.js';
+import { accountIdToEvmAddress } from '../services/ats.js';
 import { INVOICE_STATUS, getInvoiceRegistry } from '../services/invoice-registry.js';
 import { claimedByAnother, getUniquenessRegistry } from '../services/uniqueness.js';
 import { badRequest, conflict, duplicateReceivable, notFound } from '../errors.js';
@@ -416,25 +418,54 @@ invoiceRoutes.post('/:id/list', async (c) => {
   }
 
   /*
-   * `sold -> listed` is a legal edge and this route deliberately does not perform it.
+   * `sold -> listed` is the **secondary market**: a holder relisting seasoned paper into the
+   * same book of standing bids. It is the edge that makes primary and secondary one market
+   * rather than two, and the reason a buyer bids tighter on day zero — paper you can exit is
+   * worth more than paper you cannot.
    *
-   * That edge is the **secondary market** — a holder relisting seasoned paper — and it is the
-   * one thing in the lifecycle with no code behind it: settlement resolves "the holder" as the
-   * newest settled trade and releases exactly one mandate's capital at maturity, which is
-   * correct only while a receivable has been sold once. Opening the edge here would let a
-   * sale be armed against paper the seller no longer holds, and the refusal would arrive from
-   * `balanceOf` as "holds no units" rather than as the missing feature it is.
-   *
-   * A guard at the call site rather than a hole in the table, for the same reason the
-   * instrument check below is one: the edge is right, and this venue cannot yet honour it.
+   * It is refused here only when the venue could not actually deliver it, and the check is
+   * about the ASSET leg rather than the price. `createHoldByPartition` acts on the caller's
+   * own tokens, so a resale's hold has to be signed by whoever holds the paper now; the
+   * deployed instrument has no operator route to it. So the venue must hold a key for the
+   * current holder, and if it does not, saying so here is the honest place — the alternative
+   * is a listed invoice that quotes, matches, and then fails at arm time with `balanceOf`
+   * reporting "holds no units", which reads like a broken instrument rather than a missing
+   * key.
    */
   if (invoice.status === 'sold') {
-    throw conflict(
-      'conflict',
-      'This invoice has been sold. Relisting seasoned paper is the secondary market, and ' +
-        'this venue does not settle a resale yet — the holder, not the original seller, ' +
-        'would be the one offering it.',
-    );
+    const holder = currentHolderTrade(await store.listTrades({ invoiceId: id, limit: 100 }));
+    if (holder === null) {
+      throw conflict(
+        'conflict',
+        'This invoice is marked sold but no settled trade holds it, so there is nobody to ' +
+          'relist it on behalf of.',
+      );
+    }
+
+    const holderBuyer = await store.getBuyer(holder.buyerId);
+    const signerAccount = getConfig().env.RESALE_SIGNER_ACCOUNT_ID;
+    if (signerAccount === undefined) {
+      throw conflict(
+        'conflict',
+        'Reselling is not enabled on this deployment. A resale needs the holder to sign the ' +
+          'hold on their own position, and no resale signer is configured.',
+      );
+    }
+
+    /*
+     * Compared as EVM addresses, never as strings. A buyer's Hedera account is on file in
+     * either of its two forms — the `0.0.x` id or the ECDSA alias — and the same account
+     * spelled two ways would refuse a holder the venue can perfectly well sign for.
+     */
+    const holderAddress = accountIdToEvmAddress(holderBuyer?.hederaAccountId);
+    if (holderAddress.toLowerCase() !== accountIdToEvmAddress(signerAccount).toLowerCase()) {
+      throw conflict(
+        'conflict',
+        `This paper is held by ${holderBuyer?.name ?? holder.buyerId}, and the venue holds ` +
+          'no key for them. A resale is signed by the holder, so they would have to offer ' +
+          'it themselves.',
+      );
+    }
   }
 
   /*
@@ -520,7 +551,8 @@ invoiceRoutes.post('/:id/delist', async (c) => {
    * cash had already moved. The way out of an armed trade is `POST /v1/trades/:id/unwind`,
    * which releases the hold and the capital; this route does not reach around it.
    */
-  const armed = (await store.listTrades({ invoiceId: id, limit: 50 })).find(
+  const tradesOnInvoice = await store.listTrades({ invoiceId: id, limit: 100 });
+  const armed = tradesOnInvoice.find(
     (trade) => trade.status === 'preparing' || trade.status === 'awaiting_payment',
   );
   if (armed !== undefined) {
@@ -532,9 +564,21 @@ invoiceRoutes.post('/:id/delist', async (c) => {
     );
   }
 
+  /*
+   * Where withdrawing an offer puts the invoice back depends on whether anybody holds it.
+   *
+   * Unsold paper returns to `confirmed` — nobody owns it and it is simply not for sale.
+   * Resold paper must return to `sold`, because the holder withdrawing their offer still
+   * holds it: `confirmed` would say the receivable is unowned, and maturity resolves who to
+   * pay from the newest live settled trade. Both are declared edges, so this picks between
+   * two legal moves rather than reaching around the machine.
+   */
+  const holder = currentHolderTrade(tradesOnInvoice);
+  const target = holder === null ? 'confirmed' : 'sold';
+
   // Symmetric with listing, and for the same reason: a seller pressing this twice has not
-  // done anything wrong, and `confirmed -> confirmed` is not a transition.
-  if (invoice.status === 'confirmed') {
+  // done anything wrong, and `X -> X` is not a transition.
+  if (invoice.status === target) {
     return c.json({
       invoice: wireInvoice(invoice),
       listed: false,
@@ -543,16 +587,9 @@ invoiceRoutes.post('/:id/delist', async (c) => {
     });
   }
 
-  const move = transitionInvoice(invoice.status, 'confirmed');
+  const move = transitionInvoice(invoice.status, target);
   if (!move.ok) {
-    throw conflict(
-      'conflict',
-      invoice.status === 'sold'
-        ? 'This invoice has been sold. Taking it back off the book is not a status change; ' +
-            'it would have to reverse two settled legs on two chains, which is an unwind of ' +
-            'the trade rather than a delisting.'
-        : move.error.reason,
-    );
+    throw conflict('conflict', move.error.reason);
   }
 
   const updated = await store.updateInvoice(id, { status: move.value });

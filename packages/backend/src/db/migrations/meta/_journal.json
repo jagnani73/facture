@@ -64,6 +64,13 @@
       "when": 1788674268182,
       "tag": "0008_chain_mandate_id",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1788705557292,
+      "tag": "0009_resale_holder",
+      "breakpoints": true
     }
   ]
 }

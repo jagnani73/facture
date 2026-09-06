@@ -14,7 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MARKET_NOW_ISO } from '../src/db/seed.js';
-import { call, createHarness, listInvoice, type Harness } from './helpers.js';
+import { call, createHarness, listInvoice, RESALE_SIGNER, type Harness } from './helpers.js';
 
 let h: Harness;
 
@@ -106,16 +106,45 @@ describe('POST /v1/invoices/:id/list', () => {
   });
 
   /*
-   * `sold -> listed` IS a legal edge — it is the secondary market — and this route still
-   * refuses it, because nothing in this venue settles a resale: the holder rather than the
-   * original seller would be offering the paper, and arming would fail at `balanceOf` with
-   * "holds no units" rather than naming the missing feature.
+   * The secondary market. `sold -> listed` used to be vetoed here outright; what is left of
+   * that veto is a check about the ASSET leg, because a resale's hold has to be signed by
+   * whoever holds the paper and the venue may hold no key for them.
    */
-  it('refuses to relist sold paper, naming the market that does not exist yet', async () => {
+  it('refuses to relist when no resale signer is configured', async () => {
     const res = await call(h.app, 'POST', `/v1/invoices/${invoice('INV-2033')}/list`);
 
     expect(res.status).toBe(409);
-    expect(res.body.detail).toContain('secondary market');
+    expect(res.body.detail).toContain('resale signer');
+  });
+
+  it('refuses to relist paper the venue holds no key for, naming the holder', async () => {
+    // A signer that is a real account, but not the one holding INV-2033.
+    const other = await createHarness({ env: RESALE_SIGNER('0.0.6098455') });
+    try {
+      const id = other.seeded.invoiceIds['INV-2033'] ?? '';
+      const res = await call(other.app, 'POST', `/v1/invoices/${id}/list`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.detail).toContain('Ashgrove Treasury');
+      expect(res.body.detail).toContain('no key');
+    } finally {
+      other.restore();
+    }
+  });
+
+  it('relists sold paper when the holder is one the venue can sign for', async () => {
+    // Ashgrove holds INV-2033, and this is Ashgrove's account.
+    const resale = await createHarness({ env: RESALE_SIGNER('0.0.6098431') });
+    try {
+      const id = resale.seeded.invoiceIds['INV-2033'] ?? '';
+      const res = await call(resale.app, 'POST', `/v1/invoices/${id}/list`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.invoice.status).toBe('listed');
+      expect(res.body.listed).toBe(true);
+    } finally {
+      resale.restore();
+    }
   });
 
   it('refuses an invoice that does not exist', async () => {
@@ -152,11 +181,34 @@ describe('POST /v1/invoices/:id/delist', () => {
    * which belongs to the trade record — so the refusal says so rather than reporting the
    * machine's bare "no edge from sold to confirmed".
    */
-  it('refuses to take a sold invoice back, naming the unwind', async () => {
+  it('reports a sold invoice as already off the book rather than delisting it', async () => {
     const res = await call(h.app, 'POST', `/v1/invoices/${invoice('INV-2033')}/delist`);
 
-    expect(res.status).toBe(409);
-    expect(res.body.detail).toContain('unwind');
+    expect(res.status).toBe(200);
+    expect(res.body.invoice.status).toBe('sold');
+    expect(res.body.alreadyDelisted).toBe(true);
+  });
+
+  /*
+   * Withdrawing a RESALE offer puts the paper back to `sold`, not to `confirmed`. The holder
+   * still holds it — `confirmed` would say the receivable is unowned, and maturity resolves
+   * who to pay from the newest live settled trade.
+   */
+  it('returns relisted paper to sold when its holder withdraws the offer', async () => {
+    const resale = await createHarness({ env: RESALE_SIGNER('0.0.6098431') });
+    try {
+      const id = resale.seeded.invoiceIds['INV-2033'] ?? '';
+      const listed = await call(resale.app, 'POST', `/v1/invoices/${id}/list`);
+      expect(listed.body.invoice.status).toBe('listed');
+
+      const res = await call(resale.app, 'POST', `/v1/invoices/${id}/delist`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.invoice.status).toBe('sold');
+      expect(res.body.listed).toBe(false);
+    } finally {
+      resale.restore();
+    }
   });
 
   /*

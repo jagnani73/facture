@@ -739,6 +739,63 @@ export class SqliteStore implements Store {
     );
   }
 
+  supersedePosition(input: {
+    tradeId: string;
+    mandateId: string;
+    amount: bigint;
+    rail: 'x402' | 'arc-vault' | null;
+    at: Date;
+  }): Promise<{ mandate: MandateRow; superseded: boolean }> {
+    return asPromise(() =>
+      this.#db.transaction((tx) => {
+        const mandate = tx
+          .select()
+          .from(mandates)
+          .where(eq(mandates.id, input.mandateId))
+          .limit(1)
+          .get();
+        if (!mandate) throw notFound(`Mandate ${input.mandateId}`);
+
+        const trade = tx.select().from(trades).where(eq(trades.id, input.tradeId)).limit(1).get();
+        if (!trade) throw notFound(`Trade ${input.tradeId}`);
+
+        /*
+         * Already handed over. Answering the row unchanged rather than releasing again is
+         * what makes a retried settlement safe: the second release would be real money
+         * appearing on a mandate that never got it back.
+         */
+        if (trade.supersededAt !== null) return { mandate: mandate, superseded: false };
+
+        tx.update(trades).set({ supersededAt: input.at }).where(eq(trades.id, input.tradeId)).run();
+
+        // See `retireAllocatedCapital` for why the Arc rail retires the commitment too.
+        const allocated = max0(mandate.allocatedMinor - input.amount);
+        const funded =
+          input.rail === 'arc-vault'
+            ? max0(mandate.fundedMinor - input.amount)
+            : mandate.fundedMinor;
+        const status =
+          input.rail === 'arc-vault'
+            ? statusAfterRetire(mandate, funded, allocated)
+            : statusAfterRelease(mandate, allocated);
+
+        const updated = tx
+          .update(mandates)
+          .set({
+            allocatedMinor: allocated,
+            ...(input.rail === 'arc-vault' ? { fundedMinor: funded } : {}),
+            ...(status === null ? {} : { status }),
+            updatedAt: input.at,
+          })
+          .where(eq(mandates.id, input.mandateId))
+          .returning()
+          .get();
+        if (!updated) throw notFound(`Mandate ${input.mandateId}`);
+        return { mandate: updated, superseded: true };
+      }, IMMEDIATE),
+    );
+  }
+
   async debtorExposure(mandateIds: readonly string[]): Promise<DebtorExposureMap> {
     const out = new Map<string, Record<string, bigint>>();
     for (const id of mandateIds) out.set(id, {});
@@ -760,6 +817,16 @@ export class SqliteStore implements Store {
           inArray(trades.mandateId, [...mandateIds]),
           inArray(trades.status, [...EXPOSING_TRADE_STATUSES]),
           notInArray(invoices.status, [...CAPITAL_RETURNED_STATUSES]),
+          /*
+           * A position that has been sold on is not exposure any more.
+           *
+           * Without this a resale charges two mandates for one receivable: the previous
+           * holder's trade stays `settled` against an invoice that is still `sold`, so it
+           * keeps matching, while the new holder's trade matches beside it. The invoice
+           * status cannot separate them — it describes the receivable, and both trades are
+           * against the same one.
+           */
+          isNull(trades.supersededAt),
         ),
       );
 

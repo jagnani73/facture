@@ -643,6 +643,42 @@ export class MemoryStore implements Store {
     return clone(next);
   }
 
+  async supersedePosition(input: {
+    tradeId: string;
+    mandateId: string;
+    amount: bigint;
+    rail: 'x402' | 'arc-vault' | null;
+    at: Date;
+  }): Promise<{ mandate: MandateRow; superseded: boolean }> {
+    const row = this.mandates.get(input.mandateId);
+    if (!row) throw notFound(`Mandate ${input.mandateId}`);
+    const trade = this.trades.get(input.tradeId);
+    if (!trade) throw notFound(`Trade ${input.tradeId}`);
+
+    // Already handed over. See the sibling in `sqlite-store.ts`.
+    if (trade.supersededAt !== null) return { mandate: clone(row), superseded: false };
+
+    this.trades.set(trade.id, { ...trade, supersededAt: input.at });
+
+    const allocated = max0(row.allocatedMinor - input.amount);
+    const funded =
+      input.rail === 'arc-vault' ? max0(row.fundedMinor - input.amount) : row.fundedMinor;
+    const status =
+      input.rail === 'arc-vault'
+        ? statusAfterRetire(row, funded, allocated)
+        : statusAfterRelease(row, allocated);
+
+    const next: MandateRow = {
+      ...row,
+      allocatedMinor: allocated,
+      fundedMinor: funded,
+      status: status ?? row.status,
+      updatedAt: input.at,
+    };
+    this.mandates.set(next.id, next);
+    return { mandate: clone(next), superseded: true };
+  }
+
   async debtorExposure(mandateIds: readonly string[]): Promise<DebtorExposureMap> {
     const wanted = new Set(mandateIds);
     const out = new Map<string, Record<string, bigint>>();
@@ -651,6 +687,9 @@ export class MemoryStore implements Store {
     for (const trade of this.trades.values()) {
       if (!wanted.has(trade.mandateId)) continue;
       if (!EXPOSING_TRADE_STATUSES.has(trade.status)) continue;
+      // A position sold on is not exposure any more. See the sibling in `sqlite-store.ts`
+      // for why the invoice status cannot make this distinction.
+      if (trade.supersededAt !== null) continue;
       const invoice = this.invoices.get(trade.invoiceId);
       if (!invoice || CAPITAL_RETURNED_STATUSES.has(invoice.status)) continue;
 
@@ -714,6 +753,8 @@ export class MemoryStore implements Store {
       quoteId: row.quoteId,
       sellerId: row.sellerId,
       buyerId: row.buyerId,
+      resellerBuyerId: row.resellerBuyerId ?? null,
+      supersededAt: row.supersededAt ?? null,
       faceValue: row.faceValue,
       proceedsMinor: row.proceedsMinor,
       annualisedYieldBps: row.annualisedYieldBps,

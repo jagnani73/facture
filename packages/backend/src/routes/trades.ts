@@ -15,7 +15,9 @@ import { explainRefusal } from '@facture/shared';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { z } from 'zod';
+import { getConfig } from '../config.js';
 import { getStore } from '../db/store.js';
+import { currentHolderTrade } from '../parties.js';
 import { publishRefusals } from '../services/hcs.js';
 import { badRequest, conflict, forbidden, isAppError, notFound } from '../errors.js';
 import { rootLogger } from '../logger.js';
@@ -200,6 +202,52 @@ async function prepareTrade(
   if (!seller || !buyer) throw notFound(`Counterparties for invoice ${invoice.id}`);
 
   /*
+   * Who is actually selling.
+   *
+   * On a first sale it is the originator, which is what `invoice.sellerId` has always
+   * named. On a RESALE it is the previous holder — a buyer — and every downstream fact
+   * follows from that rather than from the invoice row: whose position `balanceOf` reads,
+   * whose key signs the hold, and which Arc address `registerMatch` binds the payout to
+   * permanently.
+   *
+   * Resolved once, here, because this is the only place that has both the invoice and the
+   * ledger in hand. Everything after it reads the trade row through `sellingPartyOf`.
+   */
+  const holderTrade = currentHolderTrade(
+    await store.listTrades({ invoiceId: invoice.id, limit: 100 }),
+  );
+  const resellerBuyer = holderTrade === null ? null : await store.getBuyer(holderTrade.buyerId);
+  const resaleSignerKey = getConfig().env.RESALE_SIGNER_PRIVATE_KEY;
+
+  if (resellerBuyer !== null && resaleSignerKey === undefined) {
+    /*
+     * Refused before anything is reserved. The listing route already checks this, so
+     * reaching it here means resale was configured away between listing and arming — which
+     * is exactly the window where failing late would strand a hold.
+     */
+    throw conflict(
+      'conflict',
+      'This paper is being resold by its holder, and no resale signer is configured, so ' +
+        'the asset leg could not be signed. Nothing was reserved.',
+    );
+  }
+
+  const sellSide =
+    resellerBuyer === null
+      ? {
+          hederaAccountId: seller.hederaAccountId ?? '',
+          arcAddress: seller.arcAddress,
+          partyId: seller.id,
+          holderKey: undefined,
+        }
+      : {
+          hederaAccountId: resellerBuyer.hederaAccountId ?? '',
+          arcAddress: resellerBuyer.arcAddress,
+          partyId: resellerBuyer.id,
+          holderKey: resaleSignerKey,
+        };
+
+  /*
    * Compliance BEFORE the match, against the security's own ControlList and Kyc facets.
    * This ordering is the whole argument against doing this on an AMM: an AMM matches first
    * and discovers the transfer was illegal afterwards, so non-compliance arrives as a
@@ -238,15 +286,14 @@ async function prepareTrade(
    */
   const bookPreview = await getMandateBook().previewMatch(invoice.id, mandate.chainMandateId);
   if (bookPreview.checked && bookPreview.ok === false) {
-    rootLogger.child({ svc: 'mandate-book' }).warn(
-      'the mandate book would refuse a match the venue is arming',
-      {
+    rootLogger
+      .child({ svc: 'mandate-book' })
+      .warn('the mandate book would refuse a match the venue is arming', {
         invoiceId: invoice.id,
         mandateId: mandate.id,
         chainMandateId: mandate.chainMandateId?.toString(10) ?? null,
         code: bookPreview.code,
-      },
-    );
+      });
   }
 
   /*
@@ -262,6 +309,8 @@ async function prepareTrade(
     quoteId: accepted.id,
     sellerId: seller.id,
     buyerId: buyer.id,
+    // Null on a first sale. See `parties.ts` for why `seller_id` keeps naming the originator.
+    resellerBuyerId: resellerBuyer?.id ?? null,
     faceValue: invoice.faceValue,
     proceedsMinor: live.quote.proceeds,
     annualisedYieldBps: live.quote.annualisedYieldBps,
@@ -277,10 +326,17 @@ async function prepareTrade(
     mandateId: mandate.id,
     quoteId: accepted.id,
     buyerId: buyer.id,
-    sellerId: seller.id,
+    /*
+     * The party that SOLD, which on a resale is the holder rather than the originator. This
+     * is what reaches the HCS match commitment, and naming the originator there would
+     * publish a permanent statement that a business sold paper it had already sold once.
+     * The field has always meant "who sold"; before resales it could only ever be one thing.
+     */
+    sellerId: sellSide.partyId,
     securityId: invoice.securityId,
-    sellerHederaAccountId: seller.hederaAccountId ?? '',
-    sellerArcAddress: seller.arcAddress,
+    sellerHederaAccountId: sellSide.hederaAccountId,
+    sellerArcAddress: sellSide.arcAddress,
+    sellerHolderKey: sellSide.holderKey,
     buyerHederaAccountId: buyer.hederaAccountId ?? '',
     buyerArcAddress: (buyer.arcAddress ?? '0x') as `0x${string}`,
     /*

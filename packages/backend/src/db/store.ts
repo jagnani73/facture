@@ -305,6 +305,35 @@ export interface Store {
    * the money did not come back to the mandate, it went to the seller.
    */
   retireAllocatedCapital(mandateId: string, amount: MinorUnits): Promise<MandateRow>;
+  /**
+   * Hand a position over to its next holder: mark the old trade superseded and give the old
+   * holder's mandate its capital back, in one transaction.
+   *
+   * **The resale's counterpart to maturity.** At maturity the debtor pays and the holder's
+   * commitment ends; at a resale the holder is paid by the next buyer instead, and the same
+   * two things have to happen — the allocation returns to their mandate, and the position
+   * stops counting as exposure to that debtor.
+   *
+   * One call rather than a `supersede` beside a `release` because a crash between them is
+   * not a tidy half-state: superseded-but-not-released leaves a mandate quoting against
+   * capital it can never spend, and released-but-not-superseded lets the same receivable be
+   * charged to two buyers at once. The pair is the invariant, so the pair is the operation.
+   *
+   * Rail-dependent for the same reason {@link Store.retireAllocatedCapital} is. Paper bought
+   * out of the Arc vault was paid for with escrowed USDC that has already left, so the
+   * commitment retires with the allocation; paper bought over x402 was paid for in the
+   * buyer's own HBAR and the vault never moved, so only the allocation returns.
+   *
+   * Answers the row unchanged when the trade is already superseded, so a retried settlement
+   * cannot release the same capital twice.
+   */
+  supersedePosition(input: {
+    tradeId: string;
+    mandateId: string;
+    amount: MinorUnits;
+    rail: 'x402' | 'arc-vault' | null;
+    at: Date;
+  }): Promise<{ mandate: MandateRow; superseded: boolean }>;
   /** One aggregate for a page of mandates, never one query per mandate. */
   debtorExposure(mandateIds: readonly string[]): Promise<DebtorExposureMap>;
 

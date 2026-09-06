@@ -65,6 +65,30 @@ export const envSchema = z
       }),
     ATS_FACTORY_ID: ACCOUNT_ID.optional(),
     /**
+     * The key that signs a resale's ATS hold, and the account it belongs to.
+     *
+     * **This is custody, and it is named rather than dressed up.** `createHoldByPartition`
+     * acts on the caller's own tokens, so a holder reselling has to sign the hold on their
+     * own position, and the deployed diamond has no operator route to it — the probes are
+     * written up on {@link HoldRequest.holderKey}. A buyer who genuinely self-custodies
+     * would sign this themselves; in this build the venue holds the key for the one buyer
+     * that has one, and the resale route refuses any other holder rather than pretending.
+     *
+     * Unset disables resale, the same shape as issuance with no `ATS_FACTORY_ID`. Half the
+     * pair is refused by name below: an account id with no key reads like a working
+     * configuration and can never sign anything.
+     */
+    RESALE_SIGNER_ACCOUNT_ID: ACCOUNT_ID.optional(),
+    RESALE_SIGNER_PRIVATE_KEY: z
+      .string()
+      .min(1)
+      .refine((key) => !key.toLowerCase().startsWith(ED25519_DER_PREFIX), {
+        message:
+          'looks like an ED25519 key. A hold is an EVM call and ED25519 cannot sign one — ' +
+          'the resale signer must be ECDSA.',
+      })
+      .optional(),
+    /**
      * Reg S by default, which is the decision recorded in CLAUDE.md and what the live bond
      * carries. Reg S is the only declaration that both permits international investors and
      * carries no resale hold, and both are load-bearing: a holder relisting on day thirty
@@ -251,6 +275,29 @@ export const envSchema = z
         message:
           'needs PRIVY_APP_ID and PRIVY_APP_SECRET. Attaching a policy is an authenticated ' +
           'call, so an id on its own scopes no wallet while looking as though it does.',
+      });
+    }
+
+    /*
+     * The resale signer is all-or-nothing, for the reason the agent's Hedera pair is.
+     * Either half alone looks exactly like a deployment with resale switched on, and
+     * neither half can place a hold: an id names an account nothing can sign for, and a key
+     * with no id has no holder to check itself against.
+     */
+    if (
+      (env.RESALE_SIGNER_ACCOUNT_ID === undefined) !==
+      (env.RESALE_SIGNER_PRIVATE_KEY === undefined)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [
+          env.RESALE_SIGNER_ACCOUNT_ID === undefined
+            ? 'RESALE_SIGNER_ACCOUNT_ID'
+            : 'RESALE_SIGNER_PRIVATE_KEY',
+        ],
+        message:
+          'is required alongside its pair. Half a resale signer cannot place a hold, and ' +
+          'unset is how resale is disabled — so half of it is neither on nor off.',
       });
     }
 
