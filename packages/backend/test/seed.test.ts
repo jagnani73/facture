@@ -76,10 +76,115 @@ describe('the seeded book', () => {
     const mandate = await h.store.getMandate(mandateId);
     const exposure = (await h.store.debtorExposure([mandateId])).get(mandateId) ?? {};
     const petra = h.seeded.debtorIds['DBT-PETRA'] ?? '';
+    const writtenOff = await h.store.getTrade(h.seeded.tradeIds['POS-16'] ?? '');
 
     // POS-07: $36,000 face at 1250 bps over 84 days -> $3,496,438 of outlay.
     expect(exposure[petra]).toBe(3_496_438n);
-    expect(mandate?.allocatedMinor).toBe(3_496_438n + 925_835n + 2_425_513n);
+    /*
+     * Tessellate's three open positions plus the one it wrote off. A default releases
+     * nothing — the position closed at zero and the buyer is out the money — so POS-16's
+     * outlay is still allocated, while POS-15's came back when Northwind paid. Read off the
+     * trade rather than typed in, so the two cannot be made to agree by editing this line.
+     */
+    expect(mandate?.allocatedMinor).toBe(
+      3_496_438n + 925_835n + 2_425_513n + (writtenOff?.proceedsMinor ?? 0n),
+    );
+  });
+});
+
+/**
+ * The rating ledger under the book, and the one invariant it can actually carry.
+ *
+ * The counters on `debtors` are an **opening balance** — a customer's record from before
+ * this venue existed — plus every outcome the venue has since recorded, so they cannot be
+ * rebuilt from `settlement_outcomes` and nothing here pretends they can. What must hold is
+ * the weaker pair below: every row in the table is inside the counters beside it, and no
+ * terminal invoice is missing its row.
+ *
+ * The second one is the test that would have caught this. MF-2029 and MF-2031 shipped as
+ * `matured` and `defaulted` with no settled trade and no ledger row behind either — a
+ * receivable that defaulted on nobody and matured into nobody's hands, since both paths
+ * read the holder off the newest settled trade.
+ */
+describe('the rating ledger behind the seeded book', () => {
+  /** Terminal, and reached only by settling: `disputed` never sold, so it settles nothing. */
+  const CLOSED = new Set(['matured', 'defaulted']);
+
+  const outcomesFor = (debtorId: string) =>
+    [...h.store.outcomes.values()].filter((o) => o.debtorId === debtorId);
+
+  it('has a settled trade and a recorded outcome behind every terminal invoice', async () => {
+    const closed = [...h.store.invoices.values()].filter((i) => CLOSED.has(i.status));
+
+    expect(closed.map((i) => i.invoiceNumber).sort()).toEqual(['MF-2029', 'MF-2031']);
+    for (const invoice of closed) {
+      const settled = [...h.store.trades.values()].filter(
+        (t) => t.invoiceId === invoice.id && t.status === 'settled',
+      );
+      const onLedger = await h.store.getOutcome(invoice.debtorId, invoice.id);
+
+      expect(settled).toHaveLength(1);
+      expect(onLedger).not.toBeNull();
+      expect(onLedger?.faceValue).toBe(invoice.faceValue);
+      expect(onLedger?.outcome).toBe(invoice.status === 'matured' ? 'on_time' : 'default');
+    }
+  });
+
+  it('carries every recorded outcome inside the counters it was added to', async () => {
+    for (const debtor of h.store.debtors.values()) {
+      const rows = outcomesFor(debtor.id);
+      const count = (outcome: string): number => rows.filter((o) => o.outcome === outcome).length;
+
+      expect(debtor.settledOnTime).toBeGreaterThanOrEqual(count('on_time'));
+      expect(debtor.settledLate).toBeGreaterThanOrEqual(count('late'));
+      expect(debtor.defaulted).toBeGreaterThanOrEqual(count('default'));
+
+      // A default settles nothing, so only the paid rows are inside the face-value total.
+      const paid = rows
+        .filter((o) => o.outcome !== 'default')
+        .reduce((sum, o) => sum + o.faceValue, 0n);
+      expect(debtor.settledFaceValue).toBeGreaterThanOrEqual(paid);
+
+      for (const row of rows) {
+        expect(debtor.lastSettlementAt?.getTime() ?? 0).toBeGreaterThanOrEqual(
+          row.occurredAt.getTime(),
+        );
+      }
+    }
+  });
+
+  it('counts settlements it has no row for, which is the opening balance', async () => {
+    const lumen = await h.store.getDebtor(h.seeded.debtorIds['DBT-LUMEN'] ?? '');
+    const counted = [...h.store.debtors.values()].reduce(
+      (sum, d) => sum + d.settledOnTime + d.settledLate + d.defaulted,
+      0,
+    );
+
+    /*
+     * Twenty-one settlements and not one row. A customer arrives at a factoring venue with
+     * a payment record it did not witness, and without one every grade on day one would be
+     * `UNRATED` and the curve would be flat — so this gap is the demo book working, not the
+     * ledger being incomplete. The schema comment used to describe the counters as derived
+     * from the table, which is what makes the difference worth pinning.
+     */
+    expect(lumen?.settledOnTime).toBe(21);
+    expect(outcomesFor(lumen?.id ?? '')).toHaveLength(0);
+    expect(counted).toBeGreaterThan(h.store.outcomes.size);
+  });
+
+  it('marks Orrin exactly once for MF-2031, on the ledger and in the counters', async () => {
+    const orrin = h.seeded.debtorIds['DBT-ORRIN'] ?? '';
+    const debtor = await h.store.getDebtor(orrin);
+    const row = await h.store.getOutcome(orrin, h.seeded.invoiceIds['INV-2031'] ?? '');
+
+    // The one default the book claims is the one the ledger holds, at the face value the
+    // invoice states. A counter of 1 beside no row is a mark on a customer nobody can check.
+    expect(debtor?.defaulted).toBe(1);
+    expect(row?.outcome).toBe('default');
+    expect(row?.faceValue).toBe(1_580_000n);
+    // Declared a week after it fell due, not on the day: `recordDefault` refuses a
+    // receivable that still has until the end of its due date to be paid.
+    expect(row?.occurredAt.toISOString()).toBe('2026-08-27T00:00:00.000Z');
   });
 });
 

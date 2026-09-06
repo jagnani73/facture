@@ -18,7 +18,7 @@
  *   long tenors refuses a customer already known to default. One invoice with no price,
  *   because no price is the honest answer.
  *
- * ## Three things are derived, never typed in
+ * ## Four things are derived, never typed in
  *
  * Otherwise the book drifts out of agreement with itself:
  *
@@ -26,7 +26,25 @@
  *   them, from `uniquenessHash` and `isinForInvoice`;
  * - every historic position's **outlay** is `priceInvoice(face, bid, tenor at purchase)`;
  * - every mandate's **allocated capital and per-debtor exposure** are summed from its own
- *   settled trades by the store, not asserted here.
+ *   settled trades by the store, not asserted here;
+ * - every **closed position's settlement** goes through `store.recordOutcome`, the only
+ *   writer `settlement_outcomes` has, and the debtor is inserted net of it so the counters
+ *   come back out of the ledger rather than being asserted beside it.
+ *
+ * ## The debtor counters are an opening balance, not a row count
+ *
+ * Nine customers arrive here with 79 settled receivables between them, and the ledger this
+ * seed writes holds two rows. That is not a discrepancy to be reconciled away: a customer
+ * comes to a factoring venue with a payment record it did not witness, and without one every
+ * grade on day one would be `UNRATED` and the whole curve would be flat. So the counters on
+ * `debtors` are an **opening balance plus every outcome this venue has recorded**, and
+ * `settlement_outcomes` is the append-only fact for the second half only. The counters
+ * therefore cannot be rebuilt from the table, and nothing tries to.
+ *
+ * What must hold is the weaker thing: every row in the table is inside the counters beside
+ * it, and no terminal invoice is missing its row. MF-2029 and MF-2031 used to be exactly
+ * that — `matured` and `defaulted` with no trade and no ledger row behind either, so the
+ * book asserted two outcomes that nothing in it could have produced.
  *
  * ## Ratings, and where these numbers differ from the web fixtures
  *
@@ -52,6 +70,7 @@ import {
   type Rating,
 } from '@facture/shared';
 import { createHash } from 'node:crypto';
+import type { SettlementOutcome } from '../services/rating.js';
 import type { Store } from './store.js';
 
 /** The market clock the web fixtures freeze at. Prices are reproducible against it. */
@@ -189,6 +208,18 @@ const BUYERS: readonly BuyerSpec[] = [
   },
 ];
 
+/**
+ * A customer, and the whole payment record they carry.
+ *
+ * `onTime`, `late`, `defaulted` and `settledFace` are the TOTALS — the same figures the web
+ * fixtures state — and almost all of it is an **opening balance** from before this venue
+ * existed. Only the handful with a `settlement_outcomes` row behind them are things the
+ * venue itself recorded, and those are the `closed` positions below: the debtor is inserted
+ * net of them and `recordOutcome` puts them back, so the totals here are what the ledger and
+ * the accumulator agree on rather than a number typed beside one of them.
+ *
+ * `since` is the first settlement in the opening balance, not the first invoice.
+ */
 interface DebtorSpec {
   label: string;
   name: string;
@@ -526,7 +557,16 @@ const INVOICES: readonly InvoiceSpec[] = [
     issued: false,
   },
 
-  // Closed, one way or another.
+  /*
+   * Closed, one way or another — and every one of these that reached a terminal status has
+   * a position under `POSITIONS` and a `settlement_outcomes` row behind it, except the
+   * disputed one, which never sold and so has nothing to settle.
+   *
+   * MF-2029 and MF-2031 carried `matured` and `defaulted` with neither. A receivable cannot
+   * default if nobody bought it — the buyer is who takes the loss, which is the whole of the
+   * non-recourse argument — and it cannot mature into nobody's hands either, since
+   * `settleAtMaturity` routes the face value to the holder read off the newest settled trade.
+   */
   {
     label: 'INV-2033',
     invoiceNumber: 'MF-2033',
@@ -587,6 +627,19 @@ interface PositionSpec {
   securityId?: string;
   assetRef?: string;
   cashRef?: string;
+  /**
+   * How this position ended, for the two that reached the end of their life.
+   *
+   * Absent means the position is open: the mandate holds the paper and the receivable has
+   * not fallen due. Present means the seed walks the same close a live one walks — the
+   * ledger row through `store.recordOutcome`, and the capital move that the outcome implies.
+   *
+   * `on` is when the money landed, or when the write-off was declared. It is not the due
+   * date and not the moment of seeding: `on_time` versus `late` is that date compared
+   * against `dueOn`, exactly as a live `paidAt` decides it, and a permanent mark on a
+   * customer is not something to derive from whenever the seed happened to run.
+   */
+  closed?: { outcome: SettlementOutcome; on: string };
 }
 
 const POSITIONS: readonly PositionSpec[] = [
@@ -746,7 +799,72 @@ const POSITIONS: readonly PositionSpec[] = [
     boughtOn: '2026-08-25',
     dueOn: '2026-11-20',
   },
+
+  /*
+   * Tessellate's two closed positions, and the pair the rest of the ledger is read against.
+   *
+   * Both sit on MND-03 because it is the only bid that could have held either at the time.
+   * Northwind was `B` and Orrin `C` before the write-off, and of the bids those clear on
+   * rating: MND-01 and MND-05 take `A` only; MND-06 was funded on 24 August, after MF-2031
+   * fell due and after MF-2029 was paid; MND-04 caps one customer at $15,000, under either
+   * outlay; and MND-02 takes `B` but not `C`, and would have breached its own $50,000
+   * Northwind cap, POS-04 being outstanding for the whole of MF-2029's life. A seeded
+   * position a mandate could not have bought is the same kind of claim as a terminal invoice
+   * nobody bought.
+   *
+   * They are the two ends of the rating loop, on one desk:
+   *
+   * - **POS-15 / MF-2029 paid**, eight days early, so the capital came back and the position
+   *   left the per-debtor map — which is what let POS-09 take Northwind again on 25 August
+   *   inside the same $40,000 cap.
+   * - **POS-16 / MF-2031 never paid.** The write-off releases nothing: Tessellate is out the
+   *   outlay, the allocation stays consumed, and Orrin's concentration stays consumed with
+   *   it, because a default is the strongest evidence there is for counting a customer's
+   *   exposure rather than the event that forgets it.
+   */
+  {
+    label: 'POS-15',
+    mandate: 'MND-03',
+    invoiceLabel: 'INV-2029',
+    invoiceNumber: 'MF-2029',
+    debtor: 'DBT-NORTHWIND',
+    face: 33_400,
+    boughtOn: '2026-07-30',
+    dueOn: '2026-08-28',
+    closed: { outcome: 'on_time', on: '2026-08-20' },
+  },
+  {
+    label: 'POS-16',
+    mandate: 'MND-03',
+    invoiceLabel: 'INV-2031',
+    invoiceNumber: 'MF-2031',
+    debtor: 'DBT-ORRIN',
+    face: 15_800,
+    boughtOn: '2026-07-30',
+    dueOn: '2026-08-20',
+    // A week past due, not on the day: `recordDefault` refuses a receivable that still has
+    // until the end of its due date to be paid, and a seeded declaration it would refuse is
+    // a fact the venue could not have produced.
+    closed: { outcome: 'default', on: '2026-08-27' },
+  },
 ];
+
+/**
+ * The settlements this seed is about to record for one customer.
+ *
+ * `DEBTORS` states each customer's whole record and most of it predates this venue, so the
+ * debtor row is inserted net of these and `recordOutcome` puts them back — through the same
+ * call a live maturity makes, which is the only writer `settlement_outcomes` has. Writing
+ * the totals into the row and the rows beside them is how the two come to disagree by a
+ * keystroke, which is the disagreement the live demo database already carries.
+ */
+function closedPositionsFor(debtorLabel: string): { outcome: SettlementOutcome; face: number }[] {
+  return POSITIONS.flatMap((p) =>
+    p.closed !== undefined && p.debtor === debtorLabel
+      ? [{ outcome: p.closed.outcome, face: p.face }]
+      : [],
+  );
+}
 
 /** Label -> UUID for every seeded row, so a demo can address the book by its fixture name. */
 export const seedIds = {
@@ -825,17 +943,51 @@ export async function seedStore(store: Store): Promise<SeedResult> {
   }
 
   for (const spec of DEBTORS) {
+    /*
+     * The opening balance: the customer's record minus the part this seed is about to write
+     * to the rating ledger. See `closedPositionsFor` for why it is subtracted rather than
+     * both halves being stated.
+     */
+    const recorded = closedPositionsFor(spec.label);
+    const countOf = (outcome: SettlementOutcome): number =>
+      recorded.filter((r) => r.outcome === outcome).length;
+    const onTime = spec.onTime - countOf('on_time');
+    const late = spec.late - countOf('late');
+    const defaulted = spec.defaulted - countOf('default');
+    // A default settles nothing, so it neither adds face value nor takes any back out.
+    const settledFace = recorded.reduce(
+      (sum, r) => sum - (r.outcome === 'default' ? 0n : usd(r.face)),
+      usd(spec.settledFace),
+    );
+
+    /*
+     * Loud, because the alternative is silent: a customer whose stated record is smaller
+     * than the settlements the seed records against them would be inserted with a negative
+     * counter, and `assess` would read a negative score as a cold start rather than as a
+     * corrupt row.
+     */
+    if (onTime < 0 || late < 0 || defaulted < 0 || settledFace < 0n) {
+      throw new Error(
+        `${spec.label} records more settlements than its own payment record admits to: the ` +
+          'counters are an opening balance plus the ledger, and this one is short.',
+      );
+    }
+
+    const opening = onTime + late + defaulted;
     await store.insertDebtor({
       id: seedId(spec.label),
       name: spec.name,
       email: spec.email,
       rating: spec.rating,
-      settledOnTime: spec.onTime,
-      settledLate: spec.late,
-      defaulted: spec.defaulted,
-      settledFaceValue: usd(spec.settledFace),
-      firstSettlementAt: spec.onTime + spec.late + spec.defaulted > 0 ? at(spec.since) : null,
-      lastSettlementAt: spec.onTime + spec.late + spec.defaulted > 0 ? at('2026-08-20') : null,
+      settledOnTime: onTime,
+      settledLate: late,
+      defaulted,
+      settledFaceValue: settledFace,
+      firstSettlementAt: opening > 0 ? at(spec.since) : null,
+      // Overwritten by `recordOutcome` for the two customers whose most recent settlement
+      // this seed actually writes down, which is why theirs is a date on the ledger rather
+      // than this blanket one.
+      lastSettlementAt: opening > 0 ? at('2026-08-20') : null,
       createdAt: at(spec.since),
     });
   }
@@ -1018,6 +1170,28 @@ export async function seedStore(store: Store): Promise<SeedResult> {
     // Allocation is the mandate's own ledger of what it has spent, moved through the same
     // path a live trade uses rather than written as a column.
     await store.allocate(seedId(spec.mandate), proceeds);
+
+    if (spec.closed !== undefined) {
+      /*
+       * The close, in the order and through the calls a live one uses: the ledger row is the
+       * fact, and the capital moves according to what the fact says.
+       *
+       * Only a payment brings the capital back. `recordDefault` deliberately leaves
+       * `allocated_minor` where it is — the position closed at zero and the buyer is out the
+       * money — so releasing here would seed a book in which a write-off refunded its buyer
+       * and the bid went on quoting against money that is gone.
+       */
+      if (spec.closed.outcome !== 'default') {
+        await store.release(seedId(spec.mandate), proceeds);
+      }
+      await store.recordOutcome({
+        debtorId: seedId(spec.debtor),
+        invoiceId: seedId(spec.invoiceLabel),
+        outcome: spec.closed.outcome,
+        faceValue,
+        at: at(spec.closed.on),
+      });
+    }
   }
 
   await store.setCursor('arc-testnet', '0');

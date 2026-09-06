@@ -900,10 +900,14 @@ describe('default', () => {
 
   it('does not take a status of defaulted as evidence the ledger holds one', async () => {
     /*
-     * The seeded book writes `defaulted` on an invoice, a `defaulted` counter on its debtor,
-     * and no `settlement_outcomes` row behind either. Exempting the overdue guard on the
-     * status therefore skipped it on a receivable nobody had ever written off, letting a
-     * FIRST permanent mark land on a customer who still had until Friday to pay.
+     * A status of `defaulted` with nothing on the ledger behind it. Exempting the overdue
+     * guard on the status therefore skipped it on a receivable nobody had ever written off,
+     * letting a FIRST permanent mark land on a customer who still had until Friday to pay.
+     *
+     * The seeded book used to ship exactly this pair on MF-2031 and no longer does — it
+     * carries a settled trade and a ledger row now — so the case is written here instead: a
+     * default whose status write landed and whose ledger write did not. That tear is why the
+     * guard reads the ledger rather than the row it sits next to.
      */
     vi.setSystemTime(new Date(MARKET_NOW_ISO));
     await h.store.updateInvoice(invoiceId(), { status: 'defaulted' });
@@ -1082,6 +1086,98 @@ describe('POST /v1/invoices/:id/default', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('conflict');
     expect(res.body.detail).toContain('never settled');
+  });
+});
+
+/**
+ * The two receivables the seeded book has already closed, pressed again.
+ *
+ * They used to carry `matured` and `defaulted` with no settled trade and no ledger row
+ * behind either, so **both routes refused them for the wrong reason**: "never settled",
+ * which is a statement about the venue's own records rather than about the receivable, and
+ * which would have gone on being the answer however the guards under it changed. Now the
+ * ledger is what answers, and these pin which guard is actually doing the work.
+ */
+describe('the seeded book’s closed receivables', () => {
+  const invoiceOf = (label: string): string => h.seeded.invoiceIds[label] ?? '';
+
+  /* Well past both due dates — 2026-08-28 and 2026-08-20 — so nothing here is refused for
+   * being early, which is the other guard and not the one under test. */
+  beforeEach(() => {
+    vi.setSystemTime(new Date(WELL_AFTER_DUE));
+  });
+
+  it('reads MF-2031’s write-off back rather than declaring a second one', async () => {
+    const orrin = h.seeded.debtorIds['DBT-ORRIN'] ?? '';
+    const before = await h.store.getDebtor(orrin);
+
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2031')}/default`);
+
+    /*
+     * A replay, and the ledger is the only thing that can say so: the invoice status carries
+     * `defaulted` either way, and a `defaulted` row with nothing behind it is exactly what
+     * would let a FIRST permanent mark land here. The mark dates from the seeded declaration
+     * rather than from whenever this button was pressed.
+     */
+    expect(res.status).toBe(200);
+    expect(res.body.alreadyRecorded).toBe(true);
+    expect(res.body.outcome).toBe('default');
+    expect(res.body.declaredAt).toBe('2026-08-27T00:00:00.000Z');
+    expect(res.body.holder.buyerId).toBe(h.seeded.buyerIds['BUY-TESSELLATE']);
+    expect((await h.store.getDebtor(orrin))?.defaulted).toBe(before?.defaulted);
+    expect((await h.store.getDebtor(orrin))?.defaulted).toBe(1);
+  });
+
+  it('will not mature MF-2031 on top of the write-off', async () => {
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2031')}/mature`, {
+      body: { paidAt: PAID_LATE },
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body.detail).toContain('recorded as defaulted');
+  });
+
+  it('refuses to write MF-2029 off, because the ledger says Northwind paid it', async () => {
+    const northwind = h.seeded.debtorIds['DBT-NORTHWIND'] ?? '';
+
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2029')}/default`);
+
+    // The lifecycle answers first and says the better sentence, but the ledger row is what
+    // makes it true: a default here would replace a recorded payment with a permanent mark.
+    expect(res.status).toBe(409);
+    expect(res.body.detail).toContain('the debtor paid it');
+    expect((await h.store.getDebtor(northwind))?.defaulted).toBe(0);
+  });
+
+  it('reads MF-2029’s payment back without guessing at the date', async () => {
+    const northwind = h.seeded.debtorIds['DBT-NORTHWIND'] ?? '';
+    const before = await h.store.getDebtor(northwind);
+
+    // No `paidAt`, and the receivable is long past due — the state that refuses a FIRST
+    // maturity rather than guess. A replay decides nothing, so it answers off the ledger.
+    const res = await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2029')}/mature`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadyRecorded).toBe(true);
+    expect(res.body.outcome).toBe('on_time');
+    expect(res.body.paidAt).toBe('2026-08-20T00:00:00.000Z');
+    expect((await h.store.getDebtor(northwind))?.settledOnTime).toBe(before?.settledOnTime);
+    expect((await h.store.getDebtor(northwind))?.settledLate).toBe(before?.settledLate);
+  });
+
+  it('does not hand Tessellate back the capital either receivable already accounted for', async () => {
+    const mandateId = h.seeded.mandateIds['MND-03'] ?? '';
+    const before = await h.store.getMandate(mandateId);
+
+    await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2031')}/default`);
+    await call(h.app, 'POST', `/v1/invoices/${invoiceOf('INV-2029')}/mature`);
+
+    /*
+     * MF-2029's outlay came back at maturity, when the seed closed it; MF-2031's never will,
+     * because a write-off releases nothing. Pressing either button again must move neither —
+     * a replayed release is a bid quoting twice against one pot of capital.
+     */
+    expect((await h.store.getMandate(mandateId))?.allocatedMinor).toBe(before?.allocatedMinor);
   });
 });
 

@@ -195,10 +195,23 @@ export const buyers = sqliteTable(
  * Debtors carry the rating accumulator inline. It is one row per debtor, updated inside
  * the settlement transaction, and every column here is an input to `services/rating.ts`.
  *
- * The counters are a **projection**. `settlement_outcomes` below is the append-only fact
- * they are derived from, keyed on `(debtor_id, invoice_id)` so a replayed maturity cannot
- * tighten a rating twice. `rating` is likewise recomputed from the counters rather than
- * being incremented alongside them, so the stored grade cannot drift from the ladder.
+ * The counters are an **opening balance plus every outcome this venue has recorded**, and
+ * this is the one claim here worth reading twice. A customer arrives with a settlement
+ * history the venue did not witness — that is what lets a rating mean anything on the first
+ * invoice, instead of every customer being `UNRATED` on day one and the whole curve flat —
+ * so `settled_on_time` and its siblings start from a figure nothing in this database can
+ * account for. `settlement_outcomes` below is the append-only fact for the SECOND half only,
+ * one row per receivable this venue itself priced, matched and settled.
+ *
+ * So the counters are not derivable from that table and nothing tries to derive them. What
+ * holds instead is the weaker pair: every row in the table is inside the counters beside it,
+ * and no terminal invoice is missing its row. Both are pinned in `test/seed.test.ts`,
+ * because the second was false in the shipped demo book — two receivables carried `matured`
+ * and `defaulted` with no trade and no row behind either.
+ *
+ * The table is keyed on `(debtor_id, invoice_id)` so a replayed maturity cannot tighten a
+ * rating twice. `rating` is recomputed from the counters rather than being incremented
+ * alongside them, so the stored grade cannot drift from the ladder.
  */
 export const debtors = sqliteTable(
   'debtors',
@@ -589,11 +602,14 @@ export const confirmationRequests = sqliteTable(
 /**
  * The rating ledger.
  *
- * `debtors` carries the accumulator as a projection — that is what the curve reads — and
- * this is the append-only fact behind it, one row per settled receivable. The unique index
- * is the whole point: maturity can be observed twice (a mirror-node replay, a retried
- * scheduled transaction), and without it a second observation would tighten a rating for a
- * payment that happened once.
+ * `debtors` carries the accumulator the curve reads, and this is the append-only fact behind
+ * the part of it this venue witnessed — one row per receivable settled HERE. The rest of
+ * that accumulator is the customer's opening balance and has no row here; see the note on
+ * `debtors` for why that is the design rather than a gap.
+ *
+ * The unique index is the whole point: maturity can be observed twice (a mirror-node replay,
+ * a retried scheduled transaction), and without it a second observation would tighten a
+ * rating for a payment that happened once.
  */
 export const settlementOutcomes = sqliteTable(
   'settlement_outcomes',
