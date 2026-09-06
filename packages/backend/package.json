@@ -19,7 +19,8 @@
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:seed": "tsx --env-file-if-exists=.env src/db/seed-cli.ts"
+    "db:seed": "tsx --env-file-if-exists=.env src/db/seed-cli.ts",
+    "privy:policy": "tsx --env-file-if-exists=.env src/privy-policy-cli.ts"
   },
   "dependencies": {
     "@facture/shared": "workspace:*",
