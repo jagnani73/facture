@@ -790,6 +790,50 @@ export function readInvoiceDetail(raw: unknown, path = 'invoice'): InvoiceDetail
   };
 }
 
+/**
+ * The answer to offering an invoice into the book, or taking it back off —
+ * `POST /v1/invoices/:id/list` and `POST /v1/invoices/:id/delist`.
+ *
+ * One shape for both, because both routes answer the same thing: whether the invoice is on
+ * the book now, and a sentence. They differ only in which of `alreadyListed` /
+ * `alreadyDelisted` they use for the idempotent case, so whichever one arrived is read into
+ * a single `unchanged`.
+ *
+ * **`listed` is read strictly, and it is what the caller acts on.** It is the venue's own
+ * statement about what it just did, so a 200 carrying `listed: false` from the list route is
+ * the venue accepting the request and not performing it — which must be reported as a
+ * refusal rather than as an offer that is now standing.
+ *
+ * The invoice the routes echo back is deliberately **not** decoded. The book is re-read from
+ * the venue after either call, so the echo would be a second copy of a fact the screen
+ * already asks for authoritatively — and decoding it strictly would let an unreadable echo
+ * report a listing that actually happened as a failure.
+ */
+export interface InvoiceListing {
+  /** On the book, and therefore sellable. */
+  listed: boolean;
+  /** True when the venue wrote nothing because the invoice was already in that state. */
+  unchanged: boolean;
+  /** The venue's own sentence. Rendered as-is; never paraphrased. */
+  message: string | null;
+}
+
+export function readInvoiceListing(raw: unknown, path = 'listing'): InvoiceListing {
+  const body = readObject(raw, path);
+  const already = field(body, 'alreadyListed', 'alreadyDelisted');
+
+  return {
+    listed: readBoolean(field(body, 'listed'), `${path}.listed`),
+    /*
+     * Absent reads as "this call did something", which is the reading that cannot mislead: a
+     * wrong `true` would tell a seller their click was a no-op when it was the click that put
+     * the invoice on the book, and send them looking for whoever else had done it.
+     */
+    unchanged: already === undefined ? false : readBoolean(already, `${path}.alreadyListed`),
+    message: readOptionalString(field(body, 'message'), `${path}.message`),
+  };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Trades                                                                      */
 /* -------------------------------------------------------------------------- */

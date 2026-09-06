@@ -5,11 +5,15 @@
  * again. No component imports `fixtures` and no component imports `api/client`; they ask
  * here, and get the same shapes either way.
  *
- * The actions at the bottom are the four things a person can actually do in this product —
- * add invoices, answer a confirmation, write and fund a mandate, sell an invoice. Against
- * the demo book they resolve locally and say so on screen: nothing moved, this is demo
- * data. Against the service they are the real calls, and a failure comes back as a
- * sentence rather than a thrown stack.
+ * The actions at the bottom are the things a person can actually do in this product — add
+ * invoices, answer a confirmation, write and fund a mandate, offer an invoice for sale or
+ * take the offer back, and sell one. Against the demo book they resolve locally and say so
+ * on screen: nothing moved, this is demo data. Against the service they are the real calls,
+ * and a failure comes back as a sentence rather than a thrown stack.
+ *
+ * Offering and selling are two of those actions rather than one, because the venue treats
+ * them as two: a confirmed invoice is priced, a listed one is for sale, and only the second
+ * can be armed into a trade.
  */
 
 import type { MinorUnits, Rating } from '@/lib/domain';
@@ -207,6 +211,99 @@ export async function answerConfirmation(
     return { ok: true, value: undefined, note: null };
   } catch (error) {
     return { ok: false, reason: describeFailure(error, 'your answer') };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Offering an invoice, and taking the offer back                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Listing is the seller's decision, and it is a separate one from being confirmed.
+ *
+ * A confirmed invoice is **quotable** — that is what puts a live price beside every green
+ * line the moment the book loads. A listed invoice is **sellable**, and the venue refuses to
+ * arm a trade against anything else. Nothing here collapses the two: a sale never lists on
+ * the seller's behalf, because the whole point of the distinction is that offering a
+ * receivable for sale is an act somebody takes rather than a side effect of pricing it.
+ *
+ * The book is re-read after either call rather than patched locally. The venue is the
+ * authority on what is on it, and a screen that flipped its own copy would be right until
+ * the first time the two disagreed.
+ */
+export async function listInvoice(invoiceId: string): Promise<Outcome> {
+  if (!usingApi()) {
+    return {
+      ok: true,
+      value: undefined,
+      note: `${DEMO_NOTE} The rows here are frozen, so this one stays where it is. In the live market it would be on the book, where a standing bid can take it.`,
+    };
+  }
+  try {
+    const result = await api.listInvoice(invoiceId);
+    /*
+     * The venue accepted the request and did not perform it. Rare, and reported as a refusal
+     * rather than as a standing offer: the seller would otherwise be told their invoice is
+     * for sale, and find out it never was when the sale refused.
+     */
+    if (!result.listed) {
+      return {
+        ok: false,
+        reason:
+          result.message ??
+          'The venue accepted that request and this invoice is still not on the book, so it is not for sale.',
+      };
+    }
+    return {
+      ok: true,
+      value: undefined,
+      note:
+        result.message ??
+        (result.unchanged
+          ? 'This invoice was already on the book.'
+          : 'This invoice is on the book and can be sold at the price beside it.'),
+    };
+  } catch (error) {
+    return { ok: false, reason: describeFailure(error, 'offering this invoice for sale') };
+  }
+}
+
+/**
+ * Withdraw the offer. The invoice stays confirmed and keeps its price; only the offer goes.
+ *
+ * The venue refuses this outright while a buyer has a trade armed, and that refusal arrives
+ * here as a sentence naming the trade. It is not worked around: taking an offer off the book
+ * underneath a payment already in flight is how a confirmed invoice would end up marked sold.
+ */
+export async function delistInvoice(invoiceId: string): Promise<Outcome> {
+  if (!usingApi()) {
+    return {
+      ok: true,
+      value: undefined,
+      note: `${DEMO_NOTE} The rows here are frozen, so this one stays where it is. In the live market this would come off the book and keep its price.`,
+    };
+  }
+  try {
+    const result = await api.delistInvoice(invoiceId);
+    if (result.listed) {
+      return {
+        ok: false,
+        reason:
+          result.message ??
+          'The venue accepted that request and this invoice is still on the book, so the offer stands.',
+      };
+    }
+    return {
+      ok: true,
+      value: undefined,
+      note:
+        result.message ??
+        (result.unchanged
+          ? 'This invoice was not on the book.'
+          : 'This invoice is off the book. It is still confirmed, so it keeps its price.'),
+    };
+  } catch (error) {
+    return { ok: false, reason: describeFailure(error, 'taking this invoice off the book') };
   }
 }
 

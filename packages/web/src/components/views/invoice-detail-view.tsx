@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 import { useState } from 'react';
 
 import type { Invoice } from '@/lib/domain';
@@ -16,16 +17,26 @@ import {
 import type { InvoicePricing, Market, SaleOutcome, TradeRecord } from '@/lib/data';
 import { isDemoBook, requestConfirmation, sellInvoice } from '@/lib/data';
 import { useMarket } from '@/lib/data/hooks';
+import type { SettlementState } from '@/lib/settlement';
 import { SETTLEMENT_STATE_SENTENCE, settlementStateOf } from '@/lib/settlement';
 import { curveFrom } from '@/lib/pricing';
 import { CurveStrip } from '@/components/curve-strip';
 import { driftBps, useMarketTick } from '@/components/market-tick';
+import { OfferControl } from '@/components/offer-control';
 import { PriceCell } from '@/components/price-cell';
 import { RatingChip, RatingWithRecord } from '@/components/rating-chip';
 import { RefusalNotice } from '@/components/refusal-notice';
 import { issuanceDisplayOf, StatusPill, explainStatus } from '@/components/status-pill';
 import { Failure, Pending } from '@/components/ui/async';
 import { Button, Card, CardHead, Label, Row, buttonClasses } from '@/components/ui/primitives';
+
+/**
+ * A trade somebody is in the middle of settling.
+ *
+ * Mirrors the venue's own guard on delisting, which looks for a trade in `preparing` or
+ * `awaiting_payment`. Both mean the offer is no longer only the seller's to pull.
+ */
+const ARMED_STATES: readonly SettlementState[] = ['preparing', 'awaiting_payment'];
 
 /**
  * One invoice, and what selling it would actually mean.
@@ -62,10 +73,21 @@ export function InvoiceDetailView({ invoiceId }: { invoiceId: string }) {
     );
   }
 
-  return <InvoiceDetail market={market.data} invoice={invoice} />;
+  // `reload` is threaded down because listing changes what the venue will let a seller do
+  // next, and the venue is the authority on that. The screen asks again rather than
+  // flipping its own copy of the status.
+  return <InvoiceDetail market={market.data} invoice={invoice} onChanged={market.reload} />;
 }
 
-function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }) {
+function InvoiceDetail({
+  market,
+  invoice,
+  onChanged,
+}: {
+  market: Market;
+  invoice: Invoice;
+  onChanged: () => void;
+}) {
   const debtor = market.debtorFor(invoice);
   const pricing: InvoicePricing = market.pricingFor(invoice.id);
   const trade = market.tradeForInvoice(invoice.id);
@@ -92,6 +114,26 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
         : priceInvoice(invoice.faceValue, liveRate, days);
   const best = pricing.matches[0];
   const nearest = pricing.refusals[0];
+
+  /*
+   * A trade the buyer is in the middle of settling. The venue refuses to withdraw an offer
+   * while one exists, so the withdraw control is not offered either — a button that comes
+   * back 409 invites a decision that has already been refused.
+   *
+   * Every trade against this invoice is scanned rather than the one `tradeForInvoice`
+   * returns, which is the same thing the venue's own guard does. That accessor answers
+   * "which trade does this invoice's card describe" and prefers a settled one, so an
+   * invoice carrying an abandoned attempt alongside a live one could hand back the
+   * abandoned trade and report nobody was settling.
+   */
+  const armed = market.trades.some(
+    (candidate) =>
+      candidate.invoiceId === invoice.id && ARMED_STATES.includes(settlementStateOf(candidate)),
+  );
+
+  const offer = (
+    <OfferControl invoice={invoice} issuance={issuance} armed={armed} onChanged={onChanged} />
+  );
 
   return (
     <div className="space-y-8">
@@ -149,14 +191,29 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
                   <Row term="Proceeds to you" value={formatMoney(terms.proceeds)} emphasis />
                 </div>
 
-                <SellPanel
-                  invoiceId={invoice.id}
-                  quoteId={pricing.quoteId}
-                  proceedsLabel={formatMoney(terms.proceeds)}
-                  mandateName={best ? market.metaOf(best.mandate.id).name : 'the best standing bid'}
-                  ownerName={best ? market.metaOf(best.mandate.id).ownerName : ''}
-                  takers={pricing.matchCount}
-                />
+                {/*
+                 * Sell is offered only against an invoice that is actually on the book. The
+                 * venue refuses to arm a trade on anything else, so a Sell button under a
+                 * merely-confirmed invoice would be a 409 with a price beside it — and the
+                 * seller would have no way to do the thing the refusal asks of them. The
+                 * offer control is that way, and it is deliberately not folded into Sell:
+                 * listing is the seller's decision, not a step a sale performs for them.
+                 */}
+                {invoice.status === 'listed' ? (
+                  <SellPanel
+                    invoiceId={invoice.id}
+                    quoteId={pricing.quoteId}
+                    proceedsLabel={formatMoney(terms.proceeds)}
+                    mandateName={
+                      best ? market.metaOf(best.mandate.id).name : 'the best standing bid'
+                    }
+                    ownerName={best ? market.metaOf(best.mandate.id).ownerName : ''}
+                    takers={pricing.matchCount}
+                    withdraw={offer}
+                  />
+                ) : (
+                  offer
+                )}
               </div>
             </Card>
           ) : null}
@@ -182,6 +239,13 @@ function InvoiceDetail({ market, invoice }: { market: Market; invoice: Invoice }
                   A refusal is an answer, not a failure. When a funder writes a mandate that reaches
                   this invoice, it will be priced without you doing anything.
                 </p>
+                {/*
+                 * Offering an unpriced invoice is a real thing to want. The venue lists any
+                 * confirmed invoice, priced or not, and a listed one is taken by the first
+                 * standing bid that reaches it — so a seller who offers it now does not have
+                 * to come back and press anything when a mandate finally covers it.
+                 */}
+                {offer}
               </div>
             </Card>
           ) : null}
@@ -531,6 +595,7 @@ function SellPanel({
   mandateName,
   ownerName,
   takers,
+  withdraw,
 }: {
   invoiceId: string;
   quoteId: string | null;
@@ -538,6 +603,13 @@ function SellPanel({
   mandateName: string;
   ownerName: string;
   takers: number;
+  /**
+   * Taking the offer back off the book, rendered beside the Sell button and **only** while
+   * this panel is idle. Once a sale has an outcome — held, refused, half-settled or sold —
+   * withdrawing is either impossible or meaningless, and offering it under a receipt would
+   * suggest the sale could be taken back.
+   */
+  withdraw?: ReactNode;
 }) {
   const [stage, setStage] = useState<'idle' | 'confirm' | 'working'>('idle');
   const [outcome, setOutcome] = useState<SaleOutcome | null>(null);
@@ -656,15 +728,18 @@ function SellPanel({
   }
 
   return (
-    <div className="mt-5 flex flex-wrap items-center gap-3">
-      <Button variant="primary" size="lg" onClick={() => setStage('confirm')}>
-        Sell for {proceedsLabel}
-      </Button>
-      <span className="text-xs text-muted">
-        Settles against the best mandate that will take it
-        {takers > 0 ? `, of the ${takers} that would` : ''}.
-      </span>
-    </div>
+    <>
+      <div className="mt-5 flex flex-wrap items-center gap-3">
+        <Button variant="primary" size="lg" onClick={() => setStage('confirm')}>
+          Sell for {proceedsLabel}
+        </Button>
+        <span className="text-xs text-muted">
+          Settles against the best mandate that will take it
+          {takers > 0 ? `, of the ${takers} that would` : ''}.
+        </span>
+      </div>
+      {withdraw}
+    </>
   );
 }
 

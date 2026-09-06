@@ -153,6 +153,7 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
   const faceOpen = open.reduce((total, r) => total + r.invoice.faceValue, 0n);
   const worthNow = rows.reduce((total, r) => total + (r.pricing.quote?.proceeds ?? 0n), 0n);
   const pricedCount = rows.filter((r) => r.pricing.quote !== null).length;
+  const offeredCount = rows.filter((r) => r.invoice.status === 'listed').length;
   const waitingCount = rows.filter(
     (r) => r.invoice.status === 'awaiting_confirmation' || r.invoice.status === 'draft',
   ).length;
@@ -229,7 +230,16 @@ function Book({ market, onReload }: { market: Market; onReload: () => void }) {
             note="at the tightest standing bid"
             emphasis
           />
-          <Figure label="Priced now" value={String(pricedCount)} note="ready to sell" />
+          {/*
+           * "ready to sell" was the wrong note the moment listing became an act. A priced
+           * invoice is one the curve reaches; an offered one is on the book and can be
+           * taken. The second figure is the one a seller acts on, so it is the note.
+           */}
+          <Figure
+            label="Priced now"
+            value={String(pricedCount)}
+            note={`${offeredCount} offered for sale`}
+          />
           <Figure
             label="Awaiting customer"
             value={String(waitingCount)}

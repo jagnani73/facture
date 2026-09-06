@@ -17,6 +17,7 @@ import type {
   ConfirmationPrompt,
   HealthResponse,
   InvoiceDetail,
+  InvoiceListing,
   InvoiceRow,
   LiveQuoteResponse,
   MandateRecord,
@@ -33,6 +34,7 @@ import {
   readHealth,
   readInvoice,
   readInvoiceDetail,
+  readInvoiceListing,
   readInvoiceRow,
   readLiveQuote,
   readMandate,
@@ -325,6 +327,41 @@ export const api = {
       `/invoices/${encodeURIComponent(invoiceId)}/confirmation-request`,
       { method: 'POST', what: 'asking your customer to confirm', signal, body: {} },
       () => undefined,
+    );
+  },
+
+  /**
+   * `POST /v1/invoices/:id/list` — the seller offering it for sale.
+   *
+   * A confirmed invoice is *quotable*; a listed one is *sellable*. Those are different
+   * permissions at the venue, and arming a trade refuses anything that is not listed — so
+   * this is the call that has to happen before a sale, and it is the seller's decision
+   * rather than something a sale can do on their behalf.
+   *
+   * Idempotent at the venue: listing what is already listed answers 200 having written
+   * nothing, which is what makes a double-clicked button harmless.
+   */
+  listInvoice(invoiceId: string, signal?: AbortSignal): Promise<InvoiceListing> {
+    return request(
+      `/invoices/${encodeURIComponent(invoiceId)}/list`,
+      { method: 'POST', what: 'offering that invoice for sale', signal, body: {} },
+      (raw) => readInvoiceListing(raw, 'listing'),
+    );
+  },
+
+  /**
+   * `POST /v1/invoices/:id/delist` — withdrawing the offer.
+   *
+   * The invoice stays confirmed and keeps its price; only the offer goes away. The venue
+   * refuses this outright while a buyer has a trade armed against the invoice, because
+   * taking an offer off the book underneath a payment already in flight is how a `confirmed`
+   * invoice would end up marked sold. The way out of an armed trade is unwinding it.
+   */
+  delistInvoice(invoiceId: string, signal?: AbortSignal): Promise<InvoiceListing> {
+    return request(
+      `/invoices/${encodeURIComponent(invoiceId)}/delist`,
+      { method: 'POST', what: 'taking that invoice off the book', signal, body: {} },
+      (raw) => readInvoiceListing(raw, 'listing'),
     );
   },
 

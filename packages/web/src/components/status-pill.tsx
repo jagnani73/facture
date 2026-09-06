@@ -63,9 +63,15 @@ const STATUS: Record<InvoiceStatus, StatusMeta> = {
     dot: 'bg-warn',
     chip: 'border-warn/40 bg-warn-wash text-warn',
   },
+  /*
+   * "It is priced and can be sold now" was true only while listing was something nobody did.
+   * The venue refuses to arm a trade against a confirmed invoice, so this pill was telling a
+   * seller they could do the one thing the next screen would answer 409 to.
+   */
   confirmed: {
     label: 'Confirmed',
-    explain: 'Your customer has acknowledged this invoice. It is priced and can be sold now.',
+    explain:
+      'Your customer has acknowledged this invoice, so it has a price. Offer it for sale to put it on the book.',
     dot: 'bg-pos',
     chip: 'border-pos/45 bg-pos-wash text-pos',
   },
