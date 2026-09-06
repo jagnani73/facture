@@ -422,6 +422,235 @@ Recorded here so they are not relitigated mid-build.
   still seeded rows rather than bids an agent wrote &mdash; but one receivable in that book was
   bought by the agent, with its own key, for real money.
 
+## Architecture
+
+Five packages, two chains, and exactly one moment where a person is asked to sign something.
+
+```mermaid
+flowchart LR
+    Seller["Seller"]
+    Debtor["Customer<br/><i>one sentence, two buttons</i>"]
+
+    subgraph pkgs["pnpm workspace"]
+        Web["<b>@facture/web</b><br/>Next.js 15 · React 19"]
+        API["<b>@facture/backend</b><br/>Hono · SQLite/drizzle<br/>quote engine · settlement · issuance"]
+        Agent["<b>@facture/agent</b><br/>market maker<br/>Circle wallet · Hedera key"]
+        Shared["<b>@facture/shared</b><br/>curve · state machines<br/>refusal codes · ISIN · uniqueness hash"]
+        Contracts["<b>@facture/contracts</b><br/>Hardhat · imported by nothing"]
+    end
+
+    Privy["Privy<br/>email sign-in, wallet made from it"]
+    Circle["Circle<br/>developer-controlled wallets"]
+    Fac["Blocky402<br/>x402 facilitator"]
+
+    subgraph hed["Hedera testnet · the paper"]
+        ATS["ATS bond, one per invoice<br/>deployBond · hold · ControlList · Kyc"]
+        Uniq["UniquenessRegistry<br/>0x8eb9f001…"]
+        InvReg["InvoiceRegistry<br/>0x44fe6E29…"]
+        Topic["HCS topic 0.0.10342152<br/>refusal and match digests"]
+        Sched["Scheduled Transaction<br/>maturity pays the holder"]
+        Mirror["Mirror node"]
+        CashH["x402 cash leg<br/>HBAR transfer"]
+    end
+
+    subgraph arcnet["Arc testnet · the money"]
+        Vault["MandateVault<br/>0x217256d0…"]
+        Esc["DvpEscrow<br/>0x32e3511A…"]
+    end
+
+    Dead["<b>Deployed and verified, called by nothing</b><br/>MandateBook · AtsComplianceGate<br/>DvpEscrow on Hedera"]
+
+    Seller -->|"adds invoices, watches the price move"| Web
+    Debtor -->|"confirms by link, no wallet"| Web
+    Web -->|"REST /v1"| API
+    Web -->|"sign-in"| Privy
+    API -->|"verifies the identity token"| Privy
+    Web -->|"claim: msg.sender must be the beneficiary"| Esc
+
+    Agent -->|"reads the book, arms a trade"| API
+    Agent -->|"payment-signature: a signed TransferTransaction"| API
+    Agent -->|"pnpm fund"| Circle
+    Circle -->|"deposit into this mandate's bucket"| Vault
+    Agent -.->|"HBAR balance, pre-flight"| Mirror
+
+    API -->|"deployBond · createHold · executeHold<br/>ControlList · Kyc · paused, before the match"| ATS
+    API -->|"checked when an invoice is added,<br/>claimed once its bond exists"| Uniq
+    API -->|"list after the claim · setStatus<br/>when the customer answers"| InvReg
+    API -->|"ScheduleCreate at maturity"| Sched
+    API -.->|"security ids · schedule status · /health"| Mirror
+    API -.->|"sha256 digests, never the reason"| Topic
+    API -->|"verify, then settle"| Fac
+    Fac -->|"adds its signature, pays the fee"| CashH
+
+    API -->|"registerMandate · registerMatch<br/>executePayout · executeRelease"| Vault
+    Vault -->|"locks the payout for the seller alone"| Esc
+    API -.->|"getLock, read only"| Esc
+
+    Web -.-> Shared
+    API -.-> Shared
+    Agent -.->|"one vocabulary"| Shared
+
+    Contracts -.->|"hardhat deploy, verified on Sourcify"| Uniq
+    Contracts -.-> InvReg
+    Contracts -.-> Vault
+    Contracts -.-> Esc
+    Contracts -.-> Dead
+
+    classDef hedera fill:#1f4e6b,stroke:#14384e,color:#fff
+    classDef arc fill:#0d5c4a,stroke:#08402f,color:#fff
+    classDef party fill:#3a3a3a,stroke:#222,color:#fff
+    classDef pkg fill:#4c3a72,stroke:#33284f,color:#fff
+    classDef ext fill:#6b4520,stroke:#4a2f14,color:#fff
+    classDef unwired fill:#2b2b2b,stroke:#6b6b6b,color:#bdbdbd
+    class ATS,Uniq,InvReg,Topic,Sched,Mirror,CashH hedera
+    class Vault,Esc arc
+    class Seller,Debtor party
+    class Web,API,Agent,Shared,Contracts pkg
+    class Privy,Circle,Fac ext
+    class Dead unwired
+```
+
+Two things the picture cannot say.
+
+`@facture/contracts` is a Hardhat workspace and **no package imports it.** Every ABI the backend
+calls is written out beside the call, so nothing in the build ties the TypeScript to the Solidity.
+The one thread between them is a test in `@facture/agent` that reads `libraries/ReasonCodes.sol` off
+disk and fails if the on-chain refusal strings stop spelling what `@facture/shared` spells, because
+`tsc` cannot see a Solidity rename.
+
+The grey box is the other. `MandateBook`, `AtsComplianceGate` and the Hedera `DvpEscrow` are
+deployed, verified on Sourcify, and reached by nothing. There is no environment variable for any of
+their addresses, so the backend could not call them if it wanted to. The compliance check that does
+run reads the security's own `ControlList` and `Kyc` facets over the JSON-RPC relay, which is a
+different thing from the gate contract that shares its name.
+
+### A settlement, both rails
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Seller
+    participant V as Venue backend
+    participant P as Hedera
+    participant A as Arc
+    participant F as Blocky402
+    participant B as Buyer agent
+
+    S->>V: POST /v1/trades, quoting the price they were shown
+    V->>V: re-price against the live curve
+    V->>P: read ControlList, Kyc, paused
+    V->>P: createHoldByPartition, the seller's whole position
+    Note over V,P: The paper is held, not moved.<br/>Neither side has gone first.
+
+    alt the bid's capital is escrowed in MandateVault
+        V->>A: registerMatch, binding payee and price, one shot
+        V->>A: executePayout, 14,843 USDC minor units leave the vault
+        Note over V,A: Cash commits before the paper moves, and the invoice<br/>is marked sold here. Reversed, a failed payout leaves<br/>the buyer holding paper nobody paid for.
+        V->>P: executeHold, the units move to the buyer
+        V-->>S: 200, both legs done, with the preimage
+        S->>A: claim(lockId, secret), signed by the seller alone
+    else nothing escrowed behind the bid
+        V-->>S: 402 payment-required, carrying the challenge
+        Note over S,B: One route, two halves of one exchange. In the recorded<br/>run the agent armed the trade itself, so both halves<br/>were the same caller.
+        B->>B: sign a native TransferTransaction, no network needed
+        B->>V: the same request again, payment-signature
+        V->>F: verify, then settle
+        F->>P: 868,798 tinybars to the seller, 258,441 of fee on the facilitator
+        V->>P: executeHold, 890,000 units to the buyer
+        V-->>B: 200, settled
+    end
+
+    V->>P: HCS 0.0.10342152, a digest of the match
+```
+
+The two branches are two different receivables, because no invoice sells twice. The Arc figures are
+MF-2061, trade `07c9b966-5192-46f4-ae90-b7dab62b11ad`; the x402 figures are the agent's own
+purchase, trade `c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d`. Both are in
+[docs/deployments.md](./docs/deployments.md) with the transactions and the balances either side.
+
+A diagram can only draw the path where nothing fails, and the ordering exists for the path where
+something does. If the Arc payout lands and the delivery then fails, the money is in an escrow lock
+the vault can take back and the seller still holds their position, so waiting recovers it.
+`MandateVault.reclaimPayout` is the permissionless call that does that, and **nothing in the backend
+makes it** &mdash; recovering a stranded lock is an operator action. Reverse those two steps and a
+failed payout leaves the buyer holding paper nobody paid for, which nothing recovers.
+
+Marking the invoice sold at the payout rather than at the delivery is a fix, not a flourish. The
+x402 branch has the identical hole and cannot reach it, because a second sale there would need a
+second signature; taking that signature away is what made it reachable. It took a double-spend found
+in review to notice.
+
+### How a bid gets refused
+
+Every mandate on the book is screened against the invoice, and a screen that fails produces a
+sentence rather than silence.
+
+```mermaid
+flowchart TD
+    Q["one bid, one invoice<br/><i>bestQuote in @facture/shared</i>"] --> St{"invoice confirmed<br/>or listed?"}
+    St -->|no| R0["INVOICE_NOT_CONFIRMED<br/><i>once, not once per bid</i>"]
+    St -->|yes| Ac{"mandate active?"}
+    Ac -->|no| R1["MANDATE_NOT_ACTIVE"]
+    Ac -->|yes| Cu{"same currency?"}
+    Cu -->|no| R2["CURRENCY_MISMATCH"]
+    Cu -->|yes| Rt{"customer's rating<br/>meets the floor?"}
+    Rt -->|no| R3["RATING_BELOW_MANDATE"]
+    Rt -->|yes| Tn{"tenor inside<br/>the ceiling?"}
+    Tn -->|no| R4["TENOR_EXCEEDS_MANDATE"]
+    Tn -->|yes| Pr["price it<br/>face · yield · days"]
+    Pr --> Ex{"unallocated balance<br/>covers the proceeds?"}
+    Ex -->|no| R5["EXPOSURE_EXHAUSTED"]
+    Ex -->|yes| Dc{"room left against<br/>this customer?"}
+    Dc -->|no| R6["DEBTOR_CONCENTRATION"]
+    Dc -->|yes| Win["a candidate<br/><i>lowest yield wins</i>"]
+    Win --> Ch{"can that buyer hold<br/>this instrument?"}
+    Ch -->|"no, and the read succeeded"| Drop["dropped, price again without it<br/>three passes at most<br/><i>mandatesBarredByInstrument</i>"]
+    Drop --> Q
+    Ch -->|yes| Quote["the price on the screen"]
+    Quote --> Arm{"seller arms the trade:<br/>the gate runs again"}
+    Arm -->|refused| F403["403 and a sentence<br/><i>nothing reserved, nothing held</i>"]
+    Arm -->|allowed| Go["hold the paper, settle both legs"]
+
+    R3 -.->|"receipt written, digest committed at arm time"| HCS["HCS topic 0.0.10342152"]
+
+    classDef refusal fill:#5c2323,stroke:#3d1616,color:#fff
+    classDef ok fill:#3a3a3a,stroke:#222,color:#fff
+    classDef hedera fill:#1f4e6b,stroke:#14384e,color:#fff
+    class R0,R1,R2,R3,R4,R5,R6,F403 refusal
+    class Win,Quote,Go ok
+    class Drop,HCS hedera
+```
+
+The run underneath it is the agent's own purchase, and nothing about that invoice was arranged. The
+customer is `UNRATED`, which loses five of the seven mandates on `RATING_BELOW_MANDATE` before a
+price is computed at all. Of the two carrying an `UNRATED` floor, one caps tenor at 45 days against
+a 47-day invoice and goes on `TENOR_EXCEEDS_MANDATE`. One bid is left, at 1850 bps, and it holds no
+capital in the vault, which is how that trade reached the x402 rail by arithmetic rather than by
+configuration.
+
+The last two forks are the ones worth reading twice, because **neither produces a refusal code.**
+When an instrument's own control list bars a buyer, the bid did not decline the paper; the paper
+declined the bid, and `@facture/shared` has no word for that because the contracts do not either. It
+comes back as a count, `mandatesBarredByInstrument`, and at arm time as a 403 carrying a sentence.
+On the invoice above that count was 1 and there was no quote at all; once the security was prepared
+it was 0 and the quote was 1850 bps, with the six economic refusals identical either side.
+
+The qualifier on that fork is load-bearing too. A bid is dropped when the instrument answers no, and
+kept when the instrument cannot be asked, because an indeterminate answer must not move a price: a
+relay outage would otherwise drop the three tightest bids on every invoice and quietly widen the
+whole curve. Arming refuses on the unknown, since money must not move on one, and that asymmetry is
+deliberate.
+
+Two codes in the vocabulary are never produced by the running venue. `NOT_KYC_VERIFIED` is spelled
+in `AtsComplianceGate.sol`, and that contract is in the grey box above. `INELIGIBLE_JURISDICTION`
+describes a question this venue does not decide, because Reg S scope lives on the instrument. They
+stay in the union so that a refusal a funder reads is spelled the same wherever it came from, which
+is a different claim from this path emitting them.
+
+One more thing about timing, since the tree does not carry a clock. Refusals are computed on every
+quote and returned for the screen; the stored receipt and its HCS digest are written when a seller
+actually arms a trade. A price nobody acted on leaves no permanent record of who declined it.
+
 ## Prior art
 
 Two projects sit close enough that they should be named rather than hoped over.
