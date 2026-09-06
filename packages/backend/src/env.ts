@@ -34,7 +34,22 @@ export const envSchema = z
     PORT: z.coerce.number().int().positive().max(65535).default(8787),
     HOST: z.string().min(1).default('0.0.0.0'),
     LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
+    /** This API's own origin, used for resource identifiers a machine reads. */
     PUBLIC_BASE_URL: z.url().default('http://localhost:8787'),
+    /**
+     * Where the debtor-facing app is served, which is a different origin to this one and
+     * cannot be derived from it.
+     *
+     * The confirmation link is the only URL this venue mints for a person rather than a
+     * program, and it has to land on `/confirm/{token}` in the web app. It used to be built
+     * against `PUBLIC_BASE_URL`, which pointed it at this API's JSON endpoint — see
+     * `services/confirmation.ts` for why no value of that variable could have been right.
+     *
+     * The default matches the web package's dev server. A deployment that serves the app
+     * anywhere else must set this, and the failure if it does not is a link that 404s rather
+     * than one that quietly returns the wrong thing.
+     */
+    PUBLIC_APP_BASE_URL: z.url().default('http://localhost:3000'),
     CONFIRMATION_TOKEN_SECRET: z.string().min(32, 'must be at least 32 characters of entropy'),
     CONFIRMATION_TOKEN_TTL_HOURS: z.coerce.number().int().positive().default(168),
 

@@ -197,7 +197,13 @@ starts refuses a customer already known to have defaulted.
 MF-2038 carries the other two kinds in the same list, if you want them:
 
 > This mandate caps exposure to Lumen Grid Utilities at $120,000.00, and only $25,603.84 of that is
-> left against the $127,752.72 this invoice needs.
+> left against the $127,86_x_._xx_ this invoice needs.
+
+The proceeds figure moves every day — tenor shortens, so the discount shrinks and the amount the
+invoice needs rises. Read the shape rather than the cents: a concentration cap, how much of it is
+left, and the amount that does not fit. The six refusals on this invoice quote six different
+figures for the same receivable, which is correct: each one is what _that_ mandate would have paid
+at its own rate.
 
 **Now the refusal that is the actual argument.** The refusals above are the venue's own mandate
 terms. The one that separates this from a spreadsheet is read off the security itself, before
@@ -488,10 +494,14 @@ curl -X POST http://localhost:8787/v1/invoices/b874aa34-d0af-5813-ae3a-3eccfcb26
 ```
 
 There is no mail transport in this build, so outside production the response hands back the link it
-would have emailed. It points at the venue's JSON endpoint,
-`http://localhost:8787/v1/confirm/<token>`; the page a human reads is
-**`http://localhost:3000/confirm/<token>`** with the same token. Take the token from the response
-and open the second one.
+would have emailed. **Open it as given** — it points at `http://localhost:3000/confirm/<token>`,
+the page a person reads.
+
+It did not until 2026-09-06. The link was minted against the API and landed on
+`/v1/confirm/<token>`, which serves JSON, and this passage used to tell you to rebuild the URL by
+hand. That workaround is why the fault survived: the demo never followed the link the venue
+actually sends. `PUBLIC_APP_BASE_URL` is where the app is served, and it is a separate origin from
+the API because it cannot be derived from one.
 
 That page has no masthead, no nav and no prices on it. One sentence — _"Meridian Fabrication says
 you owe them $21,900.00, due 9 October. Is that right?"_ — and two buttons. The invoice turns green

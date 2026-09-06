@@ -300,8 +300,9 @@ invoiceRoutes.get('/:id', async (c) => {
 });
 
 /**
- * Ask the customer to confirm. Mints a single-use token, stores only its SHA-256, and
- * emails `${PUBLIC_BASE_URL}/v1/confirm/{token}`.
+ * Ask the customer to confirm. Mints a single-use token, stores only its SHA-256, and emails
+ * `${PUBLIC_APP_BASE_URL}/confirm/{token}` — the page a person reads, not the JSON endpoint
+ * that page calls. See `services/confirmation.ts`.
  */
 invoiceRoutes.post('/:id/confirmation-request', async (c) => {
   const { id } = readParams(c, uuidParam);
@@ -347,7 +348,7 @@ invoiceRoutes.post('/:id/confirmation-request', async (c) => {
     expiresAt: minted.expiresAt,
   });
 
-  const link = confirmationLink(env.PUBLIC_BASE_URL, minted.token);
+  const link = confirmationLink(env.PUBLIC_APP_BASE_URL, minted.token);
   await getNotifier().sendConfirmationRequest({
     to: debtor.email,
     debtorName: debtor.name,

@@ -85,6 +85,24 @@ export function isWellFormedToken(token: string, secret: string): boolean {
   return timingSafeEqual(provided, expected);
 }
 
-/** The URL that goes in the email. Built here so nothing else concatenates a token. */
-export const confirmationLink = (baseUrl: string, token: string): string =>
-  `${baseUrl.replace(/\/$/, '')}/v1/confirm/${token}`;
+/**
+ * The URL that goes in the email. Built here so nothing else concatenates a token.
+ *
+ * **It points at the app, not at this API, and that was wrong until 2026-09-06.** The link was
+ * minted as `${PUBLIC_BASE_URL}/v1/confirm/{token}` — the JSON endpoint the page calls. A
+ * debtor who followed it got a JSON body, and no value of `PUBLIC_BASE_URL` could fix that:
+ * pointed at the API it serves JSON, and pointed at the app it 404s, because the page is at
+ * `/confirm/{token}` with no `/v1` prefix. There was no configuration under which the one
+ * link this product actually sends to a human reached a human-readable page.
+ *
+ * `docs/demo.md` had been working around it by telling a presenter to swap the origin and
+ * drop the prefix by hand, which is how it survived: the demo never followed the link the
+ * venue minted.
+ *
+ * It matters more than a broken link usually would. The debtor confirmation is the whole
+ * behavioural argument — no wallet, no signup, one sentence and two buttons — and it is what
+ * justifies advancing the full face value with no holdback. That claim rests on a page the
+ * link did not reach.
+ */
+export const confirmationLink = (appBaseUrl: string, token: string): string =>
+  `${appBaseUrl.replace(/\/$/, '')}/confirm/${token}`;

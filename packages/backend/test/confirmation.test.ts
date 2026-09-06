@@ -75,11 +75,26 @@ describe('the HMAC tag', () => {
 describe('the emailed link', () => {
   it('is built in one place, and tolerates a trailing slash on the base URL', () => {
     const { token } = mintConfirmationToken(SECRET, 168);
-    expect(confirmationLink('http://localhost:8787/', token)).toBe(
-      `http://localhost:8787/v1/confirm/${token}`,
+    expect(confirmationLink('http://localhost:3000/', token)).toBe(
+      `http://localhost:3000/confirm/${token}`,
     );
-    expect(confirmationLink('https://facture.example', token)).toBe(
-      `https://facture.example/v1/confirm/${token}`,
+    expect(confirmationLink('https://app.facture.example', token)).toBe(
+      `https://app.facture.example/confirm/${token}`,
     );
+  });
+
+  /**
+   * The one property worth pinning, because getting it wrong is what shipped: this link is
+   * read by a person. It must land on the app's page, never on the JSON endpoint that page
+   * calls, and no `/v1` prefix belongs in it. A debtor who followed the old link got a JSON
+   * body, and no configuration could have fixed it — pointed at the API it served JSON, and
+   * pointed at the app it 404d.
+   */
+  it('points at a page a human can read, not at the API', () => {
+    const { token } = mintConfirmationToken(SECRET, 168);
+    const link = confirmationLink('https://app.facture.example', token);
+
+    expect(link).not.toContain('/v1/');
+    expect(link).toContain('/confirm/');
   });
 });
