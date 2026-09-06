@@ -124,6 +124,43 @@ const PAUSE_ABI = [
 /** `IKyc.KycStatus`. */
 const KYC_STATUS_GRANTED = 1;
 
+/**
+ * `IComplianceGate`. One function, `view`, and it never reverts — an instrument it cannot reach
+ * comes back as `(false, COMPLIANCE_PROBE_FAILED)` rather than as an exception, which is what
+ * makes it callable from a screen that has to render something.
+ */
+const GATE_ABI = [
+  {
+    type: 'function',
+    name: 'canReceive',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'instrument', type: 'address' },
+      { name: 'buyer', type: 'address' },
+    ],
+    outputs: [
+      { name: 'ok', type: 'bool' },
+      { name: 'reasonCode', type: 'bytes32' },
+    ],
+  },
+] as const;
+
+/**
+ * `ReasonCodes` are `bytes32` string literals — right-padded ASCII, not hashes — so they read
+ * back without a lookup table. That is the point of spelling them this way: a refused party
+ * reading the raw return value sees `CONTROL_LIST_BLOCKED`, not a digest they must be given a
+ * key for.
+ *
+ * `bytes32(0)` is `NONE`, which only appears beside `ok == true` and so never reaches a
+ * sentence.
+ */
+export function decodeReasonCode(raw: `0x${string}`): string {
+  const bytes = Buffer.from(raw.slice(2), 'hex');
+  const end = bytes.indexOf(0);
+  const text = bytes.subarray(0, end === -1 ? bytes.length : end).toString('ascii');
+  return text === '' ? 'NONE' : text;
+}
+
 const decide = (checks: readonly ComplianceCheck[], checkedAt: string): ComplianceDecision => {
   const failed = checks.find((c) => !c.passed);
   return {
@@ -223,6 +260,148 @@ export function createAtsComplianceGate(options: { logger?: Logger } = {}): Comp
       ]);
 
       return decide([controlList, kyc, paused], checkedAt);
+    },
+  };
+}
+
+/**
+ * `AtsComplianceGate.canReceive(instrument, buyer)` — the venue's eligibility decision as a
+ * contract call.
+ *
+ * The gate reads the same three facts this file reads, off the same diamond. What it adds is
+ * that a refused party can reproduce the answer without trusting the venue: `canReceive` is a
+ * free `eth_call` against a published address, and it returns a reason code from the same
+ * vocabulary `ReasonCodes.sol` and `@facture/shared` spell.
+ *
+ * **The gate decides.** A cross-check that never changes an outcome is decoration, and this
+ * repo has enough of that. But the risk of handing a contract the decision is exactly what was
+ * found on 2026-09-06: the deployed gate probed `isAuthorized`, `getKycAccountStatus` and
+ * `isPaused`, none of which exists on an ATS diamond, and refused every buyer on every
+ * instrument. This file was correct throughout, because it had been fixed against live paper
+ * and the contract had not.
+ *
+ * So the reads below are not deleted, they are demoted to the refusal path:
+ *
+ * - The gate permits: allowed, one read, done.
+ * - The gate refuses: ask the facets directly and turn the answer into sentences, because a
+ *   reason code is not something a seller can act on.
+ * - The gate refuses and the facets say the buyer is fine: that is the two halves of one fact
+ *   disagreeing, which is what a gate bug looks like from here. It stays REFUSED — settlement
+ *   must not move on a contradiction — and it is marked INDETERMINATE, so pricing keeps the
+ *   bid rather than silently widening the curve on every invoice.
+ *
+ * That last branch is the whole guard, and it costs nothing on the happy path. Had it existed
+ * a week ago it would have named the deployed gate's bug on the first trade.
+ */
+export interface OnChainGateAnswer {
+  /** True only if the instrument affirmatively permits this buyer. */
+  readonly ok: boolean;
+  /** A `ReasonCodes` name. `NONE` beside `ok`. */
+  readonly code: string;
+}
+
+export function createOnChainComplianceGate(options: {
+  gateAddress: Address;
+  logger?: Logger;
+  /**
+   * The gate call. Defaults to a real `eth_call`; a test supplies its own so the branches
+   * below can be exercised without a relay, which matters because the interesting branch is
+   * the one where this answer and the facets' answer contradict each other.
+   */
+  ask?: (query: ComplianceQuery) => Promise<OnChainGateAnswer>;
+  /** The direct-facet reader used for sentences. Injectable for the same reason. */
+  facets?: ComplianceGate;
+}): ComplianceGate {
+  const log = (options.logger ?? rootLogger).child({ svc: 'compliance' });
+  const client: PublicClient = createPublicClient({ transport: http(hedera.jsonRpcUrl) });
+  const facets =
+    options.facets ??
+    createAtsComplianceGate(options.logger === undefined ? {} : { logger: options.logger });
+
+  const ask =
+    options.ask ??
+    (async (query: ComplianceQuery): Promise<OnChainGateAnswer> => {
+      const [permitted, reasonCode] = (await client.readContract({
+        address: options.gateAddress,
+        abi: GATE_ABI,
+        functionName: 'canReceive',
+        args: [query.instrumentAddress, query.buyerEvmAddress],
+      })) as readonly [boolean, `0x${string}`];
+      return { ok: permitted, code: decodeReasonCode(reasonCode) };
+    });
+
+  return {
+    async check(query) {
+      const checkedAt = new Date().toISOString();
+      const who = query.buyerName ?? query.buyerEvmAddress;
+      const where = `on-chain gate ${options.gateAddress}`;
+
+      let ok: boolean;
+      let code: string;
+      try {
+        ({ ok, code } = await ask(query));
+      } catch (err) {
+        // The gate itself could not be reached. Not a fact about this buyer, so it refuses
+        // as unreadable and pricing is told not to move on it.
+        log.warn('compliance gate unreachable', { gate: options.gateAddress, err });
+        const message = err instanceof Error ? err.message : String(err);
+        return decide(
+          [
+            {
+              name: 'Eligibility',
+              detail:
+                `COMPLIANCE_PROBE_FAILED: the ${where} could not be reached (${message}). ` +
+                `The trade is refused rather than assumed eligible.`,
+              passed: false,
+              unreadable: true,
+            },
+          ],
+          checkedAt,
+        );
+      }
+
+      if (ok) {
+        return decide(
+          [
+            {
+              name: 'Eligibility',
+              detail:
+                `${who} may hold this security. Answered by the ${where}, which reads the ` +
+                `instrument's own control list, KYC grants and pause state — call ` +
+                `canReceive(${query.instrumentAddress}, ${query.buyerEvmAddress}) to check it.`,
+              passed: true,
+            },
+          ],
+          checkedAt,
+        );
+      }
+
+      // Refused. Ask the facets directly for the sentence, and find out whether they agree.
+      const detailed = await facets.check(query);
+      const facetsPermit = detailed.decision === 'allowed';
+
+      if (facetsPermit) {
+        log.error('compliance gate disagrees with the instrument it reads', {
+          gate: options.gateAddress,
+          instrument: query.instrumentAddress,
+          buyer: query.buyerEvmAddress,
+          code,
+        });
+      }
+
+      const header: ComplianceCheck = {
+        name: 'Eligibility',
+        detail: facetsPermit
+          ? `${code}: the ${where} refused ${who}, and the instrument's own facets say the ` +
+            `opposite. One of the two is wrong about the same three facts, so the trade is ` +
+            `refused and the answer is not treated as a fact about this buyer.`
+          : `${code}: the ${where} refused ${who}.`,
+        passed: false,
+        // A disagreement is not an answer. An agreed refusal is.
+        ...(facetsPermit || !detailed.determinate ? { unreadable: true } : {}),
+      };
+
+      return decide([header, ...detailed.checks], checkedAt);
     },
   };
 }

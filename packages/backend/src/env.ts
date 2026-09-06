@@ -97,6 +97,21 @@ export const envSchema = z
       .optional(),
 
     /**
+     * `AtsComplianceGate` on Hedera — the venue's eligibility decision, on chain and callable
+     * by anyone.
+     *
+     * Unset is NOT a relaxation here, unlike every other address on this list. The same three
+     * facts are read either way; the address only decides whether they are read by a contract
+     * a buyer can call themselves or by four RPC reads out of this process. See
+     * `services/compliance.ts` for why the on-chain answer is the one that decides, and for
+     * what happens when the two disagree.
+     */
+    HEDERA_COMPLIANCE_GATE_ADDRESS: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/)
+      .optional(),
+
+    /**
      * Privy, for seller sign-in. Unset disables the route rather than letting it accept an
      * unverified email — see `services/privy.ts`.
      *

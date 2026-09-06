@@ -15,7 +15,11 @@ import { createSqliteStore } from './db/sqlite-store.js';
 import { setStoreFactory } from './db/store.js';
 import { createLogger, rootLogger, setRootLogger } from './logger.js';
 import { initAtsAdapter } from './services/ats.js';
-import { createAtsComplianceGate, setComplianceGate } from './services/compliance.js';
+import {
+  createAtsComplianceGate,
+  createOnChainComplianceGate,
+  setComplianceGate,
+} from './services/compliance.js';
 import { initArcEscrow } from './services/arc.js';
 import { initHcsPublisher } from './services/hcs.js';
 import { initIndexer } from './services/indexer.js';
@@ -58,7 +62,19 @@ function boot(): void {
    */
   setStoreFactory(() => createSqliteStore(getDb()));
   setNotifier(createLoggingNotifier(log));
-  setComplianceGate(createAtsComplianceGate({ logger: log }));
+  /*
+   * With a gate address the eligibility decision is a contract call anyone can reproduce; without
+   * one it is four RPC reads out of this process. The same three facts either way — this is the one
+   * address on the list whose absence is not a relaxation. See `services/compliance.ts`.
+   */
+  setComplianceGate(
+    env.HEDERA_COMPLIANCE_GATE_ADDRESS === undefined
+      ? createAtsComplianceGate({ logger: log })
+      : createOnChainComplianceGate({
+          gateAddress: env.HEDERA_COMPLIANCE_GATE_ADDRESS as `0x${string}`,
+          logger: log,
+        }),
+  );
 
   initAtsAdapter({
     operatorId: env.HEDERA_OPERATOR_ID,
