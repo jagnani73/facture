@@ -57,6 +57,13 @@
       "when": 1788431002369,
       "tag": "0007_backfill_x402_rail",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788674268182,
+      "tag": "0008_chain_mandate_id",
+      "breakpoints": true
     }
   ]
 }

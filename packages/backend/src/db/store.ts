@@ -261,6 +261,15 @@ export interface Store {
   listQuotableMandates(currency: string): Promise<MandateRow[]>;
   fundMandate(input: FundMandateInput): Promise<MandateRow>;
   /**
+   * Record this mandate's id on Hedera's `MandateBook`.
+   *
+   * Separate from `insertMandate` because posting happens after the row exists and can fail
+   * without the mandate failing — a chain that is down costs the posting, not the bid. It is
+   * write-once in practice: `postMandate` mints a fresh id every call, so overwriting one would
+   * strand the capital already credited against the first.
+   */
+  setChainMandateId(id: string, chainMandateId: bigint, at: Date): Promise<MandateRow>;
+  /**
    * Take capital off the book. **It does not close the mandate**, even when the book reaches
    * zero — see {@link Store.closeEmptiedMandate}.
    */

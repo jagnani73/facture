@@ -458,12 +458,21 @@ export class MemoryStore implements Store {
       fundedMinor: row.fundedMinor ?? 0n,
       allocatedMinor: row.allocatedMinor ?? 0n,
       escrowRef: row.escrowRef ?? null,
+      chainMandateId: row.chainMandateId ?? null,
       status: row.status ?? 'draft',
       createdAt: row.createdAt ?? now,
       updatedAt: row.updatedAt ?? now,
     };
     this.mandates.set(full.id, full);
     return clone(full);
+  }
+
+  async setChainMandateId(id: string, chainMandateId: bigint, at: Date): Promise<MandateRow> {
+    const row = this.mandates.get(id);
+    if (!row) throw notFound(`Mandate ${id}`);
+    const next: MandateRow = { ...row, chainMandateId, updatedAt: at };
+    this.mandates.set(id, next);
+    return clone(next);
   }
 
   async getMandate(id: string): Promise<MandateRow | null> {

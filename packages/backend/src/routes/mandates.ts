@@ -14,6 +14,11 @@ import { MANDATE_STATUSES } from '@facture/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getStore } from '../db/store.js';
+import {
+  creditFundingOnBook,
+  ensureMandatePosted,
+  getMandateBook,
+} from '../services/mandate-book.js';
 import { badRequest, conflict, notFound, upstreamUnavailable } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
 import {
@@ -135,8 +140,30 @@ mandateRoutes.post('/', async (c) => {
    */
   const registration = await ensureMandateRegistered(getArcEscrow(), row.id, buyer.arcAddress);
 
+  /*
+   * And publish the bid on Hedera's `MandateBook`, for a different reason than the vault
+   * registration above. The vault makes the capital movable; the book makes the venue's own match
+   * decision checkable — `previewMatch` reads the rating, the confirmation, the due date and the
+   * face value out of `InvoiceRegistry` rather than from whoever is asking, which is what stops a
+   * refusal being the venue marking its own homework.
+   *
+   * Same softness, same reason: a state on the response, never a throw. It also cannot be done
+   * before the row exists, because the book mints the id and that id has to be stored against a
+   * mandate that is already there.
+   */
+  const posting = await ensureMandatePosted(getMandateBook(), { ...row, chainMandateId: null });
+  const posted =
+    posting.chainMandateId === null
+      ? row
+      : await store.setChainMandateId(row.id, BigInt(posting.chainMandateId), new Date());
+
   return c.json(
-    { mandate: wireMandate(row), quoting: false, escrowRegistration: registration },
+    {
+      mandate: wireMandate(posted),
+      quoting: false,
+      escrowRegistration: registration,
+      bookPosting: posting,
+    },
     201,
   );
 });
@@ -374,8 +401,25 @@ mandateRoutes.post('/:id/fund', async (c) => {
     firm,
   });
 
+  /*
+   * Publish the commitment on the book, repairing a missing posting first.
+   *
+   * Repairing here and not only at creation is what gives the seven mandates that predate the
+   * book any presence on it at all — they were written before anything posted, so without this
+   * every `previewMatch` against them would answer `checked: false` forever and the cross-check
+   * would be a mechanism with nothing to check.
+   *
+   * The credited amount is the mandate's committed capital in ITS OWN currency's minor units,
+   * never USDC. The book prices from `InvoiceRegistry.faceValue`, which is listed in cents, so
+   * `EXPOSURE_EXHAUSTED` compares cents against cents. Crediting the vault's 6-decimal figure
+   * would put a ppm-scaled number beside a cents one on a contract that cannot be patched.
+   */
+  const booking = await creditFundingOnBook(getMandateBook(), mandate, store);
+
   return c.json({
     mandate: wireMandate(mandate),
+    /** Whether the commitment above is also on the public book, and if not, why not. */
+    bookFunding: booking,
     /** The moment the bid became firm. Before this the mandate is not on the curve. */
     quoting: mandate.status === 'active',
     /**

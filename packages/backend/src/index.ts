@@ -20,6 +20,7 @@ import {
   createOnChainComplianceGate,
   setComplianceGate,
 } from './services/compliance.js';
+import { createMandateBook, setMandateBook } from './services/mandate-book.js';
 import { initArcEscrow } from './services/arc.js';
 import { initHcsPublisher } from './services/hcs.js';
 import { initIndexer } from './services/indexer.js';
@@ -74,6 +75,18 @@ function boot(): void {
           gateAddress: env.HEDERA_COMPLIANCE_GATE_ADDRESS as `0x${string}`,
           logger: log,
         }),
+  );
+
+  /*
+   * The mandate book. Unset publishes nothing and asks nothing, which is a smaller venue rather
+   * than a laxer one: the book decides no outcome here, it only answers beside the venue.
+   */
+  setMandateBook(
+    createMandateBook({
+      bookAddress: env.HEDERA_MANDATE_BOOK_ADDRESS,
+      operatorKey: env.HEDERA_OPERATOR_KEY,
+      logger: log,
+    }),
   );
 
   initAtsAdapter({

@@ -562,6 +562,21 @@ export class SqliteStore implements Store {
     );
   }
 
+  setChainMandateId(id: string, chainMandateId: bigint, at: Date): Promise<MandateRow> {
+    return Promise.resolve(
+      this.#db.transaction((tx) => {
+        const updated = tx
+          .update(mandates)
+          .set({ chainMandateId, updatedAt: at })
+          .where(eq(mandates.id, id))
+          .returning()
+          .get();
+        if (!updated) throw notFound(`Mandate ${id}`);
+        return updated;
+      }, IMMEDIATE),
+    );
+  }
+
   withdrawFromMandate(input: WithdrawInput): Promise<WithdrawResult> {
     return asPromise(() =>
       this.#db.transaction((tx) => {

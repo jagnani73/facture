@@ -338,6 +338,23 @@ export const mandates = sqliteTable(
     allocatedMinor: bigintText('allocated_minor').notNull().default(ZERO_MINOR),
     escrowRef: text('escrow_ref'),
 
+    /**
+     * This mandate's id on Hedera's `MandateBook`, as a decimal string.
+     *
+     * The join between two id spaces that nothing on chain connects. The book MINTS its ids
+     * (`++_mandateCount`, no way to supply one); the Arc vault keys capital by
+     * `uint256(keccak256(uuid))`, chosen because to the vault an id is only a mapping key; this
+     * table uses a UUID. The book cannot read Arc and the vault never looks at the book, so the
+     * correspondence exists here or nowhere, and without it a mandate is unaddressable on the
+     * book the moment the posting transaction returns.
+     *
+     * Nullable, and that is the point: a chain that is down must cost the posting rather than
+     * the mandate, the same trade `ensureMandateRegistered` makes for the vault. Null means the
+     * book was never told about this mandate, so `previewMatch` reports `checked: false` rather
+     * than a refusal — "not asked" and "answered no" are different facts.
+     */
+    chainMandateId: bigintText('chain_mandate_id'),
+
     status: text('status', { enum: MANDATE_STATUS }).notNull().default('draft'),
     createdAt: instant('created_at').notNull().default(NOW_MS),
     updatedAt: instant('updated_at').notNull().default(NOW_MS),

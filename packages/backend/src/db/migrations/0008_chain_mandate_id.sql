@@ -1,0 +1,17 @@
+-- The join between the venue's mandate ids and MandateBook's.
+--
+-- `MandateBook` mints its own (`mandateId = ++_mandateCount`) and offers no way to supply one, so
+-- the id is knowable only from the `MandatePosted` log of the transaction that created it. The Arc
+-- vault, separately, keys capital by `uint256(keccak256(uuid))` — a hash of this table's id, chosen
+-- because to the vault an id is only a mapping key. Nothing on chain joins the two: the book cannot
+-- read Arc, and the vault never looks at the book. `services/arc.ts` has carried a warning since it
+-- was written that anything later posting these mandates to the book "has to reconcile these id
+-- spaces rather than assume they line up".
+--
+-- This column is that reconciliation. It is nullable because a chain that is down must cost the
+-- posting and not the mandate.
+--
+-- Safe against a populated database, unlike 0003: `ALTER TABLE ... ADD COLUMN` with no default and
+-- no constraint does not rebuild the table, so none of the foreign keys pointing at `mandates` are
+-- disturbed and the pragma dance at the top of 0003 is not needed here.
+ALTER TABLE `mandates` ADD `chain_mandate_id` text;

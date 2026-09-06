@@ -112,6 +112,16 @@ export const envSchema = z
       .optional(),
 
     /**
+     * `MandateBook` on Hedera. Unset leaves the venue's match decisions checkable only against
+     * this database — see `services/mandate-book.ts`. The book decides nothing here: it is
+     * asked, and its answer is published beside the venue's own.
+     */
+    HEDERA_MANDATE_BOOK_ADDRESS: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/)
+      .optional(),
+
+    /**
      * Privy, for seller sign-in. Unset disables the route rather than letting it accept an
      * unverified email — see `services/privy.ts`.
      *

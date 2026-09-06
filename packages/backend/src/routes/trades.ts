@@ -18,9 +18,11 @@ import { z } from 'zod';
 import { getStore } from '../db/store.js';
 import { publishRefusals } from '../services/hcs.js';
 import { badRequest, conflict, forbidden, isAppError, notFound } from '../errors.js';
+import { rootLogger } from '../logger.js';
 import type { AppEnv } from '../middleware/context.js';
 import { accountIdToEvmAddress } from '../services/ats.js';
 import { getComplianceGate } from '../services/compliance.js';
+import { getMandateBook } from '../services/mandate-book.js';
 import { quoteEngine } from '../services/quote-engine.js';
 import { buildTradeChallenge, settlementService } from '../services/settlement.js';
 import { X402_HEADERS, X402_VERSION } from '../services/x402.js';
@@ -213,6 +215,41 @@ async function prepareTrade(
   }
 
   /*
+   * Ask Hedera's `MandateBook` whether it would take this match, and publish the answer.
+   *
+   * A free `eth_call` that decides nothing. What makes it worth making is where its inputs come
+   * from: the book reads the rating, the confirmation, the due date and the face value out of
+   * `InvoiceRegistry` rather than from the caller, so its verdict is the one refusal on this
+   * path the venue cannot have arranged. Everything else here is the venue checking its own
+   * homework.
+   *
+   * **Three states, never two.** A book that is not configured, a mandate never posted to it and
+   * a node that would not answer are all `checked: false` — not a refusal. The `/health` cursor,
+   * `ComplianceDecision.determinate` and the proof view's registry block all make this same
+   * distinction, and each was a defect before it was a rule.
+   *
+   * **It does not block the trade, deliberately.** The book's price is FLOORED where
+   * `@facture/shared` rounds the discount up, and its tenor is `ceil` off `block.timestamp`
+   * where the venue counts UTC midnights — so the two legitimately differ by a minor unit, and
+   * sometimes by a whole day of discount, on an invoice both would happily match. Refusing on a
+   * price mismatch would reject good trades for a rounding rule. A disagreement is rendered, not
+   * resolved: the same position the proof view takes when the chain and the venue's own column
+   * differ.
+   */
+  const bookPreview = await getMandateBook().previewMatch(invoice.id, mandate.chainMandateId);
+  if (bookPreview.checked && bookPreview.ok === false) {
+    rootLogger.child({ svc: 'mandate-book' }).warn(
+      'the mandate book would refuse a match the venue is arming',
+      {
+        invoiceId: invoice.id,
+        mandateId: mandate.id,
+        chainMandateId: mandate.chainMandateId?.toString(10) ?? null,
+        code: bookPreview.code,
+      },
+    );
+  }
+
+  /*
    * Reserve the capital before placing the hold. Both are taken under the mandate's row
    * lock, so two invoices arriving against one mandate serialise rather than both being
    * told there is room.
@@ -311,6 +348,14 @@ async function prepareTrade(
         compliance,
         /** Why this settled without a challenge, rather than leaving the reader to guess. */
         rail: { chosen: railChoice.rail, reason: railChoice.reason },
+        /**
+         * What Hedera's `MandateBook` says about this same match — published, never acted on.
+         * `checked: false` means the chain was not asked (no book configured, this mandate never
+         * posted, or the node silent) and is deliberately not a refusal. The book's price is
+         * floored where the venue rounds the discount up, so the two can differ by a minor unit
+         * on a match both would take; the reason code is the comparable part.
+         */
+        book: bookPreview,
         settledAt: settled.settledAt,
       },
       200,
@@ -348,6 +393,8 @@ async function prepareTrade(
       expiresAt: prepared.expiresAt,
       /** Why a challenge was issued rather than the trade settling out of an escrow. */
       rail: { chosen: railChoice.rail, reason: railChoice.reason },
+      /** See the note on the other rail's response. Asked, published, never acted on. */
+      book: bookPreview,
       /** Repeat this request with the signed payload in this header. */
       signatureHeader: X402_HEADERS.signature,
     },
