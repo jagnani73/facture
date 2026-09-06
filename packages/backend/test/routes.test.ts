@@ -716,6 +716,66 @@ describe('trades and the proof view', () => {
   });
 });
 
+describe('CORS', () => {
+  /*
+   * The web and the venue are separate origins, so every header the browser sends on a
+   * cross-origin request has to survive the preflight first. `POST /v1/sellers` reads a
+   * Privy identity token out of `authorization`, and for a while the preflight did not
+   * allow that header — which does not surface as a failing request, because the browser
+   * never makes the request at all. The route's own tests passed throughout.
+   */
+  it('allows the authorization header the sign-in route reads', async () => {
+    const res = await h.app.request('http://localhost/v1/sellers', {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'http://localhost:3000',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'authorization',
+      },
+    });
+
+    const allowed = (res.headers.get('access-control-allow-headers') ?? '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase());
+
+    expect(allowed).toContain('authorization');
+  });
+
+  it('still allows the headers every other route needs', async () => {
+    const res = await h.app.request('http://localhost/v1/invoices', {
+      method: 'OPTIONS',
+      headers: { origin: 'http://localhost:3000', 'access-control-request-method': 'POST' },
+    });
+
+    const allowed = (res.headers.get('access-control-allow-headers') ?? '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase());
+
+    expect(allowed).toEqual(expect.arrayContaining(['content-type', 'x-request-id']));
+  });
+
+  /*
+   * The pair, stated once. A token the venue refuses to read without is a token the browser
+   * has to be permitted to send, and those two facts live in different files.
+   */
+  it('sends the seller route a token that a browser would have been allowed to send', async () => {
+    const preflight = await h.app.request('http://localhost/v1/sellers', {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'http://localhost:3000',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'authorization',
+      },
+    });
+    const allowed = (preflight.headers.get('access-control-allow-headers') ?? '').toLowerCase();
+    expect(allowed).toContain('authorization');
+
+    // And the route really does refuse without it, so the header is not decorative.
+    const withoutToken = await call(h.app, 'POST', '/v1/sellers');
+    expect(withoutToken.status).toBe(401);
+  });
+});
+
 describe('problem responses', () => {
   it('are application/problem+json with a stable code and the request id', async () => {
     const res = await call(h.app, 'GET', '/v1/invoices/00000000-0000-4000-8000-000000000000', {
