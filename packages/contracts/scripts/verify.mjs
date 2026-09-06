@@ -52,25 +52,28 @@ const DEPLOYED = [
   { chainId: 296, name: 'InvoiceRegistry', address: '0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7' },
   { chainId: 296, name: 'MandateBook', address: '0x361f9d4b1101898417b2b9148bc8aa522024a38f' },
   { chainId: 296, name: 'DvpEscrow', address: '0x35a8a43d2d840f02887cd0427e78f6b0205ded87' },
+  /*
+   * The gate the book actually reads, deployed 2026-09-06. The one below it is the version that
+   * probed three ATS selectors which do not exist, and it is still live and still verified — kept
+   * on this list deliberately, for the same reason `docs/deployments.md` keeps a superseded table:
+   * an address found in an old note should be identifiable rather than mysterious. Verifying it
+   * is what lets a reader see for themselves what it did wrong.
+   */
+  {
+    chainId: 296,
+    name: 'AtsComplianceGate',
+    address: '0x6d78847e4ac257da68909c5a4c60ea1dcc060564',
+  },
   {
     chainId: 296,
     name: 'AtsComplianceGate',
     address: '0x9a2c848ab62e715d2b49a4710f6451395978abbb',
+    supersededBy: '0x6d78847e4ac257da68909c5a4c60ea1dcc060564',
   },
   // Arc testnet. Sourcify may not index chain 5042002 at all; handled below.
   { chainId: 5042002, name: 'MandateVault', address: '0x217256d0fdf83ffd81bbc6884ad44f5c02501102' },
   { chainId: 5042002, name: 'DvpEscrow', address: '0x32e3511A2F3d941F776dF01f6bA66a73cAf10d69' },
 ];
-
-const buildInfoDir = resolve(packageRoot, 'artifacts/build-info');
-const inputFile = readdirSync(buildInfoDir).find(
-  (f) => f.endsWith('.json') && !f.endsWith('.output.json'),
-);
-if (!inputFile) {
-  console.error('No build-info found. Run `pnpm --filter @facture/contracts build` first.');
-  process.exit(1);
-}
-const buildInfo = JSON.parse(readFileSync(resolve(buildInfoDir, inputFile), 'utf8'));
 
 /*
  * Hardhat 3 prefixes every source name with `project/`, so the identifier
@@ -78,6 +81,38 @@ const buildInfo = JSON.parse(readFileSync(resolve(buildInfoDir, inputFile), 'utf
  * `input.sources` exactly, and `contracts/Foo.sol:Foo` matches nothing.
  */
 const identifierFor = (name) => `project/contracts/${name}.sol:${name}`;
+
+/*
+ * ONE BUILD-INFO PER CONTRACT, chosen by looking inside it.
+ *
+ * This used to take whichever build-info `readdirSync` returned first and send it for every
+ * contract. Hardhat 3 emits one compilation unit per root source, so the directory holds
+ * nineteen of them and "first" is alphabetical by content hash — which is to say arbitrary. It
+ * worked until the tree changed shape, then failed as `Contract not found in compiler output`
+ * against a contract that had just been deployed from that very tree, which reads like a broken
+ * artifact rather than like the script looking in the wrong file.
+ *
+ * Picking by content also fixes a quieter version of the same fault: a stale build-info left
+ * over from an earlier source would have been sent happily, and Sourcify would have reported no
+ * match for a reason that had nothing to do with the deployment.
+ */
+const buildInfoDir = resolve(packageRoot, 'artifacts/build-info');
+const buildInfos = readdirSync(buildInfoDir)
+  .filter((f) => f.endsWith('.json') && !f.endsWith('.output.json'))
+  .map((f) => JSON.parse(readFileSync(resolve(buildInfoDir, f), 'utf8')));
+
+if (buildInfos.length === 0) {
+  console.error('No build-info found. Run `pnpm --filter @facture/contracts build` first.');
+  process.exit(1);
+}
+
+const buildInfoFor = (name) =>
+  buildInfos.find((info) => {
+    const source = info.input?.sources?.[`project/contracts/${name}.sol`];
+    // The unit that COMPILES this contract, not one that merely imports it: a dependency appears
+    // in several units, and only the one rooted at it carries the settings it was deployed with.
+    return source !== undefined && info.publicSourceNameMap?.[`contracts/${name}.sol`] !== undefined;
+  }) ?? buildInfos.find((info) => info.input?.sources?.[`project/contracts/${name}.sol`] !== undefined);
 
 let degraded = false;
 
@@ -92,6 +127,12 @@ async function currentMatch(chainId, address) {
 async function verify({ chainId, name, address }) {
   const before = await currentMatch(chainId, address);
   if (before.match) return `${name.padEnd(20)} ${address}  already ${before.match}`;
+
+  const buildInfo = buildInfoFor(name);
+  if (buildInfo === undefined) {
+    degraded = true;
+    return `⚠ ${name.padEnd(18)} ${address}  no build-info compiles contracts/${name}.sol`;
+  }
 
   const res = await fetch(`${SOURCIFY}/v2/verify/${chainId}/${address}`, {
     method: 'POST',

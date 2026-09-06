@@ -95,7 +95,25 @@ async function main(): Promise<void> {
 
   const owner = requireAddress('FACTURE_OWNER');
   const attester = requireAddress('FACTURE_ATTESTER');
+  /*
+   * Every contract here can be reused rather than redeployed, and until 2026-09-06 only one could.
+   *
+   * That was not a missing convenience, it was a live hazard. `UniquenessRegistry` holds the
+   * venue's claims permanently and the comment on step 1 has always said it must outlive a book
+   * upgrade — while the code below redeployed it unconditionally. Any second run of this script
+   * would have minted an empty registry, and the backend's `HEDERA_UNIQUENESS_REGISTRY_ADDRESS`
+   * would either keep pointing at the old one (making the deploy a no-op nobody noticed) or be
+   * updated to the new one, silently abandoning every receivable ever claimed.
+   *
+   * With these, a redeploy is per-contract. Correcting the compliance gate — which shipped probing
+   * three ATS selectors that do not exist, and refused every buyer on every instrument — is a
+   * one-contract deployment plus the `setComplianceGate` rewire in step 6, and nothing else moves.
+   */
+  const existingUniquenessRegistry = optionalAddress('FACTURE_UNIQUENESS_REGISTRY');
   const existingInvoiceRegistry = optionalAddress('FACTURE_INVOICE_REGISTRY');
+  const existingComplianceGate = optionalAddress('FACTURE_COMPLIANCE_GATE');
+  const existingDeliveryEscrow = optionalAddress('FACTURE_DELIVERY_ESCROW');
+  const existingMandateBook = optionalAddress('FACTURE_MANDATE_BOOK');
   const cashLegVault = requireAddress('FACTURE_MANDATE_VAULT');
   const cashLegChainId = BigInt(process.env.FACTURE_CASH_LEG_CHAIN_ID ?? '5042002');
   const settlementWindow = BigInt(process.env.FACTURE_SETTLEMENT_WINDOW ?? '259200');
@@ -107,11 +125,22 @@ async function main(): Promise<void> {
 
   // --- 1. UniquenessRegistry ---------------------------------------------------------------------
   // First, and independent of everything else. It is intended to outlive the rest of the venue, so
-  // it is deployed on its own and never redeployed alongside a book upgrade.
-  const uniquenessRegistry = await viem.deployContract('UniquenessRegistry', [owner], {
-    gas: GAS.deploySmall,
-  });
-  console.log(`UniquenessRegistry  ${uniquenessRegistry.address}`);
+  // it is never redeployed alongside a book upgrade — set `FACTURE_UNIQUENESS_REGISTRY` on every run
+  // after the first. A fresh one here is an empty one, and a receivable claimed against the old
+  // registry is not claimed against this one.
+  let uniquenessRegistry: Address;
+  if (existingUniquenessRegistry === undefined) {
+    const deployed = await viem.deployContract('UniquenessRegistry', [owner], {
+      gas: GAS.deploySmall,
+    });
+    uniquenessRegistry = deployed.address;
+    console.log(`UniquenessRegistry  ${uniquenessRegistry}`);
+  } else {
+    uniquenessRegistry = existingUniquenessRegistry;
+    console.log(
+      `UniquenessRegistry  ${uniquenessRegistry}  (reused, from FACTURE_UNIQUENESS_REGISTRY)`,
+    );
+  }
 
   // --- 2. InvoiceRegistry ------------------------------------------------------------------------
   // The source of invoice truth the book reads before it allows a match. It takes the uniqueness
@@ -125,11 +154,9 @@ async function main(): Promise<void> {
   // assert an `A` rating on a defaulted debtor and have the book price, match and settle it.
   let invoiceRegistry: Address;
   if (existingInvoiceRegistry === undefined) {
-    const deployed = await viem.deployContract(
-      'InvoiceRegistry',
-      [owner, uniquenessRegistry.address],
-      { gas: GAS.deploySmall },
-    );
+    const deployed = await viem.deployContract('InvoiceRegistry', [owner, uniquenessRegistry], {
+      gas: GAS.deploySmall,
+    });
     invoiceRegistry = deployed.address;
     console.log(`InvoiceRegistry     ${invoiceRegistry}`);
 
@@ -148,23 +175,44 @@ async function main(): Promise<void> {
   // --- 3. AtsComplianceGate ----------------------------------------------------------------------
   // Stateless and immutable; one instance serves every instrument the venue lists. Must be on this
   // chain, because it staticcalls into the securities' diamonds directly.
-  const complianceGate = await viem.deployContract('AtsComplianceGate', [], {
-    gas: GAS.deploySmall,
-  });
-  console.log(`AtsComplianceGate   ${complianceGate.address}`);
+  //
+  // It is also the one contract here most likely to need replacing on its own, because it is the
+  // only one coupled to a third party's selectors. The book holds it as a MUTABLE reference for
+  // exactly that reason, so a corrected gate is a deployment plus one owner call — see step 6.
+  let complianceGate: Address;
+  if (existingComplianceGate === undefined) {
+    const deployed = await viem.deployContract('AtsComplianceGate', [], { gas: GAS.deploySmall });
+    complianceGate = deployed.address;
+    console.log(`AtsComplianceGate   ${complianceGate}`);
+  } else {
+    complianceGate = existingComplianceGate;
+    console.log(`AtsComplianceGate   ${complianceGate}  (reused, from FACTURE_COMPLIANCE_GATE)`);
+  }
 
   // --- 4. DvpEscrow (delivery leg) ---------------------------------------------------------------
-  // Before the book, which records it as an immutable and reads every settlement proof out of it.
+  // Before the book, which records it as an IMMUTABLE and reads every settlement proof out of it.
   // The payment-leg twin is deployed on Arc by deployArc.ts. They never communicate.
-  const dvpEscrow = await viem.deployContract('DvpEscrow', [], { gas: GAS.deploySmall });
-  console.log(`DvpEscrow           ${dvpEscrow.address}`);
+  //
+  // Because the book records it immutably, a fresh escrow beside a reused book is incoherent: the
+  // book would still read proofs out of the old one. That combination is refused below rather than
+  // deployed and left for someone to discover from a `DeliveryNotProven` they cannot explain.
+  let deliveryEscrow: Address;
+  if (existingDeliveryEscrow === undefined) {
+    const deployed = await viem.deployContract('DvpEscrow', [], { gas: GAS.deploySmall });
+    deliveryEscrow = deployed.address;
+    console.log(`DvpEscrow           ${deliveryEscrow}`);
+  } else {
+    deliveryEscrow = existingDeliveryEscrow;
+    console.log(`DvpEscrow           ${deliveryEscrow}  (reused, from FACTURE_DELIVERY_ESCROW)`);
+  }
 
   // --- 5. MandateBook ----------------------------------------------------------------------------
   // `settlementWindow` MUST exceed DvpEscrow's MAX_LOCK_DURATION. If it did not, the book could
   // release an allocation while the delivery leg was still claimable — paying nobody and handing
   // the buyer the bond for free. The constructor enforces this too; the check is repeated here only
   // to fail with a message that names the environment variable rather than with `InvalidTerms`.
-  const maxLockDuration = await dvpEscrow.read.MAX_LOCK_DURATION();
+  const escrowContract = await viem.getContractAt('DvpEscrow', deliveryEscrow);
+  const maxLockDuration = await escrowContract.read.MAX_LOCK_DURATION();
   if (settlementWindow <= BigInt(maxLockDuration)) {
     throw new Error(
       `FACTURE_SETTLEMENT_WINDOW (${settlementWindow}) must exceed ` +
@@ -172,34 +220,107 @@ async function main(): Promise<void> {
     );
   }
 
-  const mandateBook = await viem.deployContract(
-    'MandateBook',
-    [
-      invoiceRegistry,
-      complianceGate.address,
-      dvpEscrow.address,
-      owner,
-      attester,
-      cashLegChainId,
-      cashLegVault,
-      settlementWindow,
-    ],
-    { gas: GAS.deployBook },
-  );
-  console.log(`MandateBook         ${mandateBook.address}`);
+  let mandateBookAddress: Address;
+  if (existingMandateBook !== undefined) {
+    mandateBookAddress = existingMandateBook;
+    console.log(`MandateBook         ${mandateBookAddress}  (reused, from FACTURE_MANDATE_BOOK)`);
+
+    /*
+     * The book's registry and escrow are immutables. Reusing a book while deploying a fresh one of
+     * either produces a deployment whose parts do not refer to each other, and the failure would
+     * arrive much later as an unexplainable `INVOICE_UNKNOWN` or `DeliveryNotProven`. Read what the
+     * book actually points at and refuse the mismatch here.
+     */
+    const existing = await viem.getContractAt('MandateBook', mandateBookAddress);
+    const [boundRegistry, boundEscrow] = await Promise.all([
+      existing.read.invoiceRegistry(),
+      existing.read.deliveryEscrow(),
+    ]);
+    if (getAddress(boundRegistry) !== getAddress(invoiceRegistry)) {
+      throw new Error(
+        `MandateBook ${mandateBookAddress} is bound to InvoiceRegistry ${boundRegistry}, not ` +
+          `${invoiceRegistry}. That reference is immutable — set FACTURE_INVOICE_REGISTRY to the ` +
+          `bound one, or drop FACTURE_MANDATE_BOOK to deploy a book against this registry.`,
+      );
+    }
+    if (getAddress(boundEscrow) !== getAddress(deliveryEscrow)) {
+      throw new Error(
+        `MandateBook ${mandateBookAddress} is bound to DvpEscrow ${boundEscrow}, not ` +
+          `${deliveryEscrow}. That reference is immutable — set FACTURE_DELIVERY_ESCROW to the ` +
+          `bound one, or drop FACTURE_MANDATE_BOOK to deploy a book against this escrow.`,
+      );
+    }
+  } else {
+    const deployed = await viem.deployContract(
+      'MandateBook',
+      [
+        invoiceRegistry,
+        complianceGate,
+        deliveryEscrow,
+        owner,
+        attester,
+        cashLegChainId,
+        cashLegVault,
+        settlementWindow,
+      ],
+      { gas: GAS.deployBook },
+    );
+    mandateBookAddress = deployed.address;
+    console.log(`MandateBook         ${mandateBookAddress}`);
+  }
+
+  const mandateBook = await viem.getContractAt('MandateBook', mandateBookAddress);
+  const uniquenessContract = await viem.getContractAt('UniquenessRegistry', uniquenessRegistry);
 
   // --- 6. Wiring ---------------------------------------------------------------------------------
-  // Only runs when the deployer is also the owner. On a real deployment the owner is a separate key
-  // and these calls are made from it afterwards.
-  if (getAddress(deployer.account.address) !== owner) {
-    console.log('\nDeployer is not the owner; skipping wiring. Run these from the owner key:');
+  //
+  // Authority comes from the contract, not from `FACTURE_OWNER`.
+  //
+  // The env names who the owner was MEANT to be at the last deployment; the chain records who it
+  // actually is. Those disagree on this deployment — the live book's `owner()` is the operator key
+  // while `FACTURE_OWNER` names a different address — and comparing against the env skipped every
+  // wiring call with a message saying to run them from a key that has no rights over the book.
+  // A freshly deployed contract has the env's owner by construction, so reading the chain is
+  // correct in both cases and only ever more correct in one.
+  const bookOwner = await mandateBook.read.owner();
+  const deployerAddress = getAddress(deployer.account.address);
+  if (existingMandateBook !== undefined && getAddress(bookOwner) !== owner) {
+    console.log(
+      `\nNOTE: MandateBook.owner() is ${bookOwner}, not FACTURE_OWNER (${owner}). ` +
+        `Wiring follows the chain.`,
+    );
+  }
+
+  if (deployerAddress !== getAddress(bookOwner)) {
+    console.log('\nDeployer does not own the book; skipping wiring. Run these from the owner key:');
     console.log(`  uniquenessRegistry.setIssuer(<issuer>, true)`);
     console.log(
       `  invoiceRegistry.setAttester(${attester}, true)   # nothing lists until this runs`,
     );
+    console.log(`  mandateBook.setComplianceGate(${complianceGate})`);
     console.log(`  mandateBook.setMatcher(<matcher>, true)`);
     console.log(`  mandateBook.setSettler(<keeper>, true)   # early cancel only`);
     return;
+  }
+
+  /*
+   * Point the book at the gate this run resolved, whether that gate is new or reused.
+   *
+   * This is the step that makes a gate-only redeploy mean anything. `_complianceGate` is the book's
+   * one mutable dependency, and MandateBook.sol says why: a bad gate can approve ineligible buyers
+   * but cannot touch escrowed capital, so it is the reference worth being able to correct. A fresh
+   * gate the book was never told about is a deployment that changed nothing.
+   *
+   * Comparing what the book holds against what this run resolved — rather than tracking whether the
+   * gate was freshly deployed — makes the call idempotent, so a rerun after a failed repoint fixes
+   * it instead of deploying a third gate.
+   */
+  const boundGate = await mandateBook.read.complianceGate();
+  if (getAddress(boundGate) === getAddress(complianceGate)) {
+    console.log(`gate already bound  ${complianceGate}`);
+  } else {
+    await mandateBook.write.setComplianceGate([complianceGate], { gas: GAS.adminCall });
+    console.log(`gate repointed      ${boundGate} -> ${complianceGate}`);
   }
 
   // NOTE: the escrow is NOT granted the settler role, and does not need one. Settlement is proven
@@ -214,7 +335,7 @@ async function main(): Promise<void> {
 
   const issuer = optionalAddress('FACTURE_ISSUER');
   if (issuer !== undefined) {
-    await uniquenessRegistry.write.setIssuer([issuer, true], { gas: GAS.adminCall });
+    await uniquenessContract.write.setIssuer([issuer, true], { gas: GAS.adminCall });
     console.log(`issuer granted      ${issuer}`);
   }
 
