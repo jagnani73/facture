@@ -2,14 +2,16 @@
 
 Five moves, in the order the README argues them: list, quote, match, settle, mature. Written
 against the venue as it actually runs on 2026-09-03, with the ids and transaction hashes it
-actually holds, so a judge can check a claim instead of taking it.
+actually holds, so a judge can check a claim instead of taking it. Prices and tenors are as of that
+date and shorten by a day each day; the invoice statuses were re-read on 2026-09-04, after listing
+became something a seller does.
 
 Everything below is either a URL to open or a request to send. Where a move is staged rather than
 live, it says so in place. Where the thing on screen is a fiction from the seeded book rather than
 a receivable with a bond behind it, it says that too — a demo that blurs the two is worth less than
 one that does not, because the whole product claim is that a price can be checked.
 
-Budget about **twelve minutes** for the five moves, plus two for the proof view, two for the
+Budget about **thirteen minutes** for the five moves, plus two for the proof view, two for the
 on-chain guarantees at the end, and ninety seconds more if the agent is shown. Staging is separate
 and is described last.
 
@@ -97,7 +99,7 @@ custody. MF-2046 is the earlier, messier proof and is covered under _Move 5_ as 
 
 ## Move 1 — List
 
-**`http://localhost:3000/book`** · about 90 seconds
+**`http://localhost:3000/book`** · about 2 minutes
 
 The seller's book. Every confirmed row carries a price beside it, already there, not behind a
 button. The page renders in about 200 ms because `priceBook` prices the whole book in one pass and
@@ -106,12 +108,36 @@ does no on-chain reads.
 Point at three rows and move on:
 
 - **MF-2050** and **MF-2049** are grey — _awaiting confirmation_. No price. This is Move 2.
-- **MF-2043** is disputed. The customer said no, and it will not be sold.
-- **MF-2031** defaulted, and Calder & Roe's rating carries the mark permanently.
+- **MF-2043** is disputed. Calder & Roe said no, and it will not be sold.
+- **MF-2031** defaulted, and Orrin Metalworks carries the mark permanently. That is why the
+  customer is rated `D`, which ranks below even a cold start.
 
 Then say what already happened before the screen was opened: each of those invoices became an ATS
 zero-coupon bond at the moment it was added to the book, not at the moment of sale. Tokenisation is
 onboarding work, so it is never on the critical path when money moves.
+
+**Then do the move it is named after.** A price is not an offer. Open any confirmed invoice and
+the panel under the price reads _Not offered yet_, with an **Offer it for sale** button —
+`POST /v1/invoices/:id/list`, which moves the row `confirmed → listed`. Until a seller presses it
+the venue refuses to arm a trade against that invoice, in a sentence rather than a revert:
+
+> This invoice is confirmed and has not been offered for sale. The price beside it is what the
+> book would pay; listing it is what makes that an offer you can fill.
+
+A listed invoice gets the Sell panel instead, with a quiet **Take it off the book** beside it
+(`POST /v1/invoices/:id/delist`). That control disappears entirely while a trade is armed, and
+says why: a seller withdrawing the offer between the 402 and the buyer's signature is the hole the
+Arc rail taught us to look for.
+
+**The book holds five confirmed invoices and one listed — MF-2038.** So most rows need offering
+before anything can take them, and whichever invoice the demo sells has to be offered first.
+Quoting is untouched by any of it: every confirmed row still carries a live price the moment the
+screen loads. Requiring a listing before an invoice could be priced would have been the tidier
+model and a slower one: the book would render empty until a seller had clicked through every row.
+
+Say plainly that this is new, on 2026-09-04. `listed` was written by nothing but the seed until
+then, so the README's own "Never cut" path opened with the word _List_ while the product performed
+no listing. The step existed in the lifecycle and nowhere else.
 
 **If you want to show it live** — `http://localhost:3000/book/new` adds an invoice and the venue
 answers `202`, because the instrument does not exist yet. The row appears immediately with a _being
@@ -145,7 +171,7 @@ Two more worth opening, in this order, because they make the curve legible:
 - **MF-2048**, `460311ff-60d4-54dc-93ce-d5ccbad98b24` — an unrated customer, priced at **1600 bps**.
   The cold start is real and it is charged for.
 - **MF-2038**, `1cba5ccd-f5e4-54f6-8d93-ec6bd4d01282` — A-rated, 23 days, **675 bps**, the tight
-  end.
+  end. It is also the one row already offered for sale, so it is the one a Sell click can reach.
 
 Then the buyer's side: **`http://localhost:3000/mandates`**. Three standing bids, their committed
 capital, what each has allocated and what is left. A funder writes a mandate and walks away; the
@@ -220,6 +246,11 @@ buyer's capital is already posted.
 
 Both bodies carry `rail: { chosen, reason }`, so the answer to "why this one" is on the wire rather
 than inferred. `cashLeg.rail` says the same thing on the receipt, and the proof view prints it.
+
+**Sell renders only on an invoice that has been offered.** MF-2038 is the only row already on the
+book, so anything else needs Move 1's offer step first. Arming re-reads the status rather than
+trusting the screen, so an invoice taken off the book between the quote and the Sell click is
+refused rather than sold.
 
 **Everything a judge can click in the demo book routes to the x402 rail, and that is worth saying
 out loud rather than letting someone discover it by clicking Sell.** The escrowed mandate quotes 850
@@ -373,6 +404,28 @@ curl https://testnet.mirrornode.hedera.com/api/v1/schedules/0.0.10332092
 
 `memo: Facture maturity e17669e8-a246-51b4-9c9c-746ca88fb860` — the invoice id, on the ledger.
 
+**What that first call needs depends on the clock, and it did not used to.** A first maturity of a
+receivable not yet past due takes no body and records `on_time`; there is no instant left at which
+the payment could have been late. A first maturity of one **already past due requires `paidAt`**
+and refuses without it, because the only other thing left to decide the outcome from is the moment
+the operator pressed the button. That is how `late` came to be the fallback for "never paid" as
+well as for "paid late", written into a customer's permanent record either way.
+
+```
+curl -X POST http://localhost:8787/v1/invoices/<id>/mature \
+  -H 'content-type: application/json' -d '{"paidAt":"2026-09-07T00:00:00Z"}'
+```
+
+A **replay** is untouched by that and still succeeds bodyless whatever the clock says, because
+reading a settlement back decides nothing — which is what keeps this the route for asking whether
+the collection key has signed. MF-2046 was matured four times and the ledger carries one outcome.
+
+**Read the date before a rehearsal, because this will bite later in the month.** No sold invoice is
+past due on 4 September — the earliest is MF-2039 on the 5th — but five of the sixteen sold rows
+fall due on or before the 16th: MF-2039, MF-2037 and MF-2030, MF-2033, MF-2036. Each needs a
+`paidAt` from the day after it falls due. And if the money genuinely never arrived,
+`POST /v1/invoices/:id/default` is the other answer, and the one that marks the customer.
+
 The reason the money comes from `0.0.10331559` and not from the operator is worth thirty seconds.
 A scheduled transaction executes the moment its required signatures are present, and the operator
 signs the create — so a payout drawn on the operator would fire on creation, reporting the debtor as
@@ -409,7 +462,8 @@ quietly removed from underneath it. Say it before a judge finds it.
 
 ## Confirmation, if the debtor question comes up
 
-The confirmation move sits between listing and quoting and takes about a minute. MF-2050
+The confirmation move sits between adding an invoice and offering it, and takes about a minute.
+MF-2050
 (`b874aa34-d0af-5813-ae3a-3eccfcb264cb`) and MF-2049 (`530009e2-d56c-5410-b003-f70c5d51ff71`) are
 both waiting on it.
 
@@ -425,8 +479,8 @@ and open the second one.
 
 That page has no masthead, no nav and no prices on it. One sentence — _"Meridian Fabrication says
 you owe them $21,900.00, due 9 October. Is that right?"_ — and two buttons. The invoice turns green
-and has a price. In production the link is not returned to the seller, because a seller who can read
-it can confirm their own invoices.
+and has a price, and the seller can then offer it. In production the link is not returned to the
+seller, because a seller who can read it can confirm their own invoices.
 
 ---
 
@@ -453,6 +507,7 @@ Ready to paste:
 
 ```
 http://localhost:3000/book
+http://localhost:3000/book/1cba5ccd-f5e4-54f6-8d93-ec6bd4d01282   MF-2038, 675 bps, the listed one
 http://localhost:3000/book/22e74885-8e34-50f2-8f36-e625f4ca7e99   MF-2041, 800 bps, four bids
 http://localhost:3000/book/068ac953-19e4-5254-96ea-0b06b8f479f8   MF-2047, rated D, no bid
 http://localhost:3000/book/460311ff-60d4-54dc-93ce-d5ccbad98b24   MF-2048, unrated, 1600 bps
@@ -478,7 +533,10 @@ POST /v1/invoices                              202, and queues a real deployBond
 GET  /v1/invoices?sellerId=…                   the book
 GET  /v1/invoices/:id
 POST /v1/invoices/:id/confirmation-request
-POST /v1/invoices/:id/mature
+POST /v1/invoices/:id/list                     the seller offers it: confirmed → listed
+POST /v1/invoices/:id/delist                   listed → confirmed; refused while a trade is armed
+POST /v1/invoices/:id/mature                   bodyless until it is past due, then `paidAt`
+POST /v1/invoices/:id/default                  the debtor never paid; the rating mark is permanent
 GET  /v1/invoices/:id/quote                    the price that is already there
 GET  /v1/confirm/:token                        public, token-authenticated
 POST /v1/confirm/:token
@@ -486,7 +544,7 @@ POST /v1/mandates
 GET  /v1/mandates?buyerId=…                    carries `escrow` and `operator` per bid
 GET  /v1/mandates/exposure?buyerId=…
 POST /v1/mandates/:id/fund                     verified against the Arc vault
-POST /v1/mandates/:id/withdraw
+POST /v1/mandates/:id/withdraw                 409 or 503 problem+json on a refusal, nothing moved
 GET  /v1/mandates/:id/exposure
 POST /v1/trades                                settles outright on a funded mandate (200);
                                                otherwise arms first (402), settles on the second

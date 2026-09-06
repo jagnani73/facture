@@ -976,15 +976,20 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
    the vault's lower-bound invariant survives the smaller book only in that direction.
 4. **`@facture/shared/state` is an entire unused module** — both machines, every guard.
    Status changes go through unguarded `updateInvoice({ status })`, so nothing validates a
-   lifecycle transition and `IllegalTransition` cannot be constructed at runtime. **It has a
-   first production caller as of 2026-09-04** — `services/settlement.ts` guards
-   `sold -> defaulted` with `transitionInvoice`. **That is a beginning, not a closure:** the
-   general status-change path still bypasses the machine entirely, so one edge of the
-   lifecycle is validated and the rest are not.
+   lifecycle transition and `IllegalTransition` cannot be constructed at runtime. **It has
+   production callers as of 2026-09-04** — `services/settlement.ts` guards `sold -> defaulted`
+   in `recordDefault`, and `settleAtMaturity` now guards its own hop to `matured` the same way,
+   which is what stopped a `disputed` invoice maturing with a 200. **That is a beginning, not a
+   closure:** the edge this venue performs most often is still an unguarded write — both
+   settlement paths set `status: 'sold'` straight through `updateInvoice`, and the arm-time
+   listing check is what stands in for the machine there.
 5. **`listed` is an unreachable invoice status.** Only the seed writes it, so the secondary
    market the README's argument rests on has a table row and no code — which
-   `settlement.ts` already concedes in a comment. It stays unreachable on purpose; see
-   _Declined: the secondary market_ below for the wall it hits.
+   `settlement.ts` already concedes in a comment. **Closed 2026-09-04:**
+   `POST /v1/invoices/:id/list` writes it and arming refuses anything else, so the status is
+   reachable and load-bearing. What stays unbuilt is the other edge — `sold -> listed`, the
+   relist, which is the half the README's secondary-market argument actually rests on. See
+   _Declined: the secondary market_ below for the wall that one hits.
 6. **`ArcEscrow.buyerOf` is called by nothing, not even a test.** It is the one check that
    would have caught the invented-address problem `0004` fixed by hand. **Closed
    2026-09-04:** it has callers, and direct test coverage.
@@ -997,10 +1002,14 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
    is what makes its refusal real.
 9. **`settlement_outcomes` is a write-only table.** Its header calls it the append-only fact
    behind the `debtors` accumulator, and the counters are incremented in place and cannot be
-   rebuilt, because nothing can read the facts. **Partly closed 2026-09-04:**
+   rebuilt, because nothing can read the facts. **The write-only half is closed 2026-09-04.**
    `RecordOutcomeResult` carries the outcome the ledger actually holds, read back inside the
    transaction that lost the insert — without which a default landing on an already-recorded
-   payment is invisible. Partly, because the counters still cannot be rebuilt from the facts.
+   payment is invisible — and `Store.getOutcome` is a real reader on the live path: it is what
+   tells a first maturity from a replay, and the past-due refusal turns on it. **Still partly,
+   because the counters cannot be rebuilt from the facts.** Nothing reads the table in
+   aggregate, and the seeded book is the proof that this matters — 82 counted events, three
+   recorded ones.
 10. **`invoices.regulation_type` never reaches the proof screen.** `api-source.ts` hardcodes
     `regulation: null`, so the Reg S declaration renders only from fixtures.
 
@@ -1011,11 +1020,10 @@ contract" — it is not in the ABI and never read**; the 24-hour figure is prose
 hardcoded constant.
 
 The lesson stands and is now quantified: **nineteen mechanisms in this repo had a definition,
-documentation, and no caller.** Six of them have a caller as of 2026-09-04 — four outright
-(1, 2, 3 and 6) and two only partly (4 and 9, where the caller exists and the claim beside it
-still does not hold) — so the count is **thirteen**. Of this list, 5, 7, 8 and 10 stand
-untouched, and 5 is now declined rather than pending. `reclaimPayout` stands from the earlier
-nine, deliberately.
+documentation, and no caller.** Seven of them have a caller as of 2026-09-04 — five outright
+(1, 2, 3, 5 and 6) and two only partly (4 and 9, where the caller exists and the claim beside
+it still does not hold) — so the count is **twelve**. Of this list, 7, 8 and 10 stand
+untouched. `reclaimPayout` stands from the earlier nine, deliberately.
 Look for the caller before believing the comment — including comments written in this file.
 
 ### Every status write, mapped — the machines and the code disagree
@@ -1080,6 +1088,81 @@ catch the code being wrong.
 posted, and this does not undo that. Seeded rows are inserted `active` directly, so the walk
 never runs for them. It stops the next one, which is the position already taken when
 `ARC_MANDATE_VAULT_ADDRESS` was first wired.
+
+### The adversarial review, and a guard that was only accidentally safe
+
+**Six confirmed defects against the two commits above, all fixed 2026-09-04.** Backend 391 → 416
+tests. They were fixed in one commit because they share the store interface, and the first of them
+could have stranded a buyer's real USDC permanently.
+
+- **A failed release could strand the buyer's capital forever.** `withdrawFromMandate` marked a
+  mandate `withdrawn` the moment its book hit zero, `fundMandate` refuses a withdrawn mandate, and
+  `executeRelease` is reachable only from the withdraw route — so any outcome short of a completed
+  release left the USDC in the vault under `keccak256(uuid)` with nothing in this repo able to move
+  it. A replacement mandate is a new UUID and a new bucket. **A test had pinned that state and
+  called it recoverable.** The route is now **ask, book, chain, close**: every refusal is a view
+  call and happens before the book moves, so a buyer who cannot withdraw keeps their capacity
+  instead of losing it. Closing became a separate act, and an unknown outcome — a write that
+  failed, a receipt that never arrived — leaves the mandate open at a zero balance, because
+  funding it again is the only route back into the vault and `withdrawn` was what closed that
+  route.
+- **The path was reached by ordinary use, not by an outage.** `executePayout` debits the vault on
+  every Arc-rail trade and nothing decremented `funded_minor`, so after one settle-and-mature the
+  book claimed the whole capital while the vault was short by the proceeds — and the next
+  withdrawal was refused as `insufficient`, blaming a deposit that had been fine. Maturity now
+  retires the commitment on the Arc rail and releases it plainly on x402, the distinction being
+  that the buyer's own HBAR paid for one and the escrowed capital paid for the other. **Not at
+  settlement:** while a trade is armed the allocation already holds the proceeds out of
+  unallocated, so decrementing the book then would count the same money twice.
+
+**The shape is the reason to write this down. `withdrawn` was harmless for exactly as long as
+withdrawal moved nothing but a SQLite row.** Wiring `executeRelease` turned a terminal status into
+a way of losing money without changing anything about the status. It is the Arc rail's double-spend
+and the delist guard again: **a guard that is load-bearing only because some other constraint
+happens to hold, with nothing in the guard naming the constraint.** Wiring the mechanism it was
+quietly relying on is what makes the hole reachable.
+
+The other five:
+
+- **Withdrawing in sub-unit slices bled the escrow.** The release quantity took `floor()` per
+  call, so at 1 ppm any withdrawal under 100 cents released nothing while the book decremented in
+  full — five 99-cent withdrawals took a 500-cent book to 5 with the vault keeping everything. It
+  is `requiredFor(F) − requiredFor(F − w)` now, which telescopes. The old lemma stays in the
+  comment as the explanation of why the invariant held on every single call while the capital
+  drained away across them: **measuring the wrong thing, not rounding it wrongly.**
+- **Maturity lost its idempotency for a past-due receivable.** The new past-due refusal ran before
+  the ledger was read, so a pure replay was 409ed — breaking the property recorded above as
+  exercised four times on MF-2046. It reads the ledger first now and declines to guess only when a
+  settlement is actually being recorded. **Deliberately not keyed on status:** the seed writes
+  `matured` invoices with no outcome rows behind them, so status would have waved a first write
+  past the guard.
+- **Two receipts contradicted themselves on replay.** `paidAt` was echoed from the request body
+  beside an outcome read from the ledger, so a replay could report `on_time` next to a date that
+  would have produced `late`; and `declaredAt` on a replayed default reported the replay time.
+  Both come from the row that won now.
+- **A default freed the debtor concentration it had just lost money on.** `defaulted` sat in the
+  closed-status list, so the per-debtor cap reopened on the exact customer that failed to pay
+  while `allocatedMinor` correctly stayed consumed — two figures describing different amounts of
+  the same money. The list is `CAPITAL_RETURNED_STATUSES` now and holds only `matured`.
+- **`settleAtMaturity` bypassed the machine its sibling treats as authority.** A `disputed`
+  invoice matured with a 200, an edge the table does not contain. Guarded, after the never-settled
+  check so that refusal keeps its better sentence.
+
+Also corrected, and worth knowing wherever an address is checked: **viem's strict `isAddress`
+returns true for any all-lowercase 40-hex string** and compares a checksum only on mixed case. The
+seeded invented addresses fail it by accident of how they were typed, and the real one takes the
+unchecked path. The comment says what it does and does not establish now, and has stopped calling
+itself a gate.
+
+**Left standing, because it is a root cause rather than a defect: `db/seed.ts` writes terminal
+invoice statuses and debtor counters with no `settlement_outcomes` rows behind them.** `seed.ts:565`
+sets MF-2031 to `defaulted`, `seed.ts:289` gives Orrin Metalworks `defaulted: 1`, and the seed
+writes no outcome row anywhere. The live database bears it out: the debtor accumulator counts 82
+settlement events across ten customers, and the ledger holds three rows, all of them from real
+maturities. So the shipped demo book's ledger and its rating accumulator already disagree. The new
+guards are robust against it — pressing default on MF-2031 is refused as never settled, since the
+seed gives it no trade either — but the seed still ships the inconsistency, and it is precisely
+what finding 9 in the sweep above means by counters that cannot be rebuilt.
 
 ### Declined: the secondary market, and the wall it hits
 
