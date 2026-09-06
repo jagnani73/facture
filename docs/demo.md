@@ -30,7 +30,7 @@ Two processes, both already running in the sessions this was written in:
 
 The masthead says **Demo book · Sign in**, and that is the whole of the account model.
 
-- **Signed out** you are looking at the shared demo book: a seeded seller with 34 invoices,
+- **Signed out** you are looking at the shared demo book: a seeded seller with 35 invoices,
   settled trades and matured receivables in it. Nothing to create, nothing to fund, and it is
   labelled rather than implied.
 - **Sign in** with an email address and Privy makes a wallet. The venue reads the email out of a
@@ -63,7 +63,7 @@ curl http://localhost:8787/health
 
 ### What is real and what is seeded
 
-The book holds 34 invoices. **Nine of them have an instrument that exists on Hedera:**
+The book holds 35 invoices. **Ten of them have an instrument that exists on Hedera:**
 
 | invoice | security       | what it is                                                     |
 | ------- | -------------- | -------------------------------------------------------------- |
@@ -75,7 +75,8 @@ The book holds 34 invoices. **Nine of them have an instrument that exists on Hed
 | MF-2070 | `0.0.10363143` | its own bond. Second Arc sale, and the only one that matured.  |
 | MF-2071 | `0.0.10363355` | its own bond, sold on x402. A-rated, due December. `sold`.     |
 | MF-2072 | `0.0.10363420` | its own bond, sold on x402. Unrated customer. `sold`.          |
-| MF-2080 | `0.0.10391953` | its own bond. **`listed` and unsold** — the one to sell.       |
+| MF-2080 | `0.0.10391953` | its own bond. Sold, claimed and matured in one sitting.        |
+| MF-2081 | `0.0.10392519` | its own bond. **`listed` and unsold** — the one to sell.       |
 
 The other 25 carry security ids in the `0.0.67xxxxx` range that were never deployed —
 `https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.6751909` answers `Not found`. They
@@ -258,29 +259,35 @@ buyer's capital is already posted.
 Both bodies carry `rail: { chosen, reason }`, so the answer to "why this one" is on the wire rather
 than inferred. `cashLeg.rail` says the same thing on the receipt, and the proof view prints it.
 
-**Sell renders only on an invoice that has been offered.** MF-2038 and MF-2080 are the rows already
+**Sell renders only on an invoice that has been offered.** MF-2038 and MF-2081 are the rows already
 on the book, so anything else needs Move 1's offer step first. Arming re-reads the status rather
 than trusting the screen, so an invoice taken off the book between the quote and the Sell click is
 refused rather than sold.
 
-**Sell MF-2080. It is the one invoice in the book that is unsold, has a real bond behind it, and
+**Sell MF-2081. It is the one invoice in the book that is unsold, has a real bond behind it, and
 routes to the Arc rail.**
 
-`http://localhost:3000/book/e04e8e68-3cbd-4407-b4d7-6c2be7f31d4c` · **$19,813.69 at 850 bps over
+`http://localhost:3000/book/a942c6c9-c141-4041-9a1a-7d4331b5c5bd` · **$19,813.69 at 850 bps over
 40 days**, matched by Harrow Point's escrowed mandate. Clicking Sell returns `200` with the trade
 already settled, opens a `DvpEscrow` lock the seller can then claim with their own wallet, and
 leaves a receivable that can be matured. It is the only path through the product that exercises all
 of it.
+
+**MF-2080 is the same invoice, already taken through all of it** — sold out of the escrow, claimed
+by the seller with their own key for 0.017943 USDC net of gas, matured `on_time`, and paid at par
+by the collection account. If a judge would rather see the finished article than click through it,
+that is the one: `/proof/6ee70fd1-30a4-49fd-9dc0-3c1100c4aa79`. Its settlement response also
+carries the mandate book's own verdict, `1981370` against the venue's `1981369`.
 
 Every _seeded_ row still routes to x402, and it is worth saying that out loud rather than letting
 someone find it by clicking. The escrowed mandate quotes 850 bps and every invoice in Move 2 is
 taken by a tighter Ashgrove bid that is not escrowed; the seeded rows that a B rating would hand to
 Harrow Point all carry a never-deployed `0.0.67xxxxx` security id, so they price and settle nothing.
 
-MF-2080 was added to close that gap, on 2026-09-06: a $20,000 receivable on a B-rated customer,
-issued as `0.0.10391953`, confirmed by its debtor, prepared, and left listed and unsold. The full
-record, including why that customer and what each step proved, is in
-[deployments.md](./deployments.md). MF-2061 and MF-2070 are the two the rail has already carried.
+MF-2080 and MF-2081 were added to close that gap, on 2026-09-06: $20,000 receivables on a B-rated
+customer, whose rating excludes the two tighter A-floor bids so the escrowed mandate wins on merit.
+The full record, including why that customer and what each step proved, is in
+[deployments.md](./deployments.md). MF-2061 and MF-2070 are the two the rail carried before them.
 
 On MF-2051 both legs are on chain and both can be checked without a browser:
 

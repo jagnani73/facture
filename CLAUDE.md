@@ -1345,8 +1345,8 @@ Modelled on the `gantry` repo's `demo-reset.mjs` — numbered steps matching the
 relayer reported **first** because every step under it spends what it holds.
 
 - **It does not touch `facture.db`, and must not.** Provisioning and seeding are separate
-  there and separate here: the book is 33 invoices, 38 trades of which 24 settled, six recorded
-  settlement outcomes and eight instruments that exist on Hedera, and `db:seed` remains the
+  there and separate here: the book is 35 invoices, 25 settled trades, seven recorded settlement
+  outcomes and ten instruments that exist on Hedera, and `db:seed` remains the
   empty-database-only path.
 - **The attester is the relayer.** It holds the float on Arc and tops up the seller and the
   buyer's wallet toward target balances. It cannot refill itself — Arc testnet has no faucet
@@ -1548,6 +1548,38 @@ registry wiring and were never listed on it.
 
 **`tryMatch`, `confirmSettlement`, `confirmMaturity` and `authoriseRelease` stay unwired**, and
 the reason is the next section.
+
+### The whole path has run against one receivable
+
+**MF-2080, 2026-09-06.** Created, issued as `0.0.10391953` on the first attempt, confirmed by its
+debtor **through the link the venue minted**, prepared, listed, quoted at $19,813.69, sold out of
+the Arc escrow with no challenge, claimed by the seller with their own key, matured `on_time`, and
+paid at par by the collection account. Every step in one sitting, on one invoice. The record is in
+[docs/deployments.md](./docs/deployments.md).
+
+Three things it established that nothing else had:
+
+- **The mandate book's verdict rode on a live settlement response** —
+  `{"checked":true,"ok":true,"priceMinor":"1981370"}` beside the venue's own 1,981,369. The
+  floor-versus-ceil divergence, published rather than reconciled, on a receivable neither side had
+  seen before.
+- **Maturity retires the Arc commitment and the buyer re-commits.** `funded_minor` fell 3,757,466
+  to 1,776,097, and re-funding needed no new deposit because the USDC was still in the vault. The
+  book answered `already-credited`: `depositRefFor` keys on the mandate and its cumulative total,
+  and that total had been credited before. The replay guard doing its job in ordinary business
+  rather than in a test.
+- **The customer's rating did not move.** Eight settlements on time and one late still reads `B`,
+  which is what keeps the two tighter A-floor bids out and lets the escrowed mandate win at 850 on
+  merit. Ratings are earned slowly, and that is visible rather than asserted.
+
+**Selecting the customer is what makes this demonstrable at all.** A B rating excludes the two
+A-floor mandates, which are also the two tightest bids, so the one mandate with capital actually
+posted on Arc wins without anything being removed. Pick an A-rated customer and the venue is
+perfectly correct and routes to x402, and the escrow, the seller's claim and the maturity payout
+are all untouched.
+
+MF-2081 (`0.0.10392519`) is the same invoice made again and left listed, so the demo still has
+something to sell.
 
 ### Declined: the Hedera delivery escrow, and the wall it hits
 

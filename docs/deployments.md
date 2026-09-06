@@ -1009,13 +1009,13 @@ returns 392,094 and the venue quotes 392,093: the book **floors** the discount a
 `@facture/shared` **ceils** it, each deliberately, in opposite parties' favour. So the venue
 compares the reason code and publishes both prices, rather than treating a mismatch as a refusal.
 
-## A receivable that has not been sold yet — MF-2080, 2026-09-06
+## A receivable taken through every step — MF-2080, 2026-09-06
 
-Every other instrument in this document is spent. All eight receivables with a real bond behind
-them are `sold` or `matured`, and the five `confirmed` invoices left in the book point at
+Every other instrument in this document was spent. All eight receivables with a real bond behind
+them were `sold` or `matured`, and the five `confirmed` invoices left in the book point at
 `0.0.67…` fixtures that were never deployed — so the venue could be shown pricing and refusing,
-and could not be shown selling. This one exists to close that gap: it is listed, it is priced, and
-nothing has taken it.
+and could not be shown selling. This one was made to close that gap, and then went the whole way:
+listed, priced, sold out of the escrow, claimed by the seller, matured, and paid at par.
 
 |            |                                                                    |
 | ---------- | ------------------------------------------------------------------ |
@@ -1075,3 +1075,64 @@ venue compares the reason code rather than the number.
 with $5,035.62 left against a $40,000 debtor cap; the book takes it. `_debtorExposure` is written
 by `tryMatch`, which is not wired, so the book tests every concentration limit against zero
 recorded exposure. Its rating, tenor and registry verdicts are the ones worth reading.
+
+### It was then sold, claimed and matured, all of it in one sitting
+
+MF-2080 was created to be the invoice a demo could sell. It was sold the same afternoon instead,
+because a receivable that has been through the whole path is worth more as evidence than one that
+is merely ready to go — and another can be made in ten minutes, which is what happened. **This is
+the first time every step has run against one receivable end to end.**
+
+| step         | evidence                                                                                       |
+| ------------ | ---------------------------------------------------------------------------------------------- |
+| trade        | `6ee70fd1-30a4-49fd-9dc0-3c1100c4aa79`, `200` already settled, no challenge                    |
+| rail         | `arc-vault` — _"the buyer escrowed this capital before the invoice existed"_                   |
+| asset leg    | `0.0.10311549@1788698970.002096723`, hold `1`, 2,000,000 units, `CONTRACTCALL SUCCESS`         |
+| cash leg     | `0x395b9dfffc32aaab01fdf5418edff51fb3651ad90cee03f7ceeb9f53f821bfcf`, 19,813 USDC minor        |
+| escrow lock  | `0x22423d89dc75d5315ea012b4fd9f968a8cec59257f8d559f1143a01192f73266`                           |
+| seller claim | `0x314808002869fb0bac1756394d24c1004c4ba427bc5e2624b4256149e185bb5b`, lock `Locked -> Claimed` |
+| HCS match    | topic `0.0.10342152`, sequence **59**                                                          |
+| maturity     | schedule `0.0.10392501`, outcome `on_time`                                                     |
+| payment      | collection `0.0.10331559` -> holder `0.0.10314099`, **2,000,000 tinybars, at par**             |
+
+**The mandate book's verdict was on the settlement response**, which is the first time that has
+happened on a live trade: `{"checked":true,"ok":true,"priceMinor":"1981370","tenorDays":40}`
+beside the venue's own 1,981,369. One minor unit, floor against ceil, published rather than
+reconciled.
+
+**The seller claimed with their own key and the money moved.** `claim` is beneficiary-only, so
+this is the one transaction a person signs in the whole product. Balance 0.512972 -> 0.530915
+USDC: the 0.019813 payout less about 0.00187 of gas, because gas on Arc is USDC.
+
+**The payout schedule was created unsigned**, which is the design rather than a hitch. A
+`ScheduleCreateTransaction` executes the moment its signatures are present, and the operator signs
+the create — so a payout drawn on the operator would fire instantly and report the debtor as having
+paid at the instant the receivable matured. It waited for `0.0.10331559`, and
+`pnpm sign:payout 0.0.10392501 --sign` is what made it a payment.
+
+**Maturity retired the commitment rather than releasing it**, which is correct for the Arc rail:
+the escrowed capital paid for this trade, so `funded_minor` fell 3,757,466 -> 1,776,097 and the
+buyer re-committed afterwards. Re-funding needed no new deposit — the USDC was still in the vault,
+4.952918 against 0.037575 required — and the book answered `already-credited`, because
+`depositRefFor` keys on the mandate and its cumulative total and this one had been credited at
+exactly that figure before. The replay guard refusing to count the same commitment twice, in the
+ordinary course of business rather than in a test.
+
+## The one left listed — MF-2081, 2026-09-06
+
+Made immediately afterwards to the same shape, and left alone.
+
+|            |                                                                         |
+| ---------- | ----------------------------------------------------------------------- |
+| invoice    | MF-2081, `a942c6c9-c141-4041-9a1a-7d4331b5c5bd`, $20,000 face           |
+| customer   | Petra Foods Group, rated **B** (8 on time, 1 late)                      |
+| due        | 2026-10-16, 40 days                                                     |
+| instrument | `0.0.10392519` / `0xddebf2b0f52768fca537ccd2a60bede8afab9163`           |
+| ISIN       | `US5PA6E0L8A7`, Reg S                                                   |
+| status     | `listed` — offered, priced, unsold                                      |
+| quote      | **$19,813.69 at 850 bps over 40 days**, `mandatesBarredByInstrument: 0` |
+| matched by | `8b879d02…`, the escrowed mandate, so it settles on Arc                 |
+
+The customer's rating did not move when MF-2080 matured — 8 on time and 1 late still reads `B` —
+which is what keeps the two A-floor mandates, and their tighter 800 and 675 bps bids, out of the
+running. The escrowed mandate wins on merit at 850.

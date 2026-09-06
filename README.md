@@ -177,17 +177,20 @@ already done &mdash; **no challenge and no signature, because a funded mandate a
 anything meeting its terms. That is what "firm bid" means.** An unfunded bid gets the x402 exchange
 instead. Both answers carry the rail and the reason, so nothing is inferred.
 
-**Eight receivables have sold on chain, and six of them took their payment over x402 on
+**Nine receivables have sold on chain, and six of them took their payment over x402 on
 `hedera:testnet`**, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
-The other two are the paragraph below. The Hedera book's `cashLeg()` returns Arc's chain id and the
+The other three are the paragraph below. The Hedera book's `cashLeg()` returns Arc's chain id and the
 vault address as immutables recorded at construction, so the cross-chain link cannot be redirected.
 
-**Two sales have now been paid in USDC on Arc.** `MandateVault` held 5 USDC against one mandate,
+**Three sales have now been paid in USDC on Arc.** `MandateVault` held 5 USDC against one mandate,
 deposited by that buyer's own wallet; MF-2061 drew 0.014843 of it, the payout locked in
 `DvpEscrow`, and the seller claimed it with their own key &mdash; 0.5 &rarr; 0.512972 USDC, the
 difference being the gas they paid, because `claim` checks the caller and the venue cannot collect
 for them. MF-2070 drew another 0.012326 and matured; its lock still reads `locked`, because the
-seller has not claimed it and `reclaimPayout` is not wired. The venue still refuses to count a
+seller has not claimed it and `reclaimPayout` is not wired. **MF-2080 went the whole way in one
+sitting** &mdash; sold out of the escrow, claimed for 0.017943 USDC net of gas, matured `on_time`,
+and paid at par by the collection account, with the mandate book's own verdict on the settlement
+response beside the venue's. The venue still refuses to count a
 mandate as holding more than the vault does; `balanceOf` is a view, so checking costs nothing.
 
 One consequence worth stating, because it surprised us: **the seller claims their own payout.**
