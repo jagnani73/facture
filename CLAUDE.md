@@ -62,9 +62,12 @@ repo in `facture-prep/BLOCKERS.md`.
    Continuity Track" pointed the other way. The copy is written for one kind of entrant and
    the eligibility is wider than the copy; Circle is the authority on that and has answered.
 
-   One thing that was true before the answer still is: **Arc's public mainnet lands Sept 16,
-   after submissions close**, so nothing in this project may depend on it — whatever "push to
-   mainnet" is judged on, it cannot be a mainnet transaction made before the deadline.
+   **The Sept-30 clause is resolved, 2026-09-04, by reading the track's own requirements
+   rather than reasoning about the date.** It says projects must be _"deployed **or
+   deployment-ready** on Arc mainnet by September 30"_, and the track is called "Launch on Arc
+   **Testnet** & Push to Mainnet". Testnet readiness is what gets judged. Arc's public mainnet
+   still lands Sept 16, after submissions close, so nothing here may depend on it — that rule
+   has not moved. What changed is that nothing needs to.
 
    The other is no longer true. **USDC has crossed (2026-09-03):** `MandateVault` holds 5 USDC
    against Harrow Point's mandate, deposited by the buyer's own wallet, and funding is verified
@@ -661,14 +664,27 @@ receipt and in the proof view, never inferred** — a branch that silently picks
 means the old path is what gets demoed, which is now a $6,000 problem rather than an
 inelegance.
 
-**Prize amounts, corrected against the page.** Arc's mainnet track is **$3,500**, not the
-$5,000 recorded above; Arc totals $10,000 across four tracks, and *"Best DeFi/Onchain Finance
-Application"* asks for *"conditional payments, onchain automation or multi-step settlement"*,
-which describes vault → escrow → hashlock almost verbatim. **Privy is $5,000 across two
-tracks Facture fits unusually well** — both require _"at least one Privy control (policies,
-signers, key quorums, intents)"_, and email plus an address is not one, so that is the
-cheapest unclaimed money on the board. **Tokenization of Anything ($6,000) requires verified
-contracts on HashScan** — unconfirmed, and worth checking. Every track requires a public repo.
+**Prize amounts, read off the pages 2026-09-04. Pools are not payouts.** Hedera's two tracks
+are $6,000 each, and each one reads *"up to 3 teams will receive $2,000"*, so a win is
+**$2,000**. Arc's $10,000 is five entries rather than four: **Launch on Arc Testnet & Push to
+Mainnet** ($3,500 pool, $2,500 first and $1,000 second), **Best DeFi/Onchain Finance**
+($1,667), **Best Agentic Economy with Circle Agent Stack** ($1,667), and two Continuity-only
+entries this project cannot enter. Privy is **two $2,500 tracks**. Six tracks are eligible and
+the realistic ceiling is about **$14,800**, not the $20,500 you get by reading sponsor totals
+as payouts. _"Best DeFi/Onchain Finance Application"_ asks for _"conditional payments, onchain
+automation or multi-step settlement"_, which describes vault → escrow → hashlock almost
+verbatim. **Tokenization of Anything requires verified contracts on HashScan** — now confirmed
+done, see below. Every track requires a public repo.
+
+**The Privy control claim was overstated, and this corrects it.** Only the B2B track requires
+_"at least one Privy control, such as policies, signers, key quorums, or intents"_; Best
+financial flow does not. This build uses `useSendTransaction`, `useWallets` and identity-token
+verification. No policy, no key quorum, no intent, and no session or delegated signer. An
+embedded wallet signing its own transaction is the weakest reading of "signers" available, and
+this file already says that email plus an address is not a control. **Best financial flow is
+satisfied. Best B2B is not, and $2,500 turns on it.** Session signers would fit the
+architecture, and would also mean a seller gets paid without being online. That is a product
+decision, not plumbing.
 
 ### Resolved: one settlement conversion, in one place, with a direction
 
@@ -997,9 +1013,19 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
    `executeContract`, every wallet-set method. `AGENT_WALLET_SET_ID` is parsed and read by
    nothing. `executeContract` is also the only way the agent could ever deposit into the
    vault, which is the other half of (1).
+   **Partly closed 2026-09-04.** `executeContract` and `AGENT_WALLET_SET_ID` have callers:
+   `src/vault.ts` posts the agent's own Circle-wallet USDC into `MandateVault`, and
+   `pnpm --filter @facture/agent fund` drives it, dry by default with `--execute` as the only
+   authorisation. `transferUsdc` still has no caller and should not get one here — a plain
+   transfer to the vault address is credited to no `mandateId` and could never be released, so
+   the fake wallet in `test/vault.test.ts` makes calling it fatal. The wallet-set provisioning
+   methods stay uncalled, being a one-off done outside this process.
 8. **`InvoiceRegistry.lookup` is never called.** The venue publishes terms and confirmations
    to chain and never reads them back — write-only, unlike `UniquenessRegistry`, whose read
-   is what makes its refusal real.
+   is what makes its refusal real. **Closed 2026-09-04.** The proof view asks on every request
+   and publishes a `registry` block. `checked: false` keeps `listed` and `confirmed` null
+   rather than false, and the screen shows a disagreement between the chain and the venue's
+   own column instead of resolving it.
 9. **`settlement_outcomes` is a write-only table.** Its header calls it the append-only fact
    behind the `debtors` accumulator, and the counters are incremented in place and cannot be
    rebuilt, because nothing can read the facts. **The write-only half is closed 2026-09-04.**
@@ -1014,6 +1040,10 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
    every row is inside the counters beside it, and no terminal invoice is missing its row.
 10. **`invoices.regulation_type` never reaches the proof screen.** `api-source.ts` hardcodes
     `regulation: null`, so the Reg S declaration renders only from fixtures.
+    **Closed 2026-09-04.** `TradeProof.invoice.regulation` carries it, translated from the
+    column's kebab spelling to the `RegulationKey` a decoder accepts, each mapping pinned by a
+    test. The stored spellings are `reg-d-506b` and `reg-d-506c` — no hyphen before the
+    letter, which is not what you would guess from the wire names.
 
 Also dead, lower stakes: `Store.getCursor`/`setCursor` and `indexer_cursors` (residue of the
 removed indexer), `InvoiceRegistry.setRating` / `amendDueDate`, and a tail of unused helpers
@@ -1022,11 +1052,44 @@ contract" — it is not in the ABI and never read**; the 24-hour figure is prose
 hardcoded constant.
 
 The lesson stands and is now quantified: **nineteen mechanisms in this repo had a definition,
-documentation, and no caller.** Seven of them have a caller as of 2026-09-04 — five outright
-(1, 2, 3, 5 and 6) and two only partly (4 and 9, where the caller exists and the claim beside
-it still does not hold) — so the count is **twelve**. Of this list, 7, 8 and 10 stand
-untouched. `reclaimPayout` stands from the earlier nine, deliberately.
+documentation, and no caller.** Ten have a caller as of 2026-09-04 — seven outright (1, 2, 3,
+5, 6, 8 and 10) and three only partly (4, 7 and 9, where the caller exists and the claim beside
+it still does not hold) — so the count is **nine**. Nothing in the numbered list is untouched
+any more; what remains is the tail below it, plus `reclaimPayout` from the earlier nine, which
+stands deliberately.
 Look for the caller before believing the comment — including comments written in this file.
+
+### Resolved: the proof view carries the chain's own answer
+
+Two of the sweep's findings met on one screen, so they were closed together.
+
+- **The regulation is per invoice, and now says so.** `TradeProof.invoice.regulation` is
+  translated at the wire boundary from the column's kebab spelling to the `RegulationKey` a
+  decoder accepts, and a stored value outside that vocabulary publishes `null` rather than a
+  guess. The two ends disagree on purpose: the backend refuses to publish a declaration it
+  cannot spell, and the web refuses to read a key it does not know, raising `unreadable` and
+  naming the path. Folding an unknown spelling to `null` on the reading side would drop a
+  declaration that was actually made.
+- **`InvoiceRegistry.lookup` has its first caller**, which moves the debtor's confirmation off
+  a column only the venue can see. That confirmation is what justifies advancing full face
+  value with no holdback, so it is the claim on that screen most worth checking somewhere that
+  is not us.
+- **Three states per answer, never two.** `checked: false` means no registry is configured or
+  the node could not be read, and it renders as that rather than as a no. A registry blinking
+  would otherwise print "not confirmed" one line under a confirmation the venue is certain of
+  — the `/health` cursor mistake and the `ComplianceDecision.determinate` mistake, in a third
+  place.
+- **A disagreement is shown, not resolved.** If the chain and the venue's column differ, both
+  are rendered as read. Picking one would leave the stronger-looking claim standing alone.
+- **`instrumentAddress` and `securityId` are read apart now.** One slot typed as a viem
+  `Address` had been taking a Hedera native id, which was harmless only while nothing built an
+  EVM link from it.
+
+One thing was deliberately left. `wireInvoice` still publishes the same fact as
+`regulationType` in the raw kebab spelling on the invoice resource, so one fact has two names
+and two spellings across two endpoints — the split-vocabulary shape this file keeps warning
+about. Nothing in the web reads that copy. It stays because changing a published wire field
+for a cosmetic win is the trade `X402_SETTLEMENT_SCALE_PPM` already refused.
 
 ### Every status write, mapped — the machines and the code disagree
 
