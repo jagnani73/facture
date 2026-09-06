@@ -18,6 +18,7 @@ import { ApiError } from '@/lib/api/problem';
 import {
   hasUniquenessHash,
   readConfirmationPrompt,
+  readConfirmationRequested,
   readHealth,
   readInvoice,
   readInvoiceDetail,
@@ -1103,6 +1104,55 @@ describe('readConfirmationPrompt', () => {
 /* -------------------------------------------------------------------------- */
 /* Health                                                                      */
 /* -------------------------------------------------------------------------- */
+
+describe('readConfirmationRequested', () => {
+  const answered = {
+    invoice: { id: INVOICE.id },
+    confirmation: {
+      sentTo: 'ap@meridian-fabrication.test',
+      expiresAt: '2026-09-11T09:32:00.000Z',
+      link: 'http://localhost:3000/confirm/abc123',
+    },
+  };
+
+  it('reads the link the venue handed back', () => {
+    const requested = readConfirmationRequested(answered);
+
+    expect(requested.sentTo).toBe('ap@meridian-fabrication.test');
+    expect(requested.link).toBe('http://localhost:3000/confirm/abc123');
+  });
+
+  /*
+   * Production withholds the link, because a seller who can read it can confirm their own
+   * invoices. That is a real answer rather than a missing one, so it decodes to null and
+   * the screen says something different — it must never become an empty string that reads
+   * as a link nobody can see.
+   */
+  it('keeps a withheld link distinct from a broken one', () => {
+    const requested = readConfirmationRequested({
+      ...answered,
+      confirmation: { ...answered.confirmation, link: null },
+    });
+
+    expect(requested.link).toBeNull();
+    expect(requested.sentTo).toBe('ap@meridian-fabrication.test');
+  });
+
+  it('refuses a link that is not a string', () => {
+    expect(() =>
+      readConfirmationRequested({
+        ...answered,
+        confirmation: { ...answered.confirmation, link: 42 },
+      }),
+    ).toThrow(ApiError);
+  });
+
+  it('names the path when the confirmation block is missing', () => {
+    expect(() => readConfirmationRequested({ invoice: { id: INVOICE.id } })).toThrow(
+      /confirmationRequest\.confirmation/,
+    );
+  });
+});
 
 describe('readHealth', () => {
   it('reads a dependency as healthy only when it said so', () => {

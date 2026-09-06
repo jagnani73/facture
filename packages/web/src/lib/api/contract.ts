@@ -1739,6 +1739,34 @@ export interface SellerSignIn {
   created: boolean;
 }
 
+/**
+ * What the venue answers when a seller asks their customer to confirm.
+ *
+ * `link` is the confirmation URL, and it is **null in production on purpose**: there is no
+ * mail transport in this build, so outside production the venue hands the link back rather
+ * than pretending to send it, while a seller who could read it in production would be able
+ * to confirm their own invoices. Both are real answers, and the screen has to be able to
+ * tell them apart — which is why this is `string | null` and not a defaulted empty string.
+ */
+export interface ConfirmationRequested {
+  sentTo: string;
+  expiresAt: string;
+  link: string | null;
+}
+
+export function readConfirmationRequested(
+  raw: unknown,
+  path = 'confirmationRequest',
+): ConfirmationRequested {
+  const body = readObject(raw, path);
+  const confirmation = readObject(field(body, 'confirmation'), `${path}.confirmation`);
+  return {
+    sentTo: readString(field(confirmation, 'sentTo'), `${path}.confirmation.sentTo`),
+    expiresAt: readString(field(confirmation, 'expiresAt'), `${path}.confirmation.expiresAt`),
+    link: readOptionalString(field(confirmation, 'link'), `${path}.confirmation.link`),
+  };
+}
+
 export function readSeller(raw: unknown, path = 'seller'): SellerRecord {
   const body = readObject(raw, path);
   return {

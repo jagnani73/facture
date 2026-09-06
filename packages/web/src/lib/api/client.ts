@@ -15,6 +15,7 @@ import type { InvoiceStatus, MandateStatus, MinorUnits, Rating } from '@/lib/dom
 import { API_BASE_URL, API_V1 } from './config';
 import type {
   ConfirmationPrompt,
+  ConfirmationRequested,
   HealthResponse,
   InvoiceDetail,
   InvoiceListing,
@@ -31,6 +32,7 @@ import type {
 import {
   decodePaymentRequiredHeader,
   readConfirmationPrompt,
+  readConfirmationRequested,
   readHealth,
   readInvoice,
   readInvoiceDetail,
@@ -321,12 +323,19 @@ export const api = {
     );
   },
 
-  /** `POST /v1/invoices/:id/confirmation-request` — ask the customer. */
-  requestConfirmation(invoiceId: string, signal?: AbortSignal): Promise<void> {
+  /**
+   * `POST /v1/invoices/:id/confirmation-request` — ask the customer.
+   *
+   * The response was discarded here for as long as this method existed, which is why the
+   * screen could tell a seller their customer "has been sent the link" while nothing in
+   * this build sends mail at all. The venue returns the link precisely because nothing
+   * does; throwing it away was what turned an honest answer into a false one.
+   */
+  requestConfirmation(invoiceId: string, signal?: AbortSignal): Promise<ConfirmationRequested> {
     return request(
       `/invoices/${encodeURIComponent(invoiceId)}/confirmation-request`,
       { method: 'POST', what: 'asking your customer to confirm', signal, body: {} },
-      () => undefined,
+      readConfirmationRequested,
     );
   },
 

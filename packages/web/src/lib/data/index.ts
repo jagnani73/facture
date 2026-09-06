@@ -193,8 +193,22 @@ export async function requestConfirmation(invoiceId: string): Promise<Outcome> {
     };
   }
   try {
-    await api.requestConfirmation(invoiceId);
-    return { ok: true, value: undefined, note: 'Your customer has been sent the link.' };
+    const requested = await api.requestConfirmation(invoiceId);
+    /*
+     * This used to say the customer had been sent the link. Nothing in this build sends
+     * mail — the venue returns the link precisely because nothing does — so the screen was
+     * claiming a delivery that had not happened, on the one step the whole no-holdback
+     * argument rests on. The venue's own answer is reported instead, and the two cases it
+     * distinguishes are kept apart: a link in hand is not the same as a link on its way.
+     */
+    return {
+      ok: true,
+      value: undefined,
+      note:
+        requested.link === null
+          ? `The question is open for ${requested.sentTo}.`
+          : `Send this to ${requested.sentTo}: ${requested.link}`,
+    };
   } catch (error) {
     return { ok: false, reason: describeFailure(error, 'the request to your customer') };
   }
