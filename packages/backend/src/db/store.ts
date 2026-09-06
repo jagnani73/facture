@@ -41,6 +41,7 @@ import type {
   QuoteRow,
   RefusalReceiptRow,
   SellerRow,
+  SettlementOutcomeRow,
   TradeRow,
 } from './schema.js';
 
@@ -164,6 +165,16 @@ export interface RecordOutcomeResult {
    * before it moves the invoice. `settlement_outcomes` had no reader at all until this.
    */
   readonly recorded: SettlementOutcome;
+  /**
+   * When the settlement the ledger holds actually happened — the debtor's payment date for
+   * `on_time` / `late`, the moment of declaration for a `default`.
+   *
+   * From the row that WON, so on a replay it is the first call's date and not this one's.
+   * Without it a receipt reported the outcome off the ledger beside a date echoed from the
+   * request, which is how a replay came to answer `on_time` next to a `paidAt` that would
+   * have produced `late` — the one pairing the field exists to make checkable.
+   */
+  readonly occurredAt: Date;
 }
 
 export interface IssuanceJobPatch {
@@ -249,11 +260,42 @@ export interface Store {
    */
   listQuotableMandates(currency: string): Promise<MandateRow[]>;
   fundMandate(input: FundMandateInput): Promise<MandateRow>;
+  /**
+   * Take capital off the book. **It does not close the mandate**, even when the book reaches
+   * zero — see {@link Store.closeEmptiedMandate}.
+   */
   withdrawFromMandate(input: WithdrawInput): Promise<WithdrawResult>;
+  /**
+   * Close a mandate whose book is empty, permanently.
+   *
+   * Separate from the withdrawal because `withdrawn` is terminal and `fundMandate` refuses a
+   * withdrawn mandate, so closing one is what makes any capital still sitting in the Arc vault
+   * unreachable: a replacement mandate is a new UUID and therefore a new vault bucket. The
+   * caller closes only once the money's whereabouts are settled.
+   *
+   * Refuses a mandate that still has capital on the book, and answers the row unchanged when it
+   * is already closed.
+   */
+  closeEmptiedMandate(mandateId: string, at: Date): Promise<MandateRow>;
   /** Reserve against the unallocated balance. Fails if the balance moved underneath. */
   allocate(mandateId: string, amount: MinorUnits): Promise<MandateRow>;
   /** Give capacity back after an unwind or a maturity. Clamped at zero. */
   release(mandateId: string, amount: MinorUnits): Promise<MandateRow>;
+  /**
+   * Give the allocation back AND retire the committed capital that paid for it.
+   *
+   * **The Arc rail's maturity, where {@link Store.release} alone is the x402 rail's.** A trade
+   * settled out of `MandateVault` is paid with the mandate's escrowed USDC — `executePayout`
+   * debits the vault — and nothing here ever decremented `fundedMinor` for it. So after settle
+   * then mature the book stood at its full committed total while the vault was short by the
+   * proceeds, every withdrawal against it was refused as `insufficient`, and the mandate quoted
+   * capital that had already left. On the x402 rail the buyer pays in their own HBAR and the
+   * vault is untouched, so `release` is right there and this would be wrong.
+   *
+   * Both figures fall by the same amount, which leaves the unallocated balance where it was:
+   * the money did not come back to the mandate, it went to the seller.
+   */
+  retireAllocatedCapital(mandateId: string, amount: MinorUnits): Promise<MandateRow>;
   /** One aggregate for a page of mandates, never one query per mandate. */
   debtorExposure(mandateIds: readonly string[]): Promise<DebtorExposureMap>;
 
@@ -303,6 +345,18 @@ export interface Store {
   // --- ratings ------------------------------------------------------------------
   /** Idempotent per (debtor, invoice): a replayed maturity cannot tighten a rating twice. */
   recordOutcome(input: RecordOutcomeInput): Promise<RecordOutcomeResult>;
+  /**
+   * The settlement already on the ledger for one receivable, or `null` if there is none.
+   *
+   * The read half of `recordOutcome`, and the thing that distinguishes **recording a new
+   * settlement** from **reading back one already recorded**. Maturity refuses to guess an
+   * on-time/late call for a past-due receivable with no stated payment date — a refusal that
+   * is right for a first write and wrong for a replay, which decides nothing and must
+   * succeed whatever the clock says. Only the ledger can tell those two apart: the invoice's
+   * own status cannot, because a row can carry `matured` or `defaulted` with nothing behind
+   * it on the ledger, and the seeded book contains exactly that.
+   */
+  getOutcome(debtorId: string, invoiceId: string): Promise<SettlementOutcomeRow | null>;
 
   // --- issuance and indexing ----------------------------------------------------
   saveIssuanceJob(patch: IssuanceJobPatch): Promise<IssuanceJobRow>;

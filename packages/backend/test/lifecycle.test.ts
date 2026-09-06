@@ -442,7 +442,13 @@ describe('mandate status writes that are not transitions', () => {
     expect(after.status).toBe('active');
   });
 
-  it('withdraws a mandate emptied to zero, once', async () => {
+  /*
+   * Emptying and closing are two acts now, and the split is what makes a stranded release
+   * recoverable: `withdrawn` is terminal and `fundMandate` refuses it, so a mandate closed
+   * before its capital was known to have left the Arc vault could never be funded again — and
+   * funding again is the only route back to money still sitting in there.
+   */
+  it('closes a mandate emptied to zero, once', async () => {
     // Written and funded here rather than seeded, because every seeded mandate carries
     // allocations and an allocated mandate cannot be emptied — that is what "firm" means.
     const row = await h.store.insertMandate({
@@ -464,12 +470,17 @@ describe('mandate status writes that are not transitions', () => {
       firm: true,
     });
 
-    const first = await h.store.withdrawFromMandate({ mandateId: id, at: new Date() });
-    expect(first.mandate.status).toBe('withdrawn');
+    // The book alone: an emptied mandate is still open, because whether the capital behind it
+    // actually reached the buyer is not known here.
+    const emptied = await h.store.withdrawFromMandate({ mandateId: id, at: new Date() });
+    expect(emptied.mandate.fundedMinor).toBe(0n);
+    expect(emptied.mandate.status).toBe('active');
+
+    const first = await h.store.closeEmptiedMandate(id, new Date());
+    expect(first.status).toBe('withdrawn');
 
     // `withdrawn` is terminal, so re-asserting it is the one self-edge that would throw.
-    const second = await h.store.withdrawFromMandate({ mandateId: id, at: new Date() });
-    expect(second.mandate.status).toBe('withdrawn');
-    expect(second.withdrawn).toBe(0n);
+    const second = await h.store.closeEmptiedMandate(id, new Date());
+    expect(second.status).toBe('withdrawn');
   });
 });

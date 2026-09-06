@@ -605,31 +605,54 @@ describe('opening a mandate cash leg', () => {
   });
 });
 
+/** A funded mandate belonging to the one buyer with a real address. */
+async function fundedMandate(committedMinor: bigint): Promise<string> {
+  const created = await createMandate('BUY-HARROW');
+  const id = created.body.mandate.id as string;
+  /*
+   * Funded straight through the store rather than through the route: what is under test here
+   * is the release, and going via `POST /fund` would make every case depend on the funding
+   * check's own arithmetic as well.
+   */
+  await h.store.fundMandate({
+    mandateId: id,
+    amount: committedMinor,
+    escrowRef: 'escrow:test',
+    at: new Date(),
+    firm: true,
+  });
+  return id;
+}
+
+const withdraw = (id: string, amountMinor?: string) =>
+  call(h.app, 'POST', `/v1/mandates/${id}/withdraw`, {
+    body: amountMinor === undefined ? {} : { amountMinor },
+  });
+
+/**
+ * A vault that actually holds money, rather than answering a constant.
+ *
+ * Every release comes out of the balance, so a sequence of withdrawals is measured against what
+ * is really left. A fixed `depositedFor` cannot express the defect these tests are about: the
+ * book falling while the vault does not, and the two only disagreeing across several calls.
+ */
+function fundedVault(depositedUsdcMinor: bigint): {
+  vault: ArcEscrow;
+  held: () => bigint;
+} {
+  let held = depositedUsdcMinor;
+  const vault = fakeArcEscrow({
+    buyerOf: () => Promise.resolve(HARROW_ARC),
+    depositedFor: () => Promise.resolve(held),
+    executeRelease: ({ amountUsdcMinor }) => {
+      held -= amountUsdcMinor;
+      return Promise.resolve({ transactionHash: '0xreleased', authId: '0xauth' });
+    },
+  });
+  return { vault, held: () => held };
+}
+
 describe('closing a mandate cash leg', () => {
-  /** A funded mandate belonging to the one buyer with a real address. */
-  async function fundedMandate(committedMinor: bigint): Promise<string> {
-    const created = await createMandate('BUY-HARROW');
-    const id = created.body.mandate.id as string;
-    /*
-     * Funded straight through the store rather than through the route: what is under test here
-     * is the release, and going via `POST /fund` would make every case depend on the funding
-     * check's own arithmetic as well.
-     */
-    await h.store.fundMandate({
-      mandateId: id,
-      amount: committedMinor,
-      escrowRef: 'escrow:test',
-      at: new Date(),
-      firm: true,
-    });
-    return id;
-  }
-
-  const withdraw = (id: string, amountMinor?: string) =>
-    call(h.app, 'POST', `/v1/mandates/${id}/withdraw`, {
-      body: amountMinor === undefined ? {} : { amountMinor },
-    });
-
   /* The finding: the book gave the capacity back and the money never moved. */
   it('returns the USDC, converted out of the mandate own units', async () => {
     const { vault, released } = recordingVault({
@@ -648,50 +671,57 @@ describe('closing a mandate cash leg', () => {
     // number, which is the defect this conversion exists to close.
     expect(res.body.release.amountUsdcMinor).toBe('50000');
     expect(released).toEqual([{ mandateUuid: id, amountUsdcMinor: 50_000n }]);
+
+    // Nothing of this mandate's is left in the vault, so closing it strands nothing and the
+    // mandate is closed. That is the only condition under which it may be.
+    expect(res.body.release.remainingUsdcMinor).toBe('0');
+    expect(res.body.mandate.status).toBe('withdrawn');
   });
 
   /*
-   * Rounding, pinned as a literal because the direction is a decision rather than a detail.
+   * The bleed, and why the release is a difference of two requirements rather than a conversion
+   * of the withdrawal.
    *
-   * A release rounds DOWN where a backing requirement rounds up, and the pair is what keeps
-   * `vaultBalance >= requiredFor(committed)` standing over the smaller book a withdrawal
-   * leaves: `ceil(a) - floor(b) >= ceil(a - b)` for every remainder. Round the release up and
-   * a mandate quoting real capital ends up standing on an empty vault.
+   * `floor(f(w))` was taken per call, and at 1 ppm a USDC minor unit is a whole dollar of book:
+   * five 99-cent withdrawals took a 500-cent book to 5 and released nothing at all. The book
+   * gave the capacity back five times over and the vault kept every cent. `requiredFor(F) -
+   * requiredFor(F - w)` cannot be split that way — the pieces telescope, so however a buyer
+   * slices their exit the total is what the whole book required.
    */
-  it('rounds the release down, leaving the remainder as backing', async () => {
-    const { vault, released } = recordingVault({
-      buyerOf: () => Promise.resolve(HARROW_ARC),
-      depositedFor: () => Promise.resolve(needs(5_000_100n)),
-    });
+  it('cannot be bled by withdrawing in slices that scale away', async () => {
+    const { vault, held } = fundedVault(needs(500n));
     h = await createHarness({ arc: vault });
-    const id = await fundedMandate(5_000_100n);
+    const id = await fundedMandate(500n);
 
-    // One cent past $50,000.00, which scales to 50,000.01 USDC minor units.
-    await withdraw(id, '5000001');
+    // 99 cents off a $5.00 book does not lower what the vault must hold, so there is nothing to
+    // return — and the book is no longer decremented for it.
+    const refused = await withdraw(id, '99');
+    expect(refused.status).toBe(409);
+    expect(refused.body.detail).toContain('does not lower what the vault must hold');
 
-    expect(released).toEqual([{ mandateUuid: id, amountUsdcMinor: 50_000n }]);
-    // The same amount as a backing requirement rounds the other way, and must keep doing so.
-    expect(needs(5_000_001n)).toBe(50_001n);
+    const untouched = await h.store.getMandate(id);
+    expect(untouched?.fundedMinor).toBe(500n);
+    expect(held()).toBe(5n);
+
+    // Sliced at a size that does move the requirement, the pieces sum to exactly what the whole
+    // book required: the vault ends empty and the buyer has every cent of it.
+    for (const slice of ['150', '150', '150', '50']) {
+      expect((await withdraw(id, slice)).status).toBe(200);
+    }
+    expect(held()).toBe(0n);
+    expect((await h.store.getMandate(id))?.status).toBe('withdrawn');
   });
 
-  /* Below a whole USDC minor unit there is nothing to move, and `executeRelease` reverts on it. */
-  it('sends nothing when the withdrawal scales below one USDC minor unit', async () => {
-    const { vault, released } = recordingVault({
-      buyerOf: () => Promise.resolve(HARROW_ARC),
-      depositedFor: () => Promise.resolve(1_000n),
-    });
-    h = await createHarness({ arc: vault });
-    const id = await fundedMandate(5_000_000n);
-
-    const res = await withdraw(id, '99');
-
-    expect(res.body.release.state).toBe('dust');
-    expect(res.body.release.amountUsdcMinor).toBe('0');
-    expect(released).toEqual([]);
-  });
-
-  /* Read before you write: the vault would revert, and a doomed transaction costs gas to be told. */
-  it('does not send a release the vault cannot cover', async () => {
+  /*
+   * **The strand, and the first half of the fix: a refusal costs the request, never the book.**
+   *
+   * `withdrawFromMandate` empties the book and a mandate emptied to zero used to be `withdrawn`
+   * on the spot — terminal, and `fundMandate` refuses a withdrawn mandate. So every answer here
+   * other than `released` took the capacity away and left the USDC in the vault under
+   * `keccak256(uuid)` with nothing in this repo able to move it again: a replacement mandate is
+   * a new UUID and therefore a new vault bucket.
+   */
+  it('refuses a release the vault cannot cover rather than taking the book with it', async () => {
     const { vault, released } = recordingVault({
       buyerOf: () => Promise.resolve(HARROW_ARC),
       depositedFor: () => Promise.resolve(needs(5_000_000n) - 1n),
@@ -701,8 +731,32 @@ describe('closing a mandate cash leg', () => {
 
     const res = await withdraw(id, '5000000');
 
-    expect(res.body.release.state).toBe('insufficient');
+    expect(res.status).toBe(409);
     expect(released).toEqual([]);
+
+    const after = await h.store.getMandate(id);
+    expect(after?.fundedMinor).toBe(5_000_000n);
+    expect(after?.status).toBe('active');
+  });
+
+  /*
+   * The message a reader acts on. A vault short of the book is not a deposit that went missing:
+   * `executePayout` spends this mandate's capital on every trade it settles, and the book only
+   * stops counting that money at maturity. Sending someone to inspect a deposit that was fine
+   * costs them hours.
+   */
+  it('says the capital was spent rather than that it never arrived', async () => {
+    const { vault } = recordingVault({
+      buyerOf: () => Promise.resolve(HARROW_ARC),
+      depositedFor: () => Promise.resolve(needs(5_000_000n) - 1n),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.body.detail).toContain('executePayout');
+    expect(res.body.detail).not.toContain('never fully arrived');
   });
 
   /*
@@ -721,22 +775,55 @@ describe('closing a mandate cash leg', () => {
 
     const res = await withdraw(id, '5000000');
 
-    expect(res.body.release.state).toBe('bound-elsewhere');
-    expect(res.body.release.buyer).toBe(INVENTED_ARC);
+    expect(res.status).toBe(409);
+    expect(res.body.detail).toContain(INVENTED_ARC);
     expect(released).toEqual([]);
+    // The binding needs an operator, and the book is the record that capital is owed.
+    expect((await h.store.getMandate(id))?.fundedMinor).toBe(5_000_000n);
   });
 
   /*
-   * The order, asserted as the invariant `IMandateVault` asks for: the attested balance must
-   * never exceed the real one, so the book decrements first and a failed release leaves USDC
-   * in the vault against a book that no longer quotes it. That is recoverable by funding
-   * again; the reverse — a mandate quoting capital that has already left — is not.
+   * An unreadable vault is the same class of answer: a balance nobody could read is not a
+   * reason to give the capacity back and hope. 503 rather than 409, because a reader can fix
+   * neither by trying harder — only by trying again.
    */
-  it('does not un-withdraw the book when the release fails', async () => {
-    const { vault } = recordingVault({
+  it('withdraws nothing when the vault cannot be read', async () => {
+    const { vault, released } = recordingVault({
+      buyerOf: () => Promise.reject(new Error('rpc down')),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.status).toBe(503);
+    expect(res.body.detail).toContain('rpc down');
+    expect(released).toEqual([]);
+    expect((await h.store.getMandate(id))?.fundedMinor).toBe(5_000_000n);
+  });
+
+  /*
+   * **The second half of the fix, and the one the ordering argument is actually about.**
+   *
+   * A receipt that never arrived is not a revert — the transaction may still mine — so the book
+   * decrementing first is right and stays. What must not follow is closing the mandate: that is
+   * the write that makes capital still sitting in the vault unreachable forever. Left open at a
+   * zero balance, the documented recovery is finally true rather than merely written down.
+   */
+  it('leaves a mandate open when nobody saw the release land, so the capital is still reachable', async () => {
+    let attempts = 0;
+    const released: bigint[] = [];
+    const vault = fakeArcEscrow({
       buyerOf: () => Promise.resolve(HARROW_ARC),
       depositedFor: () => Promise.resolve(needs(5_000_000n)),
-      executeRelease: () => Promise.reject(new Error('Arc did not confirm executeRelease in time')),
+      executeRelease: ({ amountUsdcMinor }) => {
+        attempts += 1;
+        if (attempts === 1) {
+          return Promise.reject(new Error('Arc did not confirm executeRelease in time'));
+        }
+        released.push(amountUsdcMinor);
+        return Promise.resolve({ transactionHash: '0xreleased', authId: '0xauth' });
+      },
     });
     h = await createHarness({ arc: vault });
     const id = await fundedMandate(5_000_000n);
@@ -748,9 +835,67 @@ describe('closing a mandate cash leg', () => {
     expect(res.body.release.state).toBe('unavailable');
     // A timeout is not a revert, and the message must not claim nothing moved.
     expect(res.body.release.detail).toContain('did not confirm');
+    // Unknown, and stated as unknown rather than as zero — which is what stops the close.
+    expect(res.body.release.remainingUsdcMinor).toBeNull();
 
     const after = await h.store.getMandate(id);
     expect(after?.fundedMinor).toBe(0n);
+    expect(after?.status).toBe('active');
+
+    // The route back, which a `withdrawn` mandate refuses outright: fund it again and the
+    // capital that never left can be withdrawn again.
+    await h.store.fundMandate({
+      mandateId: id,
+      amount: 5_000_000n,
+      escrowRef: 'escrow:retry',
+      at: new Date(),
+      firm: true,
+    });
+    const second = await withdraw(id, '5000000');
+
+    expect(second.body.release.state).toBe('released');
+    expect(released).toEqual([50_000n]);
+  });
+
+  /*
+   * A book entry against capital that never arrived is the one refusal that would strand the
+   * BOOK instead of the money, so it is not one. The vault holds nothing — a deposit reverts
+   * `MandateNotRegistered` until the cash leg is opened — so there is nothing to leave behind,
+   * and a buyer must be able to retract a commitment nobody ever escrowed.
+   */
+  it('withdraws the book alone when the mandate has no cash leg', async () => {
+    const { vault, released } = recordingVault({
+      buyerOf: () => Promise.resolve(null),
+      depositedFor: () => Promise.resolve(0n),
+    });
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.status).toBe(200);
+    expect(res.body.release.state).toBe('unregistered');
+    expect(released).toEqual([]);
+    expect(res.body.mandate.status).toBe('withdrawn');
+  });
+
+  /*
+   * A buyer who posted more than their mandate ever claimed keeps the excess reachable. The
+   * release returns what the book required; the rest is still theirs, and closing the mandate
+   * over it would put it beyond any route in this repo.
+   */
+  it('keeps a mandate open while the vault still holds more than the book required', async () => {
+    const { vault, held } = fundedVault(needs(5_000_000n) + 7n);
+    h = await createHarness({ arc: vault });
+    const id = await fundedMandate(5_000_000n);
+
+    const res = await withdraw(id, '5000000');
+
+    expect(res.body.release.state).toBe('released');
+    expect(res.body.release.remainingUsdcMinor).toBe('7');
+    expect(held()).toBe(7n);
+    // Open at a zero balance, so funding it again is what reaches the rest.
+    expect(res.body.mandate.status).toBe('active');
   });
 
   /*
@@ -788,6 +933,8 @@ describe('closing a mandate cash leg', () => {
     expect(res.status).toBe(200);
     expect(res.body.withdrawn).toBe('5000000');
     expect(res.body.release.state).toBe('disabled');
+    // There is no vault to hold anything back, so the mandate still closes.
+    expect(res.body.mandate.status).toBe('withdrawn');
   });
 
   it('refuses to release with no vault, naming the variable', async () => {
@@ -796,6 +943,112 @@ describe('closing a mandate cash leg', () => {
     ).rejects.toMatchObject({
       detail: expect.stringContaining('ARC_MANDATE_VAULT_ADDRESS'),
     });
+  });
+});
+
+/**
+ * What the book owes the vault once a trade has actually been paid for.
+ *
+ * **`executePayout` debits the vault and nothing ever debited the book.** Maturity called
+ * `release`, which returns the allocation and touches the committed total not at all, so after
+ * settle-then-mature a mandate stood at its full committed figure while the vault was short by
+ * the proceeds. Every withdrawal against it was then refused — correctly, and for a reason that
+ * looked like a missing deposit — and the mandate quoted capital that had already left.
+ *
+ * The decrement belongs at maturity rather than at settlement: while a trade is armed the
+ * allocation already holds the proceeds out of the unallocated balance, so taking them off the
+ * committed total as well would count the same money twice.
+ */
+describe('the book after an Arc trade has paid its seller', () => {
+  /** A mandate with a trade's worth of capital committed against it, as arming leaves it. */
+  async function allocatedMandate(committedMinor: bigint, proceedsMinor: bigint): Promise<string> {
+    const id = await fundedMandate(committedMinor);
+    await h.store.allocate(id, proceedsMinor);
+    return id;
+  }
+
+  it('retires the capital that left the vault, and leaves the unallocated balance alone', async () => {
+    h = await createHarness({ arc: createDisabledArcEscrow() });
+    const id = await allocatedMandate(5_000_000n, 1_000_000n);
+
+    const after = await h.store.retireAllocatedCapital(id, 1_000_000n);
+
+    // Both totals fall together: the money did not come back to the mandate, it went to the
+    // seller. What the buyer can still withdraw is exactly what it was before maturity.
+    expect(after.fundedMinor).toBe(4_000_000n);
+    expect(after.allocatedMinor).toBe(0n);
+  });
+
+  /* A mandate with no headroom before maturity has none after: its capital is gone. */
+  it('leaves an exhausted mandate exhausted', async () => {
+    h = await createHarness({ arc: createDisabledArcEscrow() });
+    const id = await allocatedMandate(5_000_000n, 5_000_000n);
+    expect((await h.store.getMandate(id))?.status).toBe('exhausted');
+
+    const after = await h.store.retireAllocatedCapital(id, 5_000_000n);
+
+    expect(after.fundedMinor).toBe(0n);
+    expect(after.status).toBe('exhausted');
+  });
+
+  /*
+   * The defect end to end, and the fix beside it. `executePayout` has taken the proceeds out of
+   * the vault; whether the buyer can then withdraw what is left is decided entirely by which of
+   * the two calls maturity makes.
+   */
+  it('is short against the vault after `release`, and in step after `retireAllocatedCapital`', async () => {
+    const proceedsUsdcMinor = needs(1_000_000n);
+
+    const wrong = fundedVault(needs(5_000_000n) - proceedsUsdcMinor);
+    h = await createHarness({ arc: wrong.vault });
+    const stale = await allocatedMandate(5_000_000n, 1_000_000n);
+    await h.store.release(stale, 1_000_000n);
+
+    // The book counts $50,000 and the vault backs $40,000 of it, so the buyer cannot withdraw
+    // their own remaining capital at all.
+    expect((await withdraw(stale)).status).toBe(409);
+
+    const right = fundedVault(needs(5_000_000n) - proceedsUsdcMinor);
+    h = await createHarness({ arc: right.vault });
+    const reconciled = await allocatedMandate(5_000_000n, 1_000_000n);
+    await h.store.retireAllocatedCapital(reconciled, 1_000_000n);
+
+    const res = await withdraw(reconciled);
+
+    expect(res.status).toBe(200);
+    expect(res.body.withdrawn).toBe('4000000');
+    expect(res.body.release.state).toBe('released');
+    expect(right.held()).toBe(0n);
+  });
+});
+
+describe('closeEmptiedMandate', () => {
+  /*
+   * The guard under the route's own condition, and the reason closing is a separate act. A
+   * mandate closed while the book still counts capital is capital in the vault with no route
+   * back out: `withdrawn` is terminal, `fundMandate` refuses it, and a replacement mandate is a
+   * new UUID and therefore a new vault bucket.
+   */
+  it('refuses a mandate that still has capital on the book', async () => {
+    h = await createHarness({ arc: createDisabledArcEscrow() });
+    const id = await fundedMandate(5_000_000n);
+
+    await expect(h.store.closeEmptiedMandate(id, new Date())).rejects.toMatchObject({
+      code: 'conflict',
+    });
+  });
+
+  /* `withdrawn -> withdrawn` is the one self-edge the machine throws on rather than dislikes. */
+  it('is idempotent once the mandate is closed', async () => {
+    h = await createHarness({ arc: createDisabledArcEscrow() });
+    const id = await fundedMandate(5_000_000n);
+    await h.store.withdrawFromMandate({ mandateId: id, at: new Date() });
+
+    const closed = await h.store.closeEmptiedMandate(id, new Date());
+    expect(closed.status).toBe('withdrawn');
+
+    const again = await h.store.closeEmptiedMandate(id, new Date());
+    expect(again.status).toBe('withdrawn');
   });
 });
 

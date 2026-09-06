@@ -597,6 +597,12 @@ invoiceRoutes.post('/:id/delist', async (c) => {
  * the customer paid on time. Absent is allowed while the receivable is not yet past due, and
  * refused after — the answer used to be taken from the clock, which recorded a receivable
  * matured late as a customer who paid late.
+ *
+ * **That refusal applies to recording a settlement, never to reading one back.** Pressing
+ * this again on a receivable already on the settlement-outcome ledger decides nothing, so it
+ * succeeds bodyless whatever the clock says — which matters because this route is the only
+ * reader of `payoutStatus`, and asking whether the collection key has signed must not
+ * require re-stating a `paidAt` the operator may not have.
  */
 invoiceRoutes.post('/:id/mature', async (c) => {
   const { id } = readParams(c, uuidParam);
@@ -619,12 +625,17 @@ invoiceRoutes.post('/:id/mature', async (c) => {
     /** True when this receivable had already matured, so nothing moved a second time. */
     alreadyRecorded: result.alreadyRecorded,
     /**
-     * When the debtor's money landed, as the venue stated it — echoed so a reader can see
-     * what the `on_time` / `late` call was actually made against rather than assuming it
-     * was made against the clock. Null when the venue did not state one, which is only
-     * possible while the receivable is not yet past due.
+     * When the debtor's money landed, so a reader can see what the `on_time` / `late` call
+     * was actually made against rather than assuming it was made against the clock.
+     *
+     * Read off the settlement-outcome ledger, **not** echoed from the request. Those are the
+     * same date on the call that records the settlement and different dates on every call
+     * afterwards, and echoing put the ledger's `on_time` beside a replay's `paidAt` that
+     * would have produced `late` — a receipt contradicting itself in the one field that
+     * exists to make the outcome checkable. It also read null on the first call, which
+     * always had a date.
      */
-    paidAt: body.paidAt ?? null,
+    paidAt: result.paidAt,
     assetLeg: result.assetLeg,
     cashLeg: result.cashLeg,
     /**

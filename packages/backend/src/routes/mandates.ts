@@ -14,15 +14,17 @@ import { MANDATE_STATUSES } from '@facture/shared';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getStore } from '../db/store.js';
-import { badRequest, notFound, upstreamUnavailable } from '../errors.js';
+import { badRequest, conflict, notFound, upstreamUnavailable } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
 import {
   backingMakesBidFirm,
   backingWasRead,
   ensureMandateRegistered,
+  executeCapitalRelease,
   getArcEscrow,
+  planCapitalRelease,
   readMandateBacking,
-  releaseMandateCapital,
+  releaseClosesMandate,
   type MandateBacking,
 } from '../services/arc.js';
 import { settlementService } from '../services/settlement.js';
@@ -413,35 +415,50 @@ mandateRoutes.post('/:id/fund', async (c) => {
  * not in the backend's ABI and had no caller anywhere, so real USDC in the vault had no path
  * out of it in this repo at all: a buyer could post capital, watch the book give the capacity
  * back, and never see the money. The book and the money move together now.
+ *
+ * **And moving them together took three steps rather than two, which is the second fix.** The
+ * book decremented first — correctly, so the attested balance is never above the real one —
+ * but it decremented for releases that were never going to happen: an unregistered mandate, a
+ * binding to somebody else, a vault that was short, a vault that would not answer. The book hit
+ * zero, the mandate was `withdrawn` on the spot, `fundMandate` refuses a withdrawn mandate, and
+ * the buyer's USDC sat in the vault under `keccak256(uuid)` with nothing in this repo able to
+ * move it — a replacement mandate is a new UUID and a new vault bucket. So:
+ *
+ * 1. **Ask first.** Every refusal is a view call, so a request that cannot succeed is refused
+ *    with nothing moved. A 200 from here means the book and the money moved together, or the
+ *    vault provably holds nothing to move — that last one being a commitment recorded against a
+ *    deposit that never landed, which is the book's own fiction and has to stay retractable.
+ * 2. **Then the book, then the chain**, in that order and for the reason above.
+ * 3. **Close only against a known-empty vault.** An unknown outcome leaves the mandate open at
+ *    a zero balance, because funding it again is the one route back to capital that is still
+ *    in there.
  */
 mandateRoutes.post('/:id/withdraw', async (c) => {
   const { id } = readParams(c, uuidParam);
   const body = await readJson(c, withdrawBody);
   const store = getStore();
+  const at = new Date();
 
   // A buyer withdrawing "everything unallocated" must not be short-changed by capital
   // reserved for a trade whose challenge window has already run out.
   await settlementService.reclaimExpired();
 
+  const existing = await store.getMandate(id);
+  if (!existing) throw notFound(`Mandate ${id}`);
+
   /*
-   * The row lock lives in the store, and it is what makes a withdrawal racing a match lose
-   * to the match: the allocation is taken under the same lock, so by the time this reads
-   * `funded - allocated` the match has either happened or has not. Capital a buyer has
-   * already been matched against is not theirs to pull — that is what "firm" means.
-   *
-   * **The book moves first and the chain second, and the order is chosen rather than
-   * incidental.** `IMandateVault` states the invariant the whole split rests on: the attested
-   * balance must be a lower bound on real Arc capital at every instant, so the book decrements
-   * at the moment it authorises, before the tokens move. A release that then fails leaves USDC
-   * in the vault against a book that no longer quotes it — recoverable by funding the mandate
-   * again. Reversed, a release that lands after the decrement failed leaves a mandate quoting
-   * capital that has already left, and every price it wins is one nobody can honour.
+   * What this withdrawal intends to take, resolved here so the vault can be asked about it
+   * before anything moves. **The store remains the authority**: it re-reads under its own lock
+   * and refuses a figure that no longer fits, which is what makes a withdrawal racing a match
+   * lose to the match. Naming the amount rather than passing "everything" is what turns that
+   * race into a 409 with nothing moved, instead of a release planned for one amount and a book
+   * decremented by another.
    */
-  const { mandate, withdrawn } = await store.withdrawFromMandate({
-    mandateId: id,
-    ...(body.amountMinor === undefined ? {} : { amount: body.amountMinor }),
-    at: new Date(),
-  });
+  const unallocated =
+    existing.fundedMinor > existing.allocatedMinor
+      ? existing.fundedMinor - existing.allocatedMinor
+      : 0n;
+  const wanted = body.amountMinor ?? unallocated;
 
   /*
    * The buyer on file, read only to be COMPARED against the vault's own binding. It is never
@@ -450,29 +467,84 @@ mandateRoutes.post('/:id/withdraw', async (c) => {
    * is the other half — a vault bound to an address this venue does not believe is the
    * buyer's, where triggering the release would move their money to a stranger.
    */
-  const buyer = await store.getBuyer(mandate.buyerId);
+  const buyer = await store.getBuyer(existing.buyerId);
 
-  const release = await releaseMandateCapital(getArcEscrow(), {
+  const vault = getArcEscrow();
+  const plan = await planCapitalRelease(vault, {
     mandateUuid: id,
-    amountMinor: withdrawn,
-    currency: mandate.currency,
+    committedMinor: existing.fundedMinor,
+    amountMinor: wanted,
+    currency: existing.currency,
     buyerAddress: buyer?.arcAddress ?? null,
   });
 
+  /*
+   * Refused with nothing moved, rather than reported after the fact.
+   *
+   * `upstream_unavailable` for a vault that would not answer and `conflict` for one that
+   * answered something this venue will not act on, the same split the funding route draws: a
+   * reader can fix the second and can only retry the first.
+   */
+  if (!plan.ok) {
+    throw plan.refusal.state === 'unavailable'
+      ? upstreamUnavailable('The Arc mandate vault', plan.refusal.detail)
+      : conflict('conflict', plan.refusal.detail);
+  }
+
+  /*
+   * **The book moves first and the chain second, and the order is chosen rather than
+   * incidental.** `IMandateVault` states the invariant the whole split rests on: the attested
+   * balance must be a lower bound on real Arc capital at every instant, so the book decrements
+   * at the moment it authorises, before the tokens move. Reversed, a release that lands after
+   * the decrement failed leaves a mandate quoting capital that has already left, and every
+   * price it wins is one nobody can honour.
+   */
+  const { mandate, withdrawn } = await store.withdrawFromMandate({
+    mandateId: id,
+    amount: wanted,
+    at,
+  });
+
+  const release = await executeCapitalRelease(vault, id, plan);
+
+  /*
+   * Closed last, and only against a vault known to hold nothing more for this mandate.
+   *
+   * `withdrawn` is terminal and a withdrawn mandate cannot be funded, so this is the write that
+   * decides whether capital left behind is recoverable. A release whose receipt never arrived
+   * says `remainingUsdcMinor: null` — a timeout is not a revert, the USDC may still be sitting
+   * there — and the mandate then stays open at a zero balance so it can be funded and withdrawn
+   * again. So does a vault that returned less than it holds, which is how a buyer who
+   * overfunded their own mandate gets the excess back.
+   */
+  const closed =
+    mandate.fundedMinor === 0n && releaseClosesMandate(release)
+      ? await store.closeEmptiedMandate(id, at)
+      : mandate;
+
   return c.json({
-    mandate: wireMandate(mandate),
+    mandate: wireMandate(closed),
     withdrawn: money(withdrawn),
-    quoting: mandate.status === 'active',
+    quoting: closed.status === 'active',
     /**
      * What became of the real USDC, in the vault's own units.
      *
      * `withdrawn` above is the mandate's currency at 2 decimals and `amountUsdcMinor` is USDC
      * at 6 — the pair is published for the same reason the funding route publishes both sides
      * of its comparison, because the defect being guarded against is two scales sharing one
-     * name. A state other than `released` means the book moved and the money did not, which a
-     * buyer has to be able to read rather than infer from a missing hash.
+     * name.
+     *
+     * `remainingUsdcMinor` is what says whether anything is left in the vault behind this
+     * mandate, and `null` there means nobody knows rather than nothing is left. It is the
+     * figure the mandate's closure turns on, so a buyer reading a mandate that stayed open at a
+     * zero balance can see why.
      */
-    release: { ...release, amountUsdcMinor: money(release.amountUsdcMinor) },
+    release: {
+      ...release,
+      amountUsdcMinor: money(release.amountUsdcMinor),
+      remainingUsdcMinor:
+        release.remainingUsdcMinor === null ? null : money(release.remainingUsdcMinor),
+    },
   });
 });
 

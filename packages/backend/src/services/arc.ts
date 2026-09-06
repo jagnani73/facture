@@ -214,13 +214,15 @@ export interface ArcEscrow {
    */
   requiredFor(amountMinor: bigint, currency: string): bigint;
   /**
-   * USDC the vault may return when `amountMinor` of `currency` is withdrawn from the book,
-   * in the same ERC-20 minor units (6dp) {@link depositedFor} answers in.
+   * USDC the vault may return when `withdrawnMinor` of `currency` comes off a book that stood
+   * at `committedBeforeMinor`, in the same ERC-20 minor units (6dp) {@link depositedFor}
+   * answers in.
    *
-   * The same conversion as {@link requiredFor} and the opposite rounding, which is not a
-   * detail — see {@link usdcReleasableFor}.
+   * **The book's total before the withdrawal is an argument, not a convenience.** What a
+   * withdrawal frees is the difference between two backing requirements, and converting the
+   * withdrawal on its own bled the escrow — see {@link usdcReleasableFor}.
    */
-  releasableFor(amountMinor: bigint, currency: string): bigint;
+  releasableFor(committedBeforeMinor: bigint, withdrawnMinor: bigint, currency: string): bigint;
   /** USDC actually held for this mandate, in ERC-20 minor units (6dp). */
   depositedFor(mandateUuid: string): Promise<bigint>;
   /** The address a release would pay, or `null` when the mandate was never registered. */
@@ -276,8 +278,10 @@ export interface ArcEscrow {
    *
    * The money leaves the vault here; it does not reach the seller. It sits in `DvpEscrow`
    * claimable only by that address, only with the preimage of `secretHash`, and only for the
-   * vault's `PAYMENT_LOCK_DURATION` — 24 hours, read from the deployed contract. So this is
-   * the cash committing, not the cash being paid, which is what lets the asset leg go second.
+   * vault's `PAYMENT_LOCK_DURATION` — a constant in the deployed contract, **which this
+   * service does not read**: it is not in the ABI above and nothing here asks for it, so the
+   * figure a reader wants comes from the contract or the lock, never from here. So this is the
+   * cash committing, not the cash being paid, which is what lets the asset leg go second.
    */
   executePayout(input: {
     tradeId: string;
@@ -364,34 +368,50 @@ export const usdcRequiredFor = (amountMinor: bigint, currency: string, scalePpm:
   );
 
 /**
- * What the vault may pay back when that same amount is withdrawn from the book.
+ * What the vault may pay back when `withdrawnMinor` comes off a book that stood at
+ * `committedBeforeMinor`.
  *
- * **The same conversion and the opposite rounding, and the direction is the whole point.**
- * The invariant a funded mandate keeps is `vaultBalance >= usdcRequiredFor(committed)`, and a
- * withdrawal has to leave it standing over the smaller book that remains. Rounding the
- * release DOWN does: `ceil(a) - floor(b) >= ceil(a - b)` for every remainder, so whatever dust
- * the scaling leaves behind stays in the vault, backing capital the book still counts.
+ * **It is the difference between two backing requirements, not a conversion of the
+ * withdrawal.** The invariant a funded mandate keeps is
+ * `vaultBalance >= usdcRequiredFor(committed)`, so what a withdrawal frees is exactly what the
+ * book no longer needs backed: `requiredFor(F) - requiredFor(F - w)`. That telescopes —
+ * however a buyer slices their exits, the pieces sum to `requiredFor(F₀) - requiredFor(Fₙ)` —
+ * so the same capital cannot be split into slices that each round away.
  *
- * Rounding it up breaks that outright, and not by a hair. Release `ceil` of a $0.10 withdrawal
- * at 1 ppm and a whole USDC minor unit leaves the vault against a book that decremented by a
- * tenth of one — repeat it and a mandate quoting real capital is standing on an empty vault,
- * which is the overclaim the funding check exists to refuse arriving through the back door.
+ * **Converting the withdrawal on its own bled the escrow, and that is what this replaces.**
+ * `floor(f(w))` was taken per call, and at 1 ppm a USDC minor unit is a whole dollar of book:
+ * five 99-cent withdrawals took a 500-cent book to 5 and released nothing at all. The book
+ * gave the capacity back five times over and the vault kept every cent. The old rounding was
+ * not wrong so much as measuring the wrong thing — the lemma it rested on,
+ * `ceil(a) - floor(b) >= ceil(a - b)`, is arithmetically true, and it is precisely why the
+ * invariant held on each individual call while the capital drained away across them.
  *
- * It is also the payment rule from {@link toSettlementAmount} seen from the other side: money
- * moving out rounds down, so the venue never hands over more than the ledger authorised.
+ * **A `dust` answer is still reachable, and is no longer a leak.** A withdrawal that does not
+ * lower the requirement returns nothing — but what it did not return is money the SMALLER book
+ * still needs as backing, and the next withdrawal that crosses the boundary collects it.
+ * Emptying a book is never dust: `usdcRequiredFor` rounds up, so any positive commitment
+ * requires at least one USDC minor unit and `requiredFor(F) - requiredFor(0)` is the whole of
+ * it. That is what stops a mandate being closed over capital nobody can then reach.
  */
 export const usdcReleasableFor = (
-  amountMinor: bigint,
+  committedBeforeMinor: bigint,
+  withdrawnMinor: bigint,
   currency: string,
   scalePpm: number,
-): bigint =>
-  toSettlementAmount(
-    amountMinor,
-    CURRENCY_DECIMALS[currency as Currency] ?? 2,
-    USDC_DECIMALS,
-    scalePpm,
-    'down',
+): bigint => {
+  /*
+   * Clamped rather than trusted. The store refuses a withdrawal past the unallocated balance
+   * under its own lock, but a negative remainder here would make the difference BIGGER than
+   * the book ever required — the vault paying out more than it was ever asked to hold, which
+   * is the one direction this arithmetic must never fail in.
+   */
+  const remainingMinor =
+    withdrawnMinor >= committedBeforeMinor ? 0n : committedBeforeMinor - withdrawnMinor;
+  return (
+    usdcRequiredFor(committedBeforeMinor, currency, scalePpm) -
+    usdcRequiredFor(remainingMinor, currency, scalePpm)
   );
+};
 
 /**
  * No vault configured.
@@ -405,7 +425,8 @@ export function createDisabledArcEscrow(scalePpm = 1): ArcEscrow {
   return {
     enabled: false,
     requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, scalePpm),
-    releasableFor: (amountMinor, currency) => usdcReleasableFor(amountMinor, currency, scalePpm),
+    releasableFor: (committedBeforeMinor, withdrawnMinor, currency) =>
+      usdcReleasableFor(committedBeforeMinor, withdrawnMinor, currency, scalePpm),
     depositedFor: () => Promise.resolve(0n),
     buyerOf: () => Promise.resolve(null),
     registerMandate: () => Promise.reject(noVault('Registering a mandate')),
@@ -558,8 +579,13 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
       return usdcRequiredFor(amountMinor, currency, config.settlementScalePpm);
     },
 
-    releasableFor(amountMinor, currency) {
-      return usdcReleasableFor(amountMinor, currency, config.settlementScalePpm);
+    releasableFor(committedBeforeMinor, withdrawnMinor, currency) {
+      return usdcReleasableFor(
+        committedBeforeMinor,
+        withdrawnMinor,
+        currency,
+        config.settlementScalePpm,
+      );
     },
 
     async depositedFor(mandateUuid) {
@@ -686,12 +712,21 @@ export type ArcAddressCheck = { ok: true; address: `0x${string}` } | { ok: false
  * no way out. Refusing to register is strictly better: the vault then refuses the deposit too,
  * and the money never gets in to be stranded.
  *
- * EIP-55 is the tripwire, and it is the same one `scripts/demo-reset.mjs` uses so that the
- * provisioning script and the route cannot disagree about which addresses are real. It catches
- * all three invented buyer addresses because whoever wrote them typed mixed case without
- * computing a checksum, while the one real wallet is lowercase and passes. **That is a useful
- * accident and not a proof** — a fabricated address with a correct checksum sails through — so
- * this is a floor under carelessness, not a guarantee of custody.
+ * **What `isAddress(value, { strict: true })` actually does is narrower than it reads**, and
+ * the difference matters here. viem returns `true` for ANY all-lowercase 40-hex string without
+ * checking anything: the checksum is compared only when the string is mixed case. So this
+ * establishes one thing — that a mixed-case address carries a correct EIP-55 checksum — and
+ * says nothing whatever about an address typed in lowercase. Harrow Point's real wallet is
+ * lowercase and takes the unchecked path; the invented seeded addresses are caught only
+ * because whoever typed them happened to use mixed case. That is an accident of how the
+ * fixtures were written, not a property of the check.
+ *
+ * It is kept because it is free, because it is the same call `scripts/demo-reset.mjs` makes —
+ * a provisioning script and a route disagreeing about which addresses are real is how a
+ * binding nobody can receive at gets written by whichever of the two is less careful — and
+ * because a lowercase fabrication is at least a deliberate act. It is not a gate on custody
+ * and nothing downstream may treat it as one: a fabricated address with a correct checksum,
+ * or any fabrication in lowercase, is bound exactly like a real one.
  *
  * The zero address is refused separately and by name. `registerMandate` reverts on it anyway,
  * but a local refusal says which of the two problems it is instead of spending a transaction
@@ -707,7 +742,9 @@ export function payableArcAddress(value: string | null | undefined): ArcAddressC
   if (!isAddress(value, { strict: true })) {
     return {
       ok: false,
-      reason: 'fails its EIP-55 checksum, so it was typed rather than generated by a wallet',
+      reason:
+        'is not twenty bytes of hex, or is mixed case and fails its EIP-55 checksum — either ' +
+        'way it was typed rather than produced by a wallet',
     };
   }
   return { ok: true, address: value };
@@ -1000,15 +1037,22 @@ export interface CapitalRelease {
   /**
    * - `disabled` — no vault on this deployment; the withdrawal is a ledger entry and no more.
    * - `unregistered` — the vault never knew this mandate, so no capital can have landed in it.
+   * - `nothing-escrowed` — the cash leg exists and holds nothing. The deposit never landed.
    * - `bound-elsewhere` — the vault pays an address that is not the buyer on file. Nothing sent.
-   * - `dust` — the scaled amount is below one USDC minor unit; there is nothing to move.
+   * - `dust` — the withdrawal does not lower what the vault must hold; there is nothing to move.
    * - `insufficient` — the vault holds less than this release needs. Nothing sent.
    * - `released` — USDC returned to the registered buyer.
    * - `unavailable` — the chain could not be reached, or the write failed or timed out.
+   *
+   * The first three and `released` are the answers where the money's whereabouts are settled.
+   * The middle three are refusals {@link planCapitalRelease} reaches before the book moves, so
+   * they never describe a book that decremented. `unavailable` is the one answer that settles
+   * nothing, and {@link CapitalRelease.remainingUsdcMinor} is where that is stated.
    */
   state:
     | 'disabled'
     | 'unregistered'
+    | 'nothing-escrowed'
     | 'bound-elsewhere'
     | 'dust'
     | 'insufficient'
@@ -1016,6 +1060,16 @@ export interface CapitalRelease {
     | 'unavailable';
   /** USDC ERC-20 minor units (6dp) the vault was asked to return. Never the book's own units. */
   amountUsdcMinor: bigint;
+  /**
+   * USDC ERC-20 minor units (6dp) the vault still holds for this mandate afterwards, or `null`
+   * when that is unknown.
+   *
+   * **A mandate may only be closed against a zero here**, and that is what the field is for. A
+   * closed mandate cannot be funded again, and funding again is the only way back into the
+   * vault — so closing one over capital that is still in it, or over an outcome nobody saw,
+   * strands that capital permanently. `null` is that second case and is deliberately not `0`.
+   */
+  remainingUsdcMinor: bigint | null;
   /** The address the vault is bound to pay, when it could be read. */
   buyer: string | null;
   transactionHash: string | null;
@@ -1024,42 +1078,79 @@ export interface CapitalRelease {
 }
 
 /**
- * Move the money a withdrawal already took off the book.
+ * Whether a mandate emptied to zero may now be closed.
  *
- * **The book is decremented first and this runs second**, which is the order `IMandateVault`
- * asks for rather than a convenience: the attested balance must never exceed the real one, so
- * the safe failure is a book that counts less capital than the vault holds. A release that
- * fails here leaves the buyer's USDC in the vault with the book no longer quoting against it —
- * recoverable by funding the mandate again. Reverse the two and a release that lands after the
- * book failed to decrement leaves a mandate quoting capital that has already left, which is a
- * price nobody can honour.
- *
- * **It never throws, for the same reason a scheduling failure cannot un-mature a receivable.**
- * The withdrawal happened; a rail that is down does not un-happen it. Every refusal below is a
- * separate fact with its own name, because "the vault holds nothing" and "the vault could not
- * be asked" want different actions from whoever reads them.
+ * Terminal states are only safe when the vault is known to hold nothing more for the mandate:
+ * `withdrawn` is terminal and `fundMandate` refuses it, so this predicate is the last thing
+ * standing between an unlucky release and capital nobody can ever move again.
  */
-export async function releaseMandateCapital(
+export const releaseClosesMandate = (release: CapitalRelease): boolean =>
+  release.remainingUsdcMinor === 0n;
+
+/**
+ * What the vault will let a withdrawal do, decided before the book is touched.
+ *
+ * `send: false` is an outcome already, not a half-answer: there is no vault, or there is
+ * nothing in it, so the withdrawal is a book entry and the {@link CapitalRelease} is final.
+ */
+export type CapitalReleasePlan =
+  | { readonly ok: true; readonly send: false; readonly outcome: CapitalRelease }
+  | {
+      readonly ok: true;
+      readonly send: true;
+      readonly amountUsdcMinor: bigint;
+      readonly depositedUsdcMinor: bigint;
+      readonly buyer: string;
+    }
+  | { readonly ok: false; readonly refusal: CapitalRelease };
+
+/**
+ * Everything a release can be refused for, asked before the book moves at all.
+ *
+ * **Reads only, and the ordering is the fix.** `IMandateVault` asks that the attested balance
+ * never exceed the real one, which is why the book decrements before the tokens move. It says
+ * nothing about decrementing for a release that was never going to land, and that is what used
+ * to happen: `withdrawFromMandate` emptied the book, and every non-`released` answer — `dust`,
+ * `insufficient`, `bound-elsewhere`, an unreadable vault — reported the failure afterwards,
+ * with the capacity already gone. The mandate was `withdrawn` by then, `fundMandate` refuses a
+ * withdrawn mandate, and a new mandate is a new UUID and therefore a new vault bucket. The
+ * buyer's USDC sat under `keccak256(old uuid)` with **nothing in this repo able to move it.**
+ *
+ * Every check here is a view call: no key, no gas, no signature, and a refusal leaves both the
+ * book and the vault exactly as they were. That costs a buyer nothing but a retry, where the
+ * old ordering could cost them their capital.
+ *
+ * **It never throws.** A vault that is down is an answer with a name, because "the vault holds
+ * nothing" and "the vault could not be asked" want different actions from whoever reads them.
+ */
+export async function planCapitalRelease(
   vault: ArcEscrow,
   input: {
     mandateUuid: string;
+    /** The book's committed total BEFORE this withdrawal, in the mandate's own minor units. */
+    committedMinor: bigint;
     /** The withdrawal, in the mandate's own currency's minor units (2dp for USD). */
     amountMinor: bigint;
     currency: string;
     /** The buyer this venue believes owns the mandate. Compared, never sent. */
     buyerAddress: string | null;
   },
-): Promise<CapitalRelease> {
+): Promise<CapitalReleasePlan> {
   const base = { buyer: null, transactionHash: null, authId: null };
 
   if (!vault.enabled) {
     return {
-      ...base,
-      state: 'disabled',
-      amountUsdcMinor: 0n,
-      detail:
-        'ARC_MANDATE_VAULT_ADDRESS is not set, so no capital is escrowed on this deployment and ' +
-        'the withdrawal moved nothing but the book.',
+      ok: true,
+      send: false,
+      outcome: {
+        ...base,
+        state: 'disabled',
+        amountUsdcMinor: 0n,
+        remainingUsdcMinor: 0n,
+        detail:
+          'ARC_MANDATE_VAULT_ADDRESS is not set, so no capital is escrowed on this deployment ' +
+          'and the withdrawal moves nothing but the book.',
+      },
     };
   }
 
@@ -1068,24 +1159,11 @@ export async function releaseMandateCapital(
    * 2 decimals and the vault is USDC at 6, and $50,000.00 and 5 USDC are both `5000000` — the
    * defect that made a mandate read as backed by a ten-thousandth of its capital.
    */
-  const amountUsdcMinor = vault.releasableFor(input.amountMinor, input.currency);
-
-  /*
-   * Nothing to move, and asked before the vault is read at all so a no-op costs no round trip.
-   * `executeRelease` reverts `ZeroValue` on a zero amount, and a remainder rounded away stays
-   * in the vault backing capital the book still counts — which is the direction
-   * {@link usdcReleasableFor} rounds for.
-   */
-  if (amountUsdcMinor === 0n) {
-    return {
-      ...base,
-      state: 'dust',
-      amountUsdcMinor,
-      detail:
-        `Withdrawing ${input.amountMinor} ${input.currency} minor units scales to less than one ` +
-        'USDC minor unit, so nothing left the vault and the remainder stays as backing.',
-    };
-  }
+  const amountUsdcMinor = vault.releasableFor(
+    input.committedMinor,
+    input.amountMinor,
+    input.currency,
+  );
 
   let bound: string | null;
   let deposited: bigint;
@@ -1096,23 +1174,55 @@ export async function releaseMandateCapital(
     deposited = await vault.depositedFor(input.mandateUuid);
   } catch (err) {
     return {
-      ...base,
-      state: 'unavailable',
-      amountUsdcMinor,
-      detail:
-        `The Arc vault could not be read (${messageOf(err)}), so no capital was returned. The ` +
-        'withdrawal stands on the book and the USDC is still in the vault.',
+      ok: false,
+      refusal: {
+        ...base,
+        state: 'unavailable',
+        amountUsdcMinor,
+        remainingUsdcMinor: null,
+        detail:
+          `The Arc vault could not be read (${messageOf(err)}), so nothing was withdrawn. The ` +
+          'book still counts this capital and the USDC is still in the vault — an unknown ' +
+          'balance is not a reason to give the capacity back and hope.',
+      },
     };
   }
 
+  /*
+   * The vault pays `buyerOf` and takes no recipient, so a binding that disagrees with the buyer
+   * on file is not something the venue can steer around — it can only decline to trigger it.
+   * Sending anyway would move a buyer's money to an address this venue does not believe is
+   * theirs, on that buyer's own instruction, which is worse than leaving it escrowed.
+   */
+  /*
+   * No cash leg, so no capital can ever have been escrowed against this mandate — `deposit`
+   * reverts `MandateNotRegistered` until `registerMandate` has run.
+   *
+   * **Deliberately not a refusal, though most pre-flight answers are.** A commitment recorded
+   * against a registration that never happened is exactly the state a buyer needs to be able to
+   * retract, and refusing it would leave a book entry no route in this repo can remove — the
+   * same dead end this pre-flight exists to close, pointed at the book instead of at the
+   * capital. It is not a rare state either: a mandate written while the chain was unreachable
+   * is never registered, and most of the seeded book has never had a cent posted against it.
+   *
+   * `remainingUsdcMinor` is the balance that was actually read rather than the zero it must be.
+   * A vault reporting capital against an unbound mandate would be a contradiction, and one this
+   * venue should answer by leaving the mandate open rather than by closing it over the money.
+   */
   if (bound === null) {
     return {
-      ...base,
-      state: 'unregistered',
-      amountUsdcMinor,
-      detail:
-        'This mandate has no cash leg on Arc, so no capital can ever have been escrowed against ' +
-        'it and there is nothing to return.',
+      ok: true,
+      send: false,
+      outcome: {
+        ...base,
+        state: 'unregistered',
+        amountUsdcMinor: 0n,
+        remainingUsdcMinor: deposited,
+        detail:
+          'This mandate has no cash leg on Arc, so no capital can ever have been escrowed ' +
+          'against it. The book entry is withdrawn and nothing was returned because there was ' +
+          'nothing to return.',
+      },
     };
   }
 
@@ -1124,53 +1234,146 @@ export async function releaseMandateCapital(
    */
   if (bound.toLowerCase() !== (input.buyerAddress ?? '').toLowerCase()) {
     return {
-      ...base,
-      state: 'bound-elsewhere',
-      buyer: bound,
-      amountUsdcMinor,
-      detail:
-        `The vault would pay ${bound}, which is not the ${input.buyerAddress ?? 'nothing'} on ` +
-        'file for this buyer. No capital was returned; the binding is permanent and needs an ' +
-        'operator.',
+      ok: false,
+      refusal: {
+        ...base,
+        state: 'bound-elsewhere',
+        buyer: bound,
+        amountUsdcMinor,
+        remainingUsdcMinor: deposited,
+        detail:
+          `The vault would pay ${bound}, which is not the ${input.buyerAddress ?? 'nothing'} on ` +
+          'file for this buyer. Nothing was withdrawn: the binding is permanent, so emptying ' +
+          'the book here would close a mandate over capital only an operator can reach.',
+      },
+    };
+  }
+
+  /* The cash leg is open and the deposit never landed, so again there is nothing to strand. */
+  if (deposited === 0n) {
+    return {
+      ok: true,
+      send: false,
+      outcome: {
+        ...base,
+        state: 'nothing-escrowed',
+        buyer: bound,
+        amountUsdcMinor: 0n,
+        remainingUsdcMinor: 0n,
+        detail:
+          "This mandate's cash leg is open and holds nothing — the deposit never landed. The " +
+          'book entry is withdrawn and nothing was returned because there was nothing to return.',
+      },
+    };
+  }
+
+  /*
+   * The withdrawal does not lower what the vault has to hold, so there is nothing to move and
+   * `executeRelease` would revert `ZeroValue`.
+   *
+   * Refused rather than applied, because a 200 from this route means the book and the money
+   * moved together. What stays in the vault is backing the SMALLER book would still require,
+   * so it is not lost: a withdrawal that crosses the boundary collects it, and emptying the
+   * book collects all of it — `usdcRequiredFor` rounds up, so a positive commitment always
+   * requires at least one USDC minor unit.
+   */
+  if (amountUsdcMinor === 0n) {
+    return {
+      ok: false,
+      refusal: {
+        ...base,
+        state: 'dust',
+        buyer: bound,
+        amountUsdcMinor,
+        remainingUsdcMinor: deposited,
+        detail:
+          `Withdrawing ${input.amountMinor} ${input.currency} minor units from a book of ` +
+          `${input.committedMinor} does not lower what the vault must hold, so no capital would ` +
+          'come back. Nothing was withdrawn; withdraw a larger amount, or the whole balance, ' +
+          'and the remainder comes with it.',
+      },
     };
   }
 
   if (amountUsdcMinor > deposited) {
     return {
-      ...base,
-      state: 'insufficient',
-      buyer: bound,
-      amountUsdcMinor,
-      detail:
-        `Returning this withdrawal needs ${amountUsdcMinor} USDC minor units and the vault holds ` +
-        `${deposited}. Nothing was sent — the vault would have reverted \`InsufficientVaultBalance\`, ` +
-        'and the book was funded against capital that never fully arrived.',
+      ok: false,
+      refusal: {
+        ...base,
+        state: 'insufficient',
+        buyer: bound,
+        amountUsdcMinor,
+        remainingUsdcMinor: deposited,
+        detail:
+          `Returning this withdrawal needs ${amountUsdcMinor} USDC minor units and the vault ` +
+          `holds ${deposited}, so the vault would revert \`InsufficientVaultBalance\`. Nothing ` +
+          'was withdrawn. The capital arrived and was spent: `executePayout` debits this ' +
+          'mandate to pay a seller on every trade it settles, and the book only stops counting ' +
+          'that money when the receivable matures. Withdraw an amount the vault can cover, or ' +
+          'reconcile the book against the balance first.',
+      },
     };
   }
 
+  return { ok: true, send: true, amountUsdcMinor, depositedUsdcMinor: deposited, buyer: bound };
+}
+
+/**
+ * Move the money the withdrawal has just taken off the book.
+ *
+ * **The book is decremented first and this runs second**, which is the order `IMandateVault`
+ * asks for rather than a convenience: the attested balance must never exceed the real one, so
+ * the safe failure is a book that counts less capital than the vault holds. Reverse the two and
+ * a release that lands after the book failed to decrement leaves a mandate quoting capital that
+ * has already left, which is a price nobody can honour.
+ *
+ * **It never throws, for the same reason a scheduling failure cannot un-mature a receivable.**
+ * The withdrawal happened; a rail that is down does not un-happen it. What a failure here must
+ * not do is let the mandate be CLOSED, because a closed mandate cannot be funded and funding is
+ * the only way back into the vault — hence a null {@link CapitalRelease.remainingUsdcMinor} on
+ * the unknown answer rather than a zero.
+ */
+export async function executeCapitalRelease(
+  vault: ArcEscrow,
+  mandateUuid: string,
+  plan: Extract<CapitalReleasePlan, { ok: true }>,
+): Promise<CapitalRelease> {
+  if (!plan.send) return plan.outcome;
+
   try {
     const { transactionHash, authId } = await vault.executeRelease({
-      mandateUuid: input.mandateUuid,
-      amountUsdcMinor,
+      mandateUuid,
+      amountUsdcMinor: plan.amountUsdcMinor,
     });
     return {
       state: 'released',
-      buyer: bound,
-      amountUsdcMinor,
+      buyer: plan.buyer,
+      amountUsdcMinor: plan.amountUsdcMinor,
+      remainingUsdcMinor: plan.depositedUsdcMinor - plan.amountUsdcMinor,
       transactionHash,
       authId,
-      detail: `${amountUsdcMinor} USDC minor units returned to ${bound}.`,
+      detail: `${plan.amountUsdcMinor} USDC minor units returned to ${plan.buyer}.`,
     };
   } catch (err) {
     return {
-      ...base,
       state: 'unavailable',
-      buyer: bound,
-      amountUsdcMinor,
+      buyer: plan.buyer,
+      amountUsdcMinor: plan.amountUsdcMinor,
+      /*
+       * Unknown, and stated as unknown. A timeout is not a revert — the transaction may still
+       * mine — so neither "the vault still holds it" nor "the buyer has it" is a claim this
+       * venue can make. The mandate therefore stays open at a zero balance: funding it again is
+       * how the capital comes back out if the release never landed, and that route is closed
+       * forever the moment the mandate is marked withdrawn.
+       */
+      remainingUsdcMinor: null,
+      transactionHash: null,
+      authId: null,
       detail:
         `Returning this withdrawal on Arc did not complete (${messageOf(err)}). The withdrawal ` +
         'stands on the book; whether the USDC moved is what that message says and is not ' +
-        'something this venue is claiming either way.',
+        'something this venue is claiming either way. The mandate is left open at a zero ' +
+        'balance so that capital still in the vault can be funded and withdrawn again.',
     };
   }
 }

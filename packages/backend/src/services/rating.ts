@@ -213,6 +213,15 @@ export interface RecordedOutcome extends RatingAssessment {
    * against a receivable already recorded as paid without either side noticing.
    */
   recorded: SettlementOutcome;
+  /**
+   * The date the ledger holds that outcome against, from the row that won.
+   *
+   * Travels with `recorded` and for the same reason. A caller reading the outcome off the
+   * ledger and the date off its own request is reporting two halves of one claim from two
+   * sources, and on a replay they contradict: `on_time` beside a payment date that would
+   * have produced `late`.
+   */
+  occurredAt: Date;
 }
 
 export interface RatingService {
@@ -271,7 +280,7 @@ export const ratingService: RatingService = {
    */
   async recordOutcome(input) {
     const store = getStore();
-    const { debtor, alreadyRecorded, recorded } = await store.recordOutcome({
+    const { debtor, alreadyRecorded, recorded, occurredAt } = await store.recordOutcome({
       debtorId: input.debtorId,
       invoiceId: input.invoiceId,
       outcome: input.outcome,
@@ -283,6 +292,6 @@ export const ratingService: RatingService = {
     if (!alreadyRecorded && debtor.rating !== assessment.rating) {
       await store.updateDebtorRating(debtor.id, assessment.rating);
     }
-    return { ...assessment, alreadyRecorded, recorded };
+    return { ...assessment, alreadyRecorded, recorded, occurredAt };
   },
 };

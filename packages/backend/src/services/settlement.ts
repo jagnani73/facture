@@ -26,6 +26,7 @@ import { CURRENCY_DECIMALS, transitionInvoice } from '@facture/shared';
 import { keccak256 } from 'viem';
 import { explorer } from '../chain.js';
 import { getConfig } from '../config.js';
+import { transitionTo } from '../db/status.js';
 import { getStore } from '../db/store.js';
 import { badRequest, conflict, internalError, notFound, upstreamUnavailable } from '../errors.js';
 import { rootLogger } from '../logger.js';
@@ -223,6 +224,18 @@ export interface MaturityResult extends SettlementResult {
   /** How the receivable resolved, as it was written to the settlement-outcome ledger. */
   outcome: SettlementOutcome;
   /**
+   * When the debtor's money landed, as the ledger holds it — the date {@link outcome} was
+   * decided against.
+   *
+   * Read back rather than echoed from the caller, because the two disagree on exactly the
+   * call where a reader most needs them not to. A replay reports the ledger's `on_time`, and
+   * echoing the request's `paidAt` beside it printed a date that would have produced `late`:
+   * a receipt contradicting itself in the one field that exists to make the outcome
+   * checkable. It is never null — a call that writes nothing still had a date written for
+   * it, and a call that writes reports the date it wrote.
+   */
+  paidAt: string;
+  /**
    * True when this receivable was already in the ledger, so this call changed nothing.
    *
    * Maturity is observable twice — a mirror-node replay, a retried scheduled transaction,
@@ -276,6 +289,13 @@ export interface DefaultResult {
   alreadyRecorded: boolean;
   /** The customer's grade after the mark. `D`, permanently, once anything has defaulted. */
   rating: { debtorId: string; grade: Rating; permanentlyMarked: boolean; reason: string };
+  /**
+   * When the write-off was declared, as the ledger holds it — not when this call ran.
+   *
+   * On a replay those are different dates and only the first is a fact about the customer.
+   * Reporting the second dated a permanent mark to whenever somebody last pressed the
+   * button, which is the same defect the outcome itself was already read back to avoid.
+   */
   declaredAt: string;
 }
 
@@ -420,6 +440,21 @@ const DAY_MS = 86_400_000;
 /** The last instant that still counts as paying on time. */
 const onTimeDeadline = (dueAt: Date): Date =>
   new Date(dueAt.getTime() + (ON_TIME_GRACE_DAYS + 1) * DAY_MS - 1);
+
+/**
+ * Why a written-off receivable cannot be matured, said the same way from both places that
+ * refuse it.
+ *
+ * Maturity meets that fact twice and from two sources — the invoice row, before anything is
+ * written, and the settlement-outcome ledger, which is the one that catches a default whose
+ * status write never landed. Both are needed, neither subsumes the other, and a seller
+ * should not be able to tell which one answered: the thing they have to act on is that
+ * reversing a permanent mark is a decision about the customer, not a retry.
+ */
+const writtenOffRefusal = (invoiceId: string): string =>
+  `Invoice ${invoiceId} is recorded as defaulted. A receivable that was written off cannot ` +
+  "be matured; correcting that is a decision about the customer's permanent record, not a " +
+  'second press of this button.';
 
 /**
  * How many expired trades one reclaim pass unwinds.
@@ -1309,6 +1344,11 @@ export const settlementService: SettlementService = {
    * writing it. A replay therefore cannot tighten a rating twice, and — the part that used
    * to be missing — cannot hand the mandate its capital back twice either.
    *
+   * The ledger is also read **before** the guards, because every one of them protects a
+   * first write and a replay makes none. The past-due refusal had been running ahead of
+   * that read and firing on pure replays, which is the property above being false whenever
+   * the clock had passed the due date.
+   *
    * **The cash leg comes back `pending`, deliberately.** The debtor's payment is the money
    * that settles a matured receivable, and there is no debtor payment rail in this build.
    * The requirement is built and addressed to the current holder; reporting it as
@@ -1336,7 +1376,34 @@ export const settlementService: SettlementService = {
       throw conflict('conflict', `Invoice ${invoiceId} has never settled, so nothing matures.`);
     }
 
+    /*
+     * The lifecycle decides what may mature, and it lives in `@facture/shared` rather than
+     * in a list written out here — the same argument `recordDefault` makes, and this side
+     * had neither a list nor the machine. A `disputed` receivable matured to `matured` with
+     * a 200 against an edge `INVOICE_TRANSITIONS` does not contain: a customer disputing an
+     * invoice and being recorded as having paid it.
+     *
+     * Checked before anything is written, so a refusal costs no repair. An invoice already
+     * `matured` is not a transition but the replay, and falls through to the ledger below,
+     * which is what makes this idempotent. `defaulted` is spelled out ahead of the machine
+     * only for its sentence: both are terminal and the machine refuses both, but "which is
+     * final" tells a seller nothing about the permanent mark they would be reversing.
+     */
+    if (invoice.status === 'defaulted') throw conflict('conflict', writtenOffRefusal(invoiceId));
+    if (invoice.status !== 'matured') transitionTo(invoice.status, 'matured');
+
     const now = new Date();
+
+    /*
+     * Whether this call is recording a settlement or reading one back.
+     *
+     * The ledger, never the invoice's own status: a row can carry `matured` with nothing
+     * behind it on the ledger — the seeded book contains exactly that — so the status would
+     * wave a first write past the guard below on the strength of a settlement nobody
+     * recorded. This is the only read that can tell the two apart, and everything the guard
+     * protects is a first write.
+     */
+    const onLedger = await store.getOutcome(invoice.debtorId, invoiceId);
 
     /*
      * `late` means the debtor paid after the due date. It used to mean something else.
@@ -1361,9 +1428,17 @@ export const settlementService: SettlementService = {
      *   permanent claim about a customer made from no evidence, and there is a route for
      *   the other answer: if the money is never coming, that is a default, not a late
      *   payment recorded as one.
+     *
+     * The refusal is scoped to a receivable the ledger has nothing on, and that scope is the
+     * whole of it. The question it refuses to guess at — was this paid on time — is only
+     * asked when a settlement is being RECORDED; a replay decides nothing and reads back an
+     * answer already written, so refusing one would make a documented property false the
+     * moment the clock passed the due date. It also broke the only way to ask whether the
+     * collection key had signed the payout, which is this route, without re-stating a
+     * `paidAt` the operator may not have.
      */
     const deadline = onTimeDeadline(invoice.dueAt);
-    if (observed.paidAt === undefined && now.getTime() > deadline.getTime()) {
+    if (onLedger === null && observed.paidAt === undefined && now.getTime() > deadline.getTime()) {
       throw conflict(
         'conflict',
         `Invoice ${invoiceId} fell due on ${invoice.dueAt.toISOString().slice(0, 10)} and is ` +
@@ -1393,7 +1468,7 @@ export const settlementService: SettlementService = {
 
     const outcome: SettlementOutcome = paidAt.getTime() <= deadline.getTime() ? 'on_time' : 'late';
 
-    const { alreadyRecorded, recorded } = await ratingService.recordOutcome({
+    const { alreadyRecorded, recorded, occurredAt } = await ratingService.recordOutcome({
       debtorId: invoice.debtorId,
       invoiceId,
       outcome,
@@ -1409,14 +1484,14 @@ export const settlementService: SettlementService = {
      * have written nothing, which is what makes refusing here safe rather than half-done.
      * Without the check the release and the status write below would run, handing the
      * mandate back capital it lost and replacing a permanent mark with a payment.
+     *
+     * Not made redundant by the lifecycle guard above. That one reads the invoice row; this
+     * one reads the ledger, and the case it exists for is a default whose status write never
+     * landed — a receivable still saying `sold` with a permanent mark already recorded
+     * against the customer.
      */
     if (recorded === 'default') {
-      throw conflict(
-        'conflict',
-        `Invoice ${invoiceId} is recorded as defaulted on the rating ledger. A receivable ` +
-          'that was written off cannot be matured; correcting that is a decision about the ' +
-          "customer's permanent record, not a second press of this button.",
-      );
+      throw conflict('conflict', writtenOffRefusal(invoiceId));
     }
 
     /*
@@ -1430,10 +1505,35 @@ export const settlementService: SettlementService = {
      */
     const finished = alreadyRecorded && invoice.status === 'matured';
     if (!finished) {
-      // The capital comes back to the mandate, which is what lets an `exhausted` bid quote
-      // again rather than sitting on the book with nothing behind it.
-      await store.release(holderTrade.mandateId, holderTrade.proceedsMinor);
-      await store.updateInvoice(invoiceId, { status: 'matured' });
+      /*
+       * The capital comes back to the mandate, which is what lets an `exhausted` bid quote
+       * again rather than sitting on the book with nothing behind it — **but only the x402
+       * rail gets all of it back.**
+       *
+       * On the Arc rail the proceeds left the vault at settlement, when `executePayout`
+       * debited the mandate. Nothing decremented `funded_minor` then, and nothing should
+       * have: while the trade was armed the allocation already held that money out of
+       * `unallocated`, so reducing the book as well would have counted it twice. Maturity is
+       * where both fall together — the allocation is returned and the commitment is retired
+       * with it — which leaves `unallocated` flat and the book back in step with the vault.
+       *
+       * Releasing it plainly here was the accounting error behind a defect that only looked
+       * like an outage: after one Arc trade matured, the book claimed the full committed
+       * capital while the vault was short by the proceeds, so the next withdrawal was refused
+       * as `insufficient` and blamed a deposit that had been fine all along.
+       */
+      await (holderTrade.cashRail === 'arc-vault'
+        ? store.retireAllocatedCapital(holderTrade.mandateId, holderTrade.proceedsMinor)
+        : store.release(holderTrade.mandateId, holderTrade.proceedsMinor));
+      /*
+       * Written only when it actually moves. The status can already be `matured` here on the
+       * mirror repair — a row carrying the marker with no ledger row behind it — and
+       * re-asserting it is the self-edge the invoice machine refuses, which would turn a
+       * repair into a 409.
+       */
+      if (invoice.status !== 'matured') {
+        await store.updateInvoice(invoiceId, { status: 'matured' });
+      }
     }
 
     /*
@@ -1572,6 +1672,13 @@ export const settlementService: SettlementService = {
        * nothing.
        */
       outcome: recorded,
+      /*
+       * The date that outcome was decided against, from the same row. Reading one off the
+       * ledger and the other off the request was how a replay came to answer `on_time`
+       * beside a `paidAt` that would have produced `late` — two halves of one claim, taken
+       * from two sources that only agree on the first call.
+       */
+      paidAt: occurredAt.toISOString(),
       alreadyRecorded,
       assetLeg: {
         chain: 'hedera',
@@ -1647,6 +1754,13 @@ export const settlementService: SettlementService = {
    * reflect the loss. Writing that capital off properly means decrementing what the buyer
    * committed as well as what it allocated, and there is no store operation that does both;
    * `lossMinor` reports the figure rather than pretending it moved.
+   *
+   * **The per-debtor concentration cap stays consumed too, and that used to be untrue.** The
+   * stores counted a defaulted invoice as closed for exposure purposes, so the position
+   * vanished from the mandate's per-debtor map the moment this ran while `allocated_minor`
+   * correctly stayed — the aggregate reflected the loss and the cap on the one customer that
+   * had just failed to pay was handed back. A default is the strongest evidence there is for
+   * counting a debtor's exposure, not the event that forgets it.
    */
   async recordDefault(invoiceId) {
     const store = getStore();
@@ -1706,10 +1820,18 @@ export const settlementService: SettlementService = {
      * afterwards, so the receivable has to have actually failed to be paid before one can be
      * declared. A debtor who has until Friday has not defaulted on Tuesday, however
      * confident anyone is about Friday.
+     *
+     * Skipped only for a receivable the ledger already has a row for, and the ledger is the
+     * authority rather than the invoice's own status. The two can disagree: a row can carry
+     * `defaulted` with nothing recorded against it — the seeded book does — and exempting on
+     * the status let such a receivable take a FIRST mark with neither this guard nor the
+     * lifecycle's ever running. Time only moves forward, so a genuine replay passes this on
+     * its own merits and needs no exemption at all.
      */
     const now = new Date();
     const deadline = onTimeDeadline(invoice.dueAt);
-    if (invoice.status !== 'defaulted' && now.getTime() <= deadline.getTime()) {
+    const onLedger = await store.getOutcome(invoice.debtorId, invoiceId);
+    if (onLedger === null && now.getTime() <= deadline.getTime()) {
       throw conflict(
         'conflict',
         `Invoice ${invoiceId} is not due until ${invoice.dueAt.toISOString().slice(0, 10)}, ` +
@@ -1723,13 +1845,14 @@ export const settlementService: SettlementService = {
      * as maturity, for the same reason. `recordOutcome` is keyed on `(debtor_id, invoice_id)`
      * and writes once, so pressing this twice marks the customer once.
      */
-    const { alreadyRecorded, recorded, ...assessment } = await ratingService.recordOutcome({
-      debtorId: invoice.debtorId,
-      invoiceId,
-      outcome: 'default',
-      faceValue: invoice.faceValue,
-      at: now,
-    });
+    const { alreadyRecorded, recorded, occurredAt, ...assessment } =
+      await ratingService.recordOutcome({
+        debtorId: invoice.debtorId,
+        invoiceId,
+        outcome: 'default',
+        faceValue: invoice.faceValue,
+        at: now,
+      });
 
     /*
      * A settlement already on the ledger is not overwritten, and cannot be.
@@ -1788,7 +1911,12 @@ export const settlementService: SettlementService = {
         permanentlyMarked: assessment.permanentlyMarked,
         reason: assessment.reason,
       },
-      declaredAt: now.toISOString(),
+      /*
+       * The ledger's date, not this call's clock. A default is declared once and the mark
+       * dates from that declaration; a replay reporting `now` would move the date of a
+       * permanent fact every time somebody pressed the button again.
+       */
+      declaredAt: occurredAt.toISOString(),
     };
   },
 };

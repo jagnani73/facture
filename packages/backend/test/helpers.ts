@@ -405,8 +405,8 @@ export function fakeArcEscrow(overrides: Partial<ArcEscrow> = {}): ArcEscrow {
   return {
     enabled: true,
     requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, TEST_SCALE_PPM),
-    releasableFor: (amountMinor, currency) =>
-      usdcReleasableFor(amountMinor, currency, TEST_SCALE_PPM),
+    releasableFor: (committedBeforeMinor, withdrawnMinor, currency) =>
+      usdcReleasableFor(committedBeforeMinor, withdrawnMinor, currency, TEST_SCALE_PPM),
     depositedFor: () => Promise.resolve(0n),
     buyerOf: () => Promise.resolve(null),
     registerMandate: () => Promise.resolve({ transactionHash: '0xarc-register' }),

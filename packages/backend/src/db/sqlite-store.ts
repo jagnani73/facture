@@ -45,6 +45,7 @@ import {
   fundingHops,
   statusAfterAllocate,
   statusAfterRelease,
+  statusAfterRetire,
   statusAfterWithdraw,
   transitionTo,
   walkMandateStatus,
@@ -67,6 +68,7 @@ import type {
   QuoteRow,
   RefusalReceiptRow,
   SellerRow,
+  SettlementOutcomeRow,
   TradeRow,
 } from './schema.js';
 import {
@@ -126,11 +128,24 @@ function isUniqueViolation(err: unknown): boolean {
 
 /**
  * Exposure counts capital that is committed and has not come back. A trade against an
- * invoice that has matured or defaulted is over — the capital was released, and leaving it
- * in the concentration figure would refuse a debtor the mandate has room for.
+ * invoice that has matured is over — the capital was released, and leaving it in the
+ * concentration figure would refuse a debtor the mandate has room for.
  */
 const EXPOSING_TRADE_STATUSES = ['preparing', 'awaiting_payment', 'settled'] as const;
-const CLOSED_INVOICE_STATUSES = ['matured', 'defaulted'] as const;
+
+/**
+ * The invoice statuses whose capital actually came back. Maturity is the only one.
+ *
+ * `defaulted` used to be here too, and that was the per-debtor half of a loss being forgiven.
+ * A write-off releases nothing — `recordDefault` deliberately leaves `allocated_minor` where
+ * it is, because the position closed at zero and the buyer is out the money — so counting a
+ * defaulted invoice as closed here restored the concentration headroom on the one customer
+ * that had just failed to pay, while the aggregate correctly stayed consumed. The two
+ * figures then described different amounts of the same committed capital, and the cap that
+ * exists to bound exposure to one debtor reopened at the moment the evidence for it was
+ * strongest.
+ */
+const CAPITAL_RETURNED_STATUSES = ['matured'] as const;
 
 /** Every write transaction here reads before it writes. See the header. */
 const IMMEDIATE = { behavior: 'immediate' } as const;
@@ -568,22 +583,55 @@ export class SqliteStore implements Store {
           );
         }
 
-        const funded = row.fundedMinor - wanted;
-        // `null` when the mandate is not emptied, and the status is then left out of the
-        // patch entirely rather than written back as itself — see `db/mandate-status.ts`.
-        const status = statusAfterWithdraw(row, funded);
+        /*
+         * The book alone. Emptying a mandate does NOT close it here, because closing is
+         * terminal and the caller cannot know yet whether the capital behind the book actually
+         * left the Arc vault — see `closeEmptiedMandate` and `db/status.ts`.
+         */
         const updated = tx
           .update(mandates)
-          .set({
-            fundedMinor: funded,
-            ...(status === null ? {} : { status }),
-            updatedAt: input.at,
-          })
+          .set({ fundedMinor: row.fundedMinor - wanted, updatedAt: input.at })
           .where(eq(mandates.id, input.mandateId))
           .returning()
           .get();
         if (!updated) throw notFound(`Mandate ${input.mandateId}`);
         return { mandate: updated, withdrawn: wanted };
+      }, IMMEDIATE),
+    );
+  }
+
+  closeEmptiedMandate(mandateId: string, at: Date): Promise<MandateRow> {
+    return asPromise(() =>
+      this.#db.transaction((tx) => {
+        const row = tx.select().from(mandates).where(eq(mandates.id, mandateId)).limit(1).get();
+        if (!row) throw notFound(`Mandate ${mandateId}`);
+
+        /*
+         * The guard rather than an assumption. A mandate closed over capital the book still
+         * counts is capital in the vault with no route back out — `fundMandate` refuses a
+         * withdrawn mandate, and a replacement mandate is a new UUID and a new vault bucket.
+         */
+        if (row.fundedMinor !== 0n) {
+          throw conflict(
+            'conflict',
+            `This mandate still has ${row.fundedMinor} committed on the book. Closing it is ` +
+              'permanent, so it is refused until the capital has been withdrawn.',
+          );
+        }
+
+        // `null` when it is already closed, and nothing is then written at all —
+        // `withdrawn -> withdrawn` is the self-edge the machine throws on.
+        const status = statusAfterWithdraw(row, row.fundedMinor);
+        if (status === null) return row;
+
+        const updated = tx
+          .update(mandates)
+          .set({ status, updatedAt: at })
+          .where(eq(mandates.id, mandateId))
+          .returning()
+          .get();
+        if (!updated) throw notFound(`Mandate ${mandateId}`);
+        return updated;
       }, IMMEDIATE),
     );
   }
@@ -644,6 +692,38 @@ export class SqliteStore implements Store {
     );
   }
 
+  retireAllocatedCapital(mandateId: string, amount: bigint): Promise<MandateRow> {
+    return asPromise(() =>
+      this.#db.transaction((tx) => {
+        const row = tx.select().from(mandates).where(eq(mandates.id, mandateId)).limit(1).get();
+        if (!row) throw notFound(`Mandate ${mandateId}`);
+
+        /*
+         * Both totals, by the same amount. The allocation is over and the capital that backed
+         * it has left the vault, so the unallocated balance does not move: what a buyer can
+         * still withdraw is unchanged, because the money went to the seller rather than back
+         * to them.
+         */
+        const funded = max0(row.fundedMinor - amount);
+        const allocated = max0(row.allocatedMinor - amount);
+        const status = statusAfterRetire(row, funded, allocated);
+        const updated = tx
+          .update(mandates)
+          .set({
+            fundedMinor: funded,
+            allocatedMinor: allocated,
+            ...(status === null ? {} : { status }),
+            updatedAt: new Date(),
+          })
+          .where(eq(mandates.id, mandateId))
+          .returning()
+          .get();
+        if (!updated) throw notFound(`Mandate ${mandateId}`);
+        return updated;
+      }, IMMEDIATE),
+    );
+  }
+
   async debtorExposure(mandateIds: readonly string[]): Promise<DebtorExposureMap> {
     const out = new Map<string, Record<string, bigint>>();
     for (const id of mandateIds) out.set(id, {});
@@ -664,7 +744,7 @@ export class SqliteStore implements Store {
         and(
           inArray(trades.mandateId, [...mandateIds]),
           inArray(trades.status, [...EXPOSING_TRADE_STATUSES]),
-          notInArray(invoices.status, [...CLOSED_INVOICE_STATUSES]),
+          notInArray(invoices.status, [...CAPITAL_RETURNED_STATUSES]),
         ),
       );
 
@@ -852,7 +932,15 @@ export class SqliteStore implements Store {
             .limit(1)
             .get();
           if (!existing) throw notFound(`Settlement outcome for receivable ${input.invoiceId}`);
-          return { debtor: current, alreadyRecorded: true, recorded: existing.outcome };
+          return {
+            debtor: current,
+            alreadyRecorded: true,
+            recorded: existing.outcome,
+            // The date the winning row holds, not the one this call proposed. A receipt
+            // given the outcome without it reports the first call's answer beside the
+            // second call's evidence — `on_time` next to a date that would produce `late`.
+            occurredAt: existing.occurredAt,
+          };
         }
 
         // The accumulator moves in JS, not in SQL. `settled_face_value` is a TEXT money
@@ -874,9 +962,20 @@ export class SqliteStore implements Store {
           .get();
         if (!debtor) throw notFound(`Customer ${input.debtorId}`);
 
-        return { debtor, alreadyRecorded: false, recorded: input.outcome };
+        return { debtor, alreadyRecorded: false, recorded: input.outcome, occurredAt: input.at };
       }, IMMEDIATE),
     );
+  }
+
+  async getOutcome(debtorId: string, invoiceId: string): Promise<SettlementOutcomeRow | null> {
+    const [row] = await this.#db
+      .select()
+      .from(settlementOutcomes)
+      .where(
+        and(eq(settlementOutcomes.debtorId, debtorId), eq(settlementOutcomes.invoiceId, invoiceId)),
+      )
+      .limit(1);
+    return row ?? null;
   }
 
   // --- issuance and indexing ----------------------------------------------------

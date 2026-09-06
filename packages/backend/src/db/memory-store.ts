@@ -44,6 +44,7 @@ import {
   fundingHops,
   statusAfterAllocate,
   statusAfterRelease,
+  statusAfterRetire,
   statusAfterWithdraw,
   transitionTo,
   walkMandateStatus,
@@ -70,15 +71,28 @@ import type {
 
 /**
  * Exposure counts capital that is committed and has not come back yet. A trade whose
- * invoice has matured or defaulted is over; the capital was released and must not keep
- * consuming the mandate's concentration headroom.
+ * invoice has matured is over; the capital was released and must not keep consuming the
+ * mandate's concentration headroom.
  */
 const EXPOSING_TRADE_STATUSES = new Set<TradeRow['status']>([
   'preparing',
   'awaiting_payment',
   'settled',
 ]);
-const CLOSED_INVOICE_STATUSES = new Set<InvoiceRow['status']>(['matured', 'defaulted']);
+
+/**
+ * The invoice statuses whose capital actually came back. Maturity is the only one.
+ *
+ * `defaulted` used to be here too, and that was the per-debtor half of a loss being forgiven.
+ * A write-off releases nothing — `recordDefault` deliberately leaves `allocated_minor` where
+ * it is, because the position closed at zero and the buyer is out the money — so counting a
+ * defaulted invoice as closed here restored the concentration headroom on the one customer
+ * that had just failed to pay, while the aggregate correctly stayed consumed. The two
+ * figures then described different amounts of the same committed capital, and the cap that
+ * exists to bound exposure to one debtor reopened at the moment the evidence for it was
+ * strongest.
+ */
+const CAPITAL_RETURNED_STATUSES = new Set<InvoiceRow['status']>(['matured']);
 
 /**
  * Armed but not finished: capital reserved, hold placed or about to be, nothing settled.
@@ -520,17 +534,45 @@ export class MemoryStore implements Store {
       );
     }
 
-    const funded = row.fundedMinor - wanted;
-    // `null` when the mandate is not emptied, and the status is then left alone rather than
-    // written back as itself — see `db/status.ts`.
+    /*
+     * The book alone. Emptying a mandate does NOT close it here, because closing is terminal
+     * and the caller cannot know yet whether the capital behind the book actually left the Arc
+     * vault — see `closeEmptiedMandate` and `db/status.ts`.
+     */
     const next: MandateRow = {
       ...row,
-      fundedMinor: funded,
-      status: statusAfterWithdraw(row, funded) ?? row.status,
+      fundedMinor: row.fundedMinor - wanted,
       updatedAt: input.at,
     };
     this.mandates.set(next.id, next);
     return { mandate: clone(next), withdrawn: wanted };
+  }
+
+  async closeEmptiedMandate(mandateId: string, at: Date): Promise<MandateRow> {
+    const row = this.mandates.get(mandateId);
+    if (!row) throw notFound(`Mandate ${mandateId}`);
+
+    /*
+     * The guard rather than an assumption. A mandate closed over capital the book still counts
+     * is capital in the vault with no route back out — `fundMandate` refuses a withdrawn
+     * mandate, and a replacement mandate is a new UUID and therefore a new vault bucket.
+     */
+    if (row.fundedMinor !== 0n) {
+      throw conflict(
+        'conflict',
+        `This mandate still has ${row.fundedMinor} committed on the book. Closing it is ` +
+          'permanent, so it is refused until the capital has been withdrawn.',
+      );
+    }
+
+    // `null` when it is already closed, and the status is then left alone rather than written
+    // back as itself — `withdrawn -> withdrawn` is the self-edge the machine throws on.
+    const status = statusAfterWithdraw(row, row.fundedMinor);
+    if (status === null) return clone(row);
+
+    const next: MandateRow = { ...row, status, updatedAt: at };
+    this.mandates.set(next.id, next);
+    return clone(next);
   }
 
   async allocate(mandateId: string, amount: bigint): Promise<MandateRow> {
@@ -570,6 +612,28 @@ export class MemoryStore implements Store {
     return clone(next);
   }
 
+  async retireAllocatedCapital(mandateId: string, amount: bigint): Promise<MandateRow> {
+    const row = this.mandates.get(mandateId);
+    if (!row) throw notFound(`Mandate ${mandateId}`);
+
+    /*
+     * Both totals, by the same amount. The allocation is over and the capital that backed it
+     * has left the vault, so the unallocated balance does not move: what a buyer can still
+     * withdraw is unchanged, because the money went to the seller rather than back to them.
+     */
+    const funded = max0(row.fundedMinor - amount);
+    const allocated = max0(row.allocatedMinor - amount);
+    const next: MandateRow = {
+      ...row,
+      fundedMinor: funded,
+      allocatedMinor: allocated,
+      status: statusAfterRetire(row, funded, allocated) ?? row.status,
+      updatedAt: this.#now(),
+    };
+    this.mandates.set(next.id, next);
+    return clone(next);
+  }
+
   async debtorExposure(mandateIds: readonly string[]): Promise<DebtorExposureMap> {
     const wanted = new Set(mandateIds);
     const out = new Map<string, Record<string, bigint>>();
@@ -579,7 +643,7 @@ export class MemoryStore implements Store {
       if (!wanted.has(trade.mandateId)) continue;
       if (!EXPOSING_TRADE_STATUSES.has(trade.status)) continue;
       const invoice = this.invoices.get(trade.invoiceId);
-      if (!invoice || CLOSED_INVOICE_STATUSES.has(invoice.status)) continue;
+      if (!invoice || CAPITAL_RETURNED_STATUSES.has(invoice.status)) continue;
 
       const bucket = out.get(trade.mandateId) ?? {};
       bucket[invoice.debtorId] = (bucket[invoice.debtorId] ?? 0n) + trade.proceedsMinor;
@@ -768,10 +832,17 @@ export class MemoryStore implements Store {
     const key = `${input.debtorId}:${input.invoiceId}`;
     const existing = this.outcomes.get(key);
     if (existing !== undefined) {
-      // The outcome the ledger holds, not the one this call proposed. A caller that only
-      // learns "something was already here" cannot tell a replayed default from a default
-      // landing on top of a payment, and one of those contradicts a settled fact.
-      return { debtor: clone(debtor), alreadyRecorded: true, recorded: existing.outcome };
+      // The outcome the ledger holds and the date it holds it against, not the ones this
+      // call proposed. A caller that only learns "something was already here" cannot tell a
+      // replayed default from a default landing on top of a payment, and one of those
+      // contradicts a settled fact; a caller given the outcome without the date reports the
+      // first call's answer beside the second call's evidence for it.
+      return {
+        debtor: clone(debtor),
+        alreadyRecorded: true,
+        recorded: existing.outcome,
+        occurredAt: existing.occurredAt,
+      };
     }
 
     this.outcomes.set(key, {
@@ -797,7 +868,20 @@ export class MemoryStore implements Store {
       lastSettlementAt: input.at,
     };
     this.debtors.set(next.id, next);
-    return { debtor: clone(next), alreadyRecorded: false, recorded: input.outcome };
+    return {
+      debtor: clone(next),
+      alreadyRecorded: false,
+      recorded: input.outcome,
+      occurredAt: input.at,
+    };
+  }
+
+  async getOutcome(debtorId: string, invoiceId: string): Promise<SettlementOutcomeRow | null> {
+    const row = this.outcomes.get(`${debtorId}:${invoiceId}`);
+    // Not `clone(row) ?? null`: `clone` spreads, and spreading `undefined` yields an empty
+    // object rather than `undefined`, so an absent ledger row would come back as a truthy
+    // one — a receivable nobody has recorded reading as already settled.
+    return row === undefined ? null : clone(row);
   }
 
   // --- issuance and indexing ----------------------------------------------------

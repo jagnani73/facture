@@ -126,11 +126,40 @@ export function statusAfterRelease(
 }
 
 /**
- * The status after a withdrawal, or `null` when nothing changed.
+ * The status after an allocation came back AND the capital that paid for it was retired, or
+ * `null` when nothing changed.
  *
- * A mandate emptied to zero is withdrawn, from wherever it stood. Already-withdrawn stays
- * withdrawn without a write: `withdrawn` is terminal, so re-asserting it is the one self-edge
- * the machine would throw on rather than merely dislike.
+ * The Arc rail's counterpart to {@link statusAfterRelease}, and the difference is which total
+ * the headroom is measured against. `MandateVault.executePayout` debits the vault to pay the
+ * seller, so at maturity the committed book falls by the same figure the allocation does —
+ * measured against the OLD committed total, a mandate whose capital has left the vault would
+ * read as having its headroom back and go `active`, quoting against money that is gone.
+ *
+ * Both figures falling together is why an exhausted mandate stays exhausted here: it had no
+ * headroom before and it has none now.
+ */
+export function statusAfterRetire(
+  row: MandateCapital,
+  fundedAfter: bigint,
+  allocatedAfter: bigint,
+): MandateStatus | null {
+  return statusAfterRelease({ ...row, fundedMinor: fundedAfter }, allocatedAfter);
+}
+
+/**
+ * The status after a mandate emptied to zero is closed, or `null` when nothing changed.
+ *
+ * **Closing is a separate act from emptying, and the split is load-bearing.** `withdrawn` is
+ * terminal and `fundMandate` refuses a withdrawn mandate, so a mandate closed the instant its
+ * book hit zero was a mandate that could never be funded again — and funding again is the only
+ * way capital left in the Arc vault can be got back out. Every withdrawal whose release did not
+ * land (an unreadable vault, a receipt that never arrived) therefore stranded the buyer's USDC
+ * under `keccak256(uuid)` permanently, because a replacement mandate is a new UUID and a new
+ * vault bucket. So the store empties the book and the caller closes the mandate only once the
+ * money's whereabouts are settled — see `releaseClosesMandate` in `services/arc.ts`.
+ *
+ * Already-withdrawn stays withdrawn without a write: `withdrawn` is terminal, so re-asserting
+ * it is the one self-edge the machine would throw on rather than merely dislike.
  */
 export function statusAfterWithdraw(
   row: MandateCapital,
