@@ -1006,10 +1006,12 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
    `RecordOutcomeResult` carries the outcome the ledger actually holds, read back inside the
    transaction that lost the insert — without which a default landing on an already-recorded
    payment is invisible — and `Store.getOutcome` is a real reader on the live path: it is what
-   tells a first maturity from a replay, and the past-due refusal turns on it. **Still partly,
-   because the counters cannot be rebuilt from the facts.** Nothing reads the table in
-   aggregate, and the seeded book is the proof that this matters — 82 counted events, three
-   recorded ones.
+   tells a first maturity from a replay, and the past-due refusal turns on it. **The counters were never derivable, and the schema now
+   says so.** They are an opening balance a customer arrives with, plus every outcome this
+   venue recorded — 82 counted events against 5 rows in the live book — because
+   `settlement_outcomes` keys on `invoice_id` with a foreign key and history predating the
+   venue has no invoice to point at. What is pinned instead is the weaker pair that is true:
+   every row is inside the counters beside it, and no terminal invoice is missing its row.
 10. **`invoices.regulation_type` never reaches the proof screen.** `api-source.ts` hardcodes
     `regulation: null`, so the Reg S declaration renders only from fixtures.
 
@@ -1154,15 +1156,23 @@ seeded invented addresses fail it by accident of how they were typed, and the re
 unchecked path. The comment says what it does and does not establish now, and has stopped calling
 itself a gate.
 
-**Left standing, because it is a root cause rather than a defect: `db/seed.ts` writes terminal
-invoice statuses and debtor counters with no `settlement_outcomes` rows behind them.** `seed.ts:565`
-sets MF-2031 to `defaulted`, `seed.ts:289` gives Orrin Metalworks `defaulted: 1`, and the seed
-writes no outcome row anywhere. The live database bears it out: the debtor accumulator counts 82
-settlement events across ten customers, and the ledger holds three rows, all of them from real
-maturities. So the shipped demo book's ledger and its rating accumulator already disagree. The new
-guards are robust against it — pressing default on MF-2031 is refused as never settled, since the
-seed gives it no trade either — but the seed still ships the inconsistency, and it is precisely
-what finding 9 in the sweep above means by counters that cannot be rebuilt.
+**The root cause behind that is closed too, 2026-09-04.** `db/seed.ts` wrote terminal invoice
+statuses and debtor counters with no `settlement_outcomes` rows behind them: MF-2031 was
+`defaulted` and MF-2029 `matured`, and neither had a settled trade or a ledger row. Both are
+incoherent on their own terms — a receivable cannot default if nobody bought it, because the
+buyer is who takes the loss, and maturity routes payment to a holder read from the newest settled
+trade. Both now have the position their status implies, against the only bid that could have held
+them at the time. **No counter moved**: the seed inserts each debtor net of the outcomes it is
+about to record and `recordOutcome` puts them back, with a guard that throws if a stated record is
+ever smaller than the settlements seeded against it.
+
+`db:seed` is empty-database-only, so the live book needed the same repair by hand. The rows a
+fresh seed produces were transplanted rather than recomputed — the ids are UUIDv5 from fixture
+labels and were verified identical on both sides — so both books tell one story about the same two
+receivables. All five terminal invoices in the live book now carry exactly one ledger row and a
+settled trade. Northwind was deliberately left alone: its live counters are legitimately ahead of
+the seed because MF-2051 really matured, and copying the seed over would have deleted a real
+settlement.
 
 ### Declined: the secondary market, and the wall it hits
 
