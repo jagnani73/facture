@@ -106,6 +106,24 @@ export const envSchema = z
      */
     PRIVY_APP_ID: z.string().min(1).optional(),
     PRIVY_APP_SECRET: z.string().min(1).optional(),
+    /**
+     * The Privy wallet policy a signed-in seller's embedded wallet is scoped by. Unset
+     * leaves that wallet unscoped — Privy will permit whatever the key is asked to sign —
+     * rather than attaching some weaker default; see `services/privy-policy.ts`.
+     *
+     * It is an id rather than a body because Privy puts no uniqueness constraint on a
+     * policy name, so a venue that created its policy on demand would mint a fresh one per
+     * restart and be unable to say which one a wallet carried. The policy is created once by
+     * `provisionClaimPolicy()` and pinned here.
+     */
+    PRIVY_WALLET_POLICY_ID: z.string().min(1).optional(),
+    /**
+     * Only for a Privy app with an authorization keypair registered in the dashboard, where
+     * a write to a wallet is refused without a P-256 signature over the request. Unset sends
+     * no signature, which is correct for an app that has no such key — it is not a relaxation
+     * of anything, because Privy is the one enforcing it either way.
+     */
+    PRIVY_AUTHORIZATION_PRIVATE_KEY: z.string().min(1).optional(),
 
     // Arc
     ARC_SETTLEMENT_PRIVATE_KEY: HEX_32,
@@ -171,6 +189,41 @@ export const envSchema = z
         code: 'custom',
         path: ['X402_HTS_ASSET_ID'],
         message: 'is required when X402_ASSET_MODE=hts',
+      });
+    }
+
+    /*
+     * Half a configuration must behave like none, and be refused by name.
+     *
+     * A policy id with no credentials is the dangerous half: in a `.env` it reads exactly
+     * like a deployment with the control switched on, and it can never attach anything,
+     * because attaching is an authenticated call to Privy. Booting quietly would leave an
+     * operator believing every seller's wallet was scoped when none of them was — which is
+     * the failure the control exists to make impossible, arriving through configuration.
+     */
+    if (
+      env.PRIVY_WALLET_POLICY_ID !== undefined &&
+      (env.PRIVY_APP_ID === undefined || env.PRIVY_APP_SECRET === undefined)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['PRIVY_WALLET_POLICY_ID'],
+        message:
+          'needs PRIVY_APP_ID and PRIVY_APP_SECRET. Attaching a policy is an authenticated ' +
+          'call, so an id on its own scopes no wallet while looking as though it does.',
+      });
+    }
+
+    if (
+      env.PRIVY_AUTHORIZATION_PRIVATE_KEY !== undefined &&
+      env.PRIVY_WALLET_POLICY_ID === undefined
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['PRIVY_AUTHORIZATION_PRIVATE_KEY'],
+        message:
+          'signs wallet policy writes, and PRIVY_WALLET_POLICY_ID is not set, so there are ' +
+          'none to sign.',
       });
     }
   });

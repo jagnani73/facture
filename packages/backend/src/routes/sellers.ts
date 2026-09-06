@@ -36,6 +36,13 @@
  * different one is a `409` rather than a silent rebind. Changing it deliberately needs a
  * route that says that is what it is doing.
  *
+ * ## Signing in is also where the wallet gets scoped
+ *
+ * The wallet Privy makes has exactly one job in this product — claiming a payout out of
+ * `DvpEscrow`, which the venue cannot do on a seller's behalf — and sign-in is the only
+ * moment the venue holds that wallet's identity. So it is where the policy naming that one
+ * call is attached. It cannot fail a sign-in; see {@link scopeWallet}.
+ *
  * ## The two address fields are not the same kind of thing
  *
  * `arcAddress` is an ordinary EVM address: valid on Arc the moment it exists. A Hedera
@@ -49,7 +56,9 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { getStore } from '../db/store.js';
 import { conflict, notFound, unauthorized } from '../errors.js';
+import type { Logger } from '../logger.js';
 import type { AppEnv } from '../middleware/context.js';
+import { attachClaimPolicy } from '../services/privy-policy.js';
 import { getPrivyVerifier, provisionalName } from '../services/privy.js';
 import { readParams } from '../validate.js';
 import { wireSeller } from '../wire.js';
@@ -74,6 +83,30 @@ function bearerToken(header: string | undefined): string {
 }
 
 export const sellerRoutes = new Hono<AppEnv>();
+
+/**
+ * Scope the wallet this sign-in arrived with, and never let it cost the sign-in.
+ *
+ * `attachClaimPolicy` swallows its own failures for the reason `publishRefusals` does: an
+ * unavailable Privy policy API — or an account whose plan has no policy engine — costs the
+ * control, not the account. It runs on a returning seller as well as a new one, because the
+ * wallet that needs scoping is whichever one is signing in now, and a policy attached to a
+ * wallet the seller has since replaced protects nothing. It is cheap to repeat: the client
+ * reads the wallet first and writes only when the policy is not already on it.
+ *
+ * The result is deliberately not put on the wire. A field the API publishes and the screen
+ * discards is how `escrowVerified` came to tell every buyer the capital was escrowed when
+ * nothing had checked it; when a screen needs this, that is when it should be answered.
+ */
+async function scopeWallet(
+  c: { get: (key: 'log') => Logger },
+  verified: { walletId: string | null; walletAddress: string | null },
+): Promise<void> {
+  await attachClaimPolicy(
+    { walletId: verified.walletId, walletAddress: verified.walletAddress },
+    c.get('log'),
+  );
+}
 
 sellerRoutes.post('/', async (c) => {
   const token = bearerToken(c.req.header('authorization'));
@@ -106,6 +139,7 @@ sellerRoutes.post('/', async (c) => {
       // An alias has no account id until something funds it. See the module note.
       hederaAccountId: null,
     });
+    await scopeWallet(c, verified);
     return c.json({ seller: wireSeller(created), created: true }, 201);
   }
 
@@ -130,6 +164,7 @@ sellerRoutes.post('/', async (c) => {
       ? await store.updateSellerWallet(existing.id, { arcAddress: offered })
       : existing;
 
+  await scopeWallet(c, verified);
   return c.json({ seller: wireSeller(seller), created: false }, 200);
 });
 

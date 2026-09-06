@@ -21,6 +21,7 @@ import { initHcsPublisher } from './services/hcs.js';
 import { initIndexer } from './services/indexer.js';
 import { initInvoiceRegistry } from './services/invoice-registry.js';
 import { initUniquenessRegistry } from './services/uniqueness.js';
+import { initPrivyPolicyClient } from './services/privy-policy.js';
 import { initPrivyVerifier } from './services/privy.js';
 import {
   createStoreIssuanceSink,
@@ -83,6 +84,15 @@ function boot(): void {
     // Unset disables seller sign-in rather than trusting an email nobody verified.
     appId: env.PRIVY_APP_ID,
     appSecret: env.PRIVY_APP_SECRET,
+    logger: log,
+  });
+
+  initPrivyPolicyClient({
+    appId: env.PRIVY_APP_ID,
+    appSecret: env.PRIVY_APP_SECRET,
+    // Unset leaves a seller's wallet unscoped rather than attaching a weaker default.
+    policyId: env.PRIVY_WALLET_POLICY_ID,
+    authorizationPrivateKey: env.PRIVY_AUTHORIZATION_PRIVATE_KEY,
     logger: log,
   });
 

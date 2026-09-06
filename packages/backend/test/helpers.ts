@@ -57,6 +57,13 @@ import {
   type PrivyVerifier,
   type VerifiedSeller,
 } from '../src/services/privy.js';
+import {
+  claimPolicySpec,
+  createDisabledPrivyPolicyClient,
+  setPrivyPolicyClient,
+  type PolicyAttachment,
+  type PrivyPolicyClient,
+} from '../src/services/privy-policy.js';
 import type { Notifier } from '../src/services/notifier.js';
 import { setNotifier } from '../src/services/notifier.js';
 import { DEFAULT_NETWORK, DEFAULT_SCHEME, initX402Client } from '../src/services/x402.js';
@@ -337,6 +344,8 @@ export interface HarnessOptions {
   settleFails?: string;
   /** Stands in for Privy. Absent means every sign-in verifies as {@link DEFAULT_SIGN_IN}. */
   privy?: PrivyVerifier;
+  /** Absent means no policy configured: a seller's wallet is left unscoped, as today. */
+  policies?: PrivyPolicyClient;
   /** Absent means no vault: funding is recorded, not verified, as it is today. */
   arc?: ArcEscrow;
   /** Absent means no topic: refusals are recorded without a consensus copy. */
@@ -351,8 +360,48 @@ export interface HarnessOptions {
 export const DEFAULT_SIGN_IN: VerifiedSeller = {
   email: 'ada@meridian.example',
   walletAddress: '0x1c755e95cb11e5d5af498bb0ea595b56e1adb035',
+  walletId: 'kxy2test4wallet8id',
   privyUserId: 'did:privy:test',
 };
+
+export interface RecordingPolicyClient extends PrivyPolicyClient {
+  /** Every wallet this client was asked to scope, in order. */
+  attached: { walletId: string | null; walletAddress: string | null }[];
+}
+
+/**
+ * A policy client that records what it was asked and answers however the test says.
+ *
+ * A whole object rather than a partial literal, for the reason the vault fake is one: a fake
+ * that has drifted from the interface it stands in for is a test passing for the wrong
+ * reason, and typechecking the test tree has already caught that twice on other seams.
+ */
+export function recordingPolicyClient(
+  options: { policyId?: string; result?: PolicyAttachment; throws?: string } = {},
+): RecordingPolicyClient {
+  const policyId = options.policyId ?? 'test-policy-id';
+  const attached: { walletId: string | null; walletAddress: string | null }[] = [];
+
+  return {
+    enabled: true,
+    policyId,
+    attached,
+    createClaimPolicy: (escrowAddress) =>
+      Promise.resolve({ policyId, body: claimPolicySpec(escrowAddress) }),
+    attach: (input) => {
+      attached.push(input);
+      if (options.throws !== undefined) return Promise.reject(new Error(options.throws));
+      return Promise.resolve(
+        options.result ?? {
+          attached: true,
+          policyId,
+          walletId: input.walletId ?? 'resolved-from-address',
+          alreadyHeld: false,
+        },
+      );
+    },
+  };
+}
 
 /**
  * A Privy stand-in that verifies one token and rejects everything else.
@@ -436,6 +485,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
   setScheduleAdapter(schedule);
   setComplianceGate(options.gate ?? createAllowingGate());
   setPrivyVerifier(options.privy ?? stubPrivy());
+  setPrivyPolicyClient(options.policies ?? createDisabledPrivyPolicyClient());
   setArcEscrow(options.arc ?? createDisabledArcEscrow());
   setHcsPublisher(options.hcs ?? createDisabledHcsPublisher());
   setUniquenessRegistry(options.uniqueness ?? createDisabledUniquenessRegistry());
@@ -478,6 +528,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
       setScheduleAdapter(undefined);
       setComplianceGate(undefined);
       setPrivyVerifier(undefined);
+      setPrivyPolicyClient(undefined);
       setArcEscrow(undefined);
       setHcsPublisher(undefined);
       setUniquenessRegistry(undefined);

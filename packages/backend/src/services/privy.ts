@@ -39,6 +39,16 @@ export interface VerifiedSeller {
   email: string;
   /** The embedded wallet's address, when the token carried one. */
   walletAddress: string | null;
+  /**
+   * Privy's own id for that wallet, which is a different thing from its address.
+   *
+   * A policy is attached to a wallet id and never to an address, so this is what
+   * `services/privy-policy.ts` needs — and Privy's type documents it as null unless the
+   * wallet is delegated or on the unified wallets stack, so an ordinary embedded wallet
+   * arrives here with an address and no id. That is a normal state rather than a gap: the
+   * id is then resolved from the address, and this field only saves the round trip.
+   */
+  walletId: string | null;
   /** Privy's DID for this user. Recorded in logs only; the venue keys sellers by email. */
   privyUserId: string;
 }
@@ -105,6 +115,7 @@ export function createPrivyVerifier(config: PrivyVerifierConfig): PrivyVerifier 
       return {
         email,
         walletAddress: user.wallet?.address ?? null,
+        walletId: user.wallet?.id ?? null,
         privyUserId: user.id,
       };
     },

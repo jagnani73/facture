@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   call,
   createHarness,
+  recordingPolicyClient,
   signedIn,
   stubPrivy,
   VALID_ID_TOKEN,
@@ -207,6 +208,98 @@ describe('POST /v1/sellers — the credential', () => {
     const res = await call(h.app, 'POST', '/v1/sellers', { headers: signedIn(), body: {} });
     expect(res.status).toBe(400);
     expect(res.body.detail).toContain('PRIVY_APP_ID');
+  });
+});
+
+/**
+ * The Privy control, from the route's side.
+ *
+ * The policy is what makes the seller's key a key that can only collect — see
+ * `test/privy-policy.test.ts` for what it says. What matters here is the other half:
+ * scoping a wallet is a call to a third party, and a third party being unavailable must
+ * not stop a business opening a book. That is the same rule `publishRefusals` follows, and
+ * it is easy to lose, because the natural way to write the call is a bare `await`.
+ */
+describe('POST /v1/sellers and the wallet policy', () => {
+  afterEach(() => {
+    h.restore();
+  });
+
+  it('scopes the wallet the sign-in arrived with', async () => {
+    const policies = recordingPolicyClient();
+    h = await createHarness({ policies });
+
+    const res = await call(h.app, 'POST', '/v1/sellers', { headers: signedIn(), body: {} });
+
+    expect(res.status).toBe(201);
+    expect(policies.attached).toEqual([{ walletId: 'kxy2test4wallet8id', walletAddress: ARC }]);
+  });
+
+  /*
+   * A returning seller is a sign-in, not a duplicate, and their wallet is the one that needs
+   * scoping now. Cheap to repeat: the client reads the wallet before it writes.
+   */
+  it('scopes on a returning sign-in too', async () => {
+    const policies = recordingPolicyClient();
+    h = await createHarness({ policies });
+
+    await call(h.app, 'POST', '/v1/sellers', { headers: signedIn(), body: {} });
+    const second = await call(h.app, 'POST', '/v1/sellers', { headers: signedIn(), body: {} });
+
+    expect(second.status).toBe(200);
+    expect(policies.attached).toHaveLength(2);
+  });
+
+  /*
+   * The whole point of the never-throws rule. An unavailable Privy policy API — or an
+   * account whose plan carries no policy engine — costs the control, not the account.
+   */
+  it('signs a seller in even when the policy API is down', async () => {
+    const policies = recordingPolicyClient({ throws: 'privy policy api unreachable' });
+    h = await createHarness({ policies });
+
+    const res = await call(h.app, 'POST', '/v1/sellers', { headers: signedIn(), body: {} });
+
+    expect(res.status).toBe(201);
+    expect(res.body.seller.email).toBe('ada@meridian.example');
+  });
+
+  it('signs a seller in when the policy could not be attached', async () => {
+    const policies = recordingPolicyClient({
+      result: { attached: false, reason: 'no wallet id' },
+    });
+    h = await createHarness({ policies });
+
+    const res = await call(h.app, 'POST', '/v1/sellers', { headers: signedIn(), body: {} });
+
+    expect(res.status).toBe(201);
+  });
+
+  /*
+   * Deliberately absent from the response. A field the API publishes and the screen discards
+   * is how `escrowVerified` came to tell every buyer the capital was escrowed when nothing
+   * had checked it — so this is asserted rather than left to drift into the wire.
+   */
+  it('does not publish the attachment on the wire', async () => {
+    h = await createHarness({ policies: recordingPolicyClient() });
+
+    const res = await call(h.app, 'POST', '/v1/sellers', { headers: signedIn(), body: {} });
+
+    expect(Object.keys(res.body).sort()).toEqual(['created', 'seller']);
+    expect(JSON.stringify(res.body)).not.toContain('policy');
+  });
+
+  /*
+   * With no policy configured the harness runs the disabled client, which is what every
+   * other test in this file has been exercising. Sign-in is unaffected, which is the state
+   * the deployment is in today.
+   */
+  it('signs a seller in with no policy configured at all', async () => {
+    h = await createHarness();
+
+    const res = await call(h.app, 'POST', '/v1/sellers', { headers: signedIn(), body: {} });
+
+    expect(res.status).toBe(201);
   });
 });
 
