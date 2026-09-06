@@ -318,9 +318,24 @@ The venue has now issued `0.0.10331926` (MF-2051) and `0.0.10331928` (MF-2052) i
 ### Preparing a deployed security
 
 `deployBond` leaves an instrument with **no supply, an empty allowlist and no KYC**, and a
-transfer against it reverts without naming any of that. `facture-prep/x402-probe/prepare-security.mjs`
-walks the sequence, reading before each step so a re-run costs nothing:
+transfer against it reverts without naming any of that. `scripts/prepare-security.mjs`
+(`pnpm prepare:security`) walks the sequence, reading before each step so a re-run costs nothing:
 `grantRole` × 4 → `addToControlList` (seller and buyer) → `addIssuer` → `grantKyc` → `issue`.
+
+**It moved into this repo on 2026-09-04**, from `facture-prep/x402-probe/`. Nothing here had ever
+granted KYC or written a control list — `services/compliance.ts` only ever read that state — so
+the compliance path was invisible to anyone reading the public repo. What changed with the move,
+beyond the path:
+
+- **The buyer is named by account id and resolved to its alias** through the mirror node, rather
+  than being a hardcoded address. The long-zero form derived from an account number is a
+  different key to the contract, so a grant against it authorises nobody; the script refuses one
+  rather than guessing. It defaults to `AGENT_HEDERA_ACCOUNT_ID`, which is the account that signs
+  the x402 cash leg and therefore the one that has to be able to receive the paper.
+- **An unreadable instrument is refused separately from a blocklist one.** `isInControlList`
+  means the opposite thing on each, and a silent relay is not a fact about either.
+- **A failed step is a `degraded` line rather than a throw**, which is safe only because every
+  step reads before it writes.
 
 - **Role hashes come from `contracts/constants/roles.sol`**, never the README:
   `ROLE_CONTROL_LIST` `0x6ed9a91e996c…`, `ROLE_SSI_MANAGER` `0x3120494a82…`, `ROLE_KYC`

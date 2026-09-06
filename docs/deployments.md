@@ -411,8 +411,9 @@ oversight to patch quietly.
 ### Preparing a security
 
 `deployBond` leaves an instrument with no supply, an empty allowlist and no KYC, and a transfer
-against it reverts without naming any of that. `facture-prep/x402-probe/prepare-security.mjs`
-walks the sequence, reading before each step so a re-run is free:
+against it reverts without naming any of that. `scripts/prepare-security.mjs` —
+`pnpm prepare:security <0x-security> <units>` — walks the sequence, reading before each step so a
+re-run is free:
 
 ```
 grantRole × 4      the deployer holds DEFAULT_ADMIN_ROLE and nothing else

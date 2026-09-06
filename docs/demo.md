@@ -649,9 +649,11 @@ throughput as well as per transaction. Twenty invoices is twenty of those. Pre-i
 
 **A deployed bond is not a tradeable one.** `deployBond` leaves an instrument with no supply, an
 empty allowlist and no KYC, and a transfer against it reverts without naming any of that.
-`facture-prep/x402-probe/prepare-security.mjs` walks the ten transactions that fix it — four role
+`pnpm prepare:security <0x-security> <units>` walks the ten transactions that fix it — four role
 grants, two control-list entries, an issuer registration, two KYC grants, and the mint — reading
-before each step so a re-run costs nothing. It lives outside this repo because it carries keys.
+before each step so a re-run costs nothing. It prints a plan and spends nothing until you pass
+`--send`. It signs with the operator key out of `packages/backend/.env` and carries none of its
+own, which is why it is in the repo at `scripts/prepare-security.mjs` rather than beside it.
 
 **Balances, read on 2026-09-02:**
 
