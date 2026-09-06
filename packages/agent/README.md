@@ -5,6 +5,7 @@ on a loop, and arms a trade on whatever its mandates will take.
 
 ```bash
 pnpm --filter @facture/agent start       # tsx src/main.ts
+pnpm --filter @facture/agent fund        # plan a vault deposit; nothing moves without --execute
 pnpm --filter @facture/agent typecheck
 pnpm --filter @facture/agent test        # vitest
 ```
@@ -31,6 +32,8 @@ liquidity in any settled trade so far.
 | `src/agent.ts`   | One tick: read mandates, read the book, price, arm                   |
 | `src/mandate.ts` | The pure decision — whether a mandate takes an invoice, and why not  |
 | `src/wallet.ts`  | Transport over Circle Developer-Controlled Wallets. No product logic |
+| `src/vault.ts`   | Posting the agent's own capital into `MandateVault` on Arc           |
+| `src/fund.ts`    | The `fund` command: read, plan, and only on request, deposit         |
 | `src/venue.ts`   | The venue's HTTP surface, typed                                      |
 | `src/env.ts`     | Configuration, validated at startup                                  |
 
@@ -70,13 +73,49 @@ the compliance gate rather than the book) and two refusals the on-chain book can
 identities are enforced by the type, and a test reads `ReasonCodes.sol` directly, because
 TypeScript cannot see a Solidity rename.
 
+### 4. The wallet's one job is funding the vault
+
+The Circle wallet pays for neither settlement rail. A funded mandate settles out of `MandateVault`,
+which the venue draws on with its own key; an unfunded one settles over x402 on Hedera, and that
+needs a native Hedera signature no Circle wallet can produce. So the balance this process reads
+every tick has exactly one place it can be put to work, and that is the vault.
+
+`pnpm fund` reads the venue and the vault, plans a deposit per mandate, and carries it out only if
+you ask:
+
+```bash
+pnpm --filter @facture/agent fund                       # plan every mandate, spend nothing
+pnpm --filter @facture/agent fund -- --mandate <uuid>   # plan one
+pnpm --filter @facture/agent fund -- --execute          # deposit
+```
+
+- **`--execute` is the only thing that authorises a spend**, and it is typed rather than
+  configured. `AGENT_DRY_RUN` governs the trading loop; it does not govern this.
+- **It never registers a mandate.** `deposit` reverts against an unregistered one, and registering
+  is `POST /v1/mandates` on the venue: one-shot, and it names the only address a release may ever
+  pay. An unregistered mandate is refused with a sentence pointing at that route.
+- **It will not fund a mandate registered to another address.** The deposit would be credited
+  anyway — `deposit` pulls from `msg.sender` and asks nothing about who — but `executeRelease` pays
+  `buyerOf` and takes no recipient argument, so the capital could only ever come back to somebody
+  else.
+- **It converts nothing.** The deposit is `requiredUsdcMinor` off the venue's own mandate row, less
+  what the vault already holds. The ppm scale behind that figure stays in the venue, where its one
+  copy belongs.
+- **A deposit Circle has not reported on comes back as unknown, never as failed**, and the vault
+  balance is read again either way. A balance that moved is a deposit that happened, whatever the
+  transaction state says.
+
 ## Configuration
 
-See [`.env.example`](./.env.example). Two settings decide whether this process can spend:
+See [`.env.example`](./.env.example). Three settings decide what this process can spend, and on
+which command:
 
 - **`AGENT_DRY_RUN` defaults to `true`.** The agent reads, prices and reports; it arms nothing.
-  Turning it off is what makes the mandate cap load-bearing.
+  Turning it off is what makes the mandate cap load-bearing. It governs `start`, not `fund`.
 - **`AGENT_MAX_SLIPPAGE_BPS` defaults to `0`** — the price it arms at is the price it was quoted.
+- **`ARC_MANDATE_VAULT_ADDRESS` is unset by default**, and unset disables `fund` rather than
+  relaxing it. Set it to the same address the venue holds; two addresses for one contract is a
+  deposit into a vault nobody reads.
 
 `CIRCLE_API_KEY` and `CIRCLE_ENTITY_SECRET` are secrets and are never committed. USDC on Arc is
 6 decimals through the ERC-20 interface while native gas accounting is 18; selecting the wrong one

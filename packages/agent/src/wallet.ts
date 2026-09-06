@@ -2,9 +2,10 @@
  * A thin typed wrapper over Circle's Developer-Controlled Wallets client.
  *
  * Transport only. There is no product logic in this file and none may be added: it creates
- * wallet sets and wallets, reads balances, transfers USDC and executes a contract call.
- * What a mandate is allowed to spend is decided in `mandate.ts`, before anything here is
- * called.
+ * wallet sets and wallets, reads balances, transfers USDC, executes a contract call and
+ * reads back what became of one. What a mandate is allowed to spend is decided in
+ * `mandate.ts`, and whether capital may be posted into the vault in `vault.ts`, before
+ * anything here is called.
  *
  * ═══════════════════════════════════════════════════════════════════════════════════════
  * CIRCLE ENFORCES NO SPENDING LIMIT ON THIS PATH
@@ -149,6 +150,11 @@ export const ARC_MIN_MAX_FEE_GWEI = Number(ARC_TESTNET.minMaxFeePerGasWei / 1_00
  * **Not exercised.** No transaction has been broadcast from this package, so the gas limit
  * below is a conventional ERC-20 transfer allowance rather than a measured one. Estimate it
  * against Circle's fee endpoint before the first real spend.
+ *
+ * A limit is a solvency requirement, not a price: the chain charges gas *used* and reserves
+ * gas *limit*. So padding it costs nothing but headroom — which on Arc is USDC, the same
+ * balance the deposit itself comes out of. `vault.ts` passes its own limits for that reason
+ * rather than taking this default.
  */
 export function arcAbsoluteFee(
   gasLimit = 120_000,
@@ -199,6 +205,69 @@ export interface TokenBalance {
 export interface SubmittedTransaction {
   readonly id: string;
   readonly state: string;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────────────── *
+ * Waiting for a transaction to actually happen
+ * ───────────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * What became of a submitted transaction. **Three outcomes, and the third is the point.**
+ *
+ * `createTransaction` and `createContractExecutionTransaction` resolve as soon as Circle has
+ * *accepted* the request; the state they return is `INITIATED`. This repo has shipped the
+ * "a write is not a receipt" bug twice already — a `deployBond` selector and a uniqueness
+ * claim both reported a revert as a success — so nothing here may treat a submission as an
+ * outcome.
+ *
+ * `unknown` is not a failure and must never be rendered as one. Circle is still working, or
+ * the poll ran out of budget, or the transaction is `STUCK` and may yet be mined. Reporting
+ * that as failed would tell an operator their money is where it is not — and on this path
+ * the money is the agent's own capital, already gone from the wallet.
+ */
+export type TransactionResult = 'succeeded' | 'failed' | 'unknown';
+
+/** Circle's states that mean the transaction is on chain and did what it said. */
+const SUCCEEDED_STATES: readonly string[] = ['CONFIRMED', 'COMPLETE'];
+
+/**
+ * Circle's states that mean it will never be on chain.
+ *
+ * **`STUCK` is deliberately absent.** It is a transaction Circle has broadcast and cannot
+ * get mined at the fee it bid, and it can still confirm — or be accelerated. Calling it
+ * failed is exactly the false negative this type exists to prevent.
+ */
+const FAILED_STATES: readonly string[] = ['FAILED', 'DENIED', 'CANCELLED'];
+
+/** States worth stopping the poll for even though they are not an answer. */
+const STOP_WAITING_STATES: readonly string[] = ['STUCK'];
+
+export const classifyTransactionState = (state: string): TransactionResult =>
+  SUCCEEDED_STATES.includes(state)
+    ? 'succeeded'
+    : FAILED_STATES.includes(state)
+      ? 'failed'
+      : 'unknown';
+
+export interface TransactionOutcome {
+  readonly id: string;
+  /** Circle's last observed state. Kept raw beside `result`, so a new state is still visible. */
+  readonly state: string;
+  readonly result: TransactionResult;
+  /** Present once broadcast. The coordinate an operator checks on the explorer. */
+  readonly txHash: string | null;
+  readonly errorReason: string | null;
+  readonly errorDetails: string | null;
+  /** True when the poll gave up rather than reaching an answer. Always `unknown` if so. */
+  readonly timedOut: boolean;
+}
+
+export interface AwaitTransactionOptions {
+  /** Total budget. When it runs out the answer is `unknown`, never `failed`. */
+  readonly timeoutMs?: number | undefined;
+  readonly pollIntervalMs?: number | undefined;
+  /** Injectable delay, so a test does not wait in real time. */
+  readonly sleep?: ((ms: number) => Promise<void>) | undefined;
 }
 
 export interface TransferInput {
@@ -264,6 +333,18 @@ export interface WalletClient {
   usdcBalance(walletId: string): Promise<TokenBalance | null>;
   transferUsdc(input: TransferInput): Promise<SubmittedTransaction>;
   executeContract(input: ContractCallInput): Promise<SubmittedTransaction>;
+  /** One read of a submitted transaction. No waiting; the state may be non-terminal. */
+  transaction(transactionId: string): Promise<TransactionOutcome>;
+  /**
+   * Poll until the transaction succeeds, fails, or the budget runs out.
+   *
+   * The budget running out returns `unknown`, and a caller that renders that as a failure
+   * has reintroduced the bug this exists to close.
+   */
+  awaitTransaction(
+    transactionId: string,
+    options?: AwaitTransactionOptions,
+  ): Promise<TransactionOutcome>;
 }
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
@@ -283,6 +364,41 @@ export function createWalletClient(config: WalletClientConfig): WalletClient {
     entitySecret: config.entitySecret,
     ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
   });
+
+  /*
+   * A closure rather than a method, so `awaitTransaction` calls it without `this` — the
+   * client is routinely destructured into a fake's shape in tests, and a method that
+   * depended on its receiver would break the moment it was.
+   */
+  const readTransaction = async (transactionId: string): Promise<TransactionOutcome> => {
+    const response = await client.getTransaction({ id: transactionId });
+    const tx = response.data?.transaction;
+    /*
+     * The SDK's own type marks `data` optional because *"the API may return an empty
+     * body"*. An empty body is not "the transaction failed" — it is no answer at all, and
+     * the honest reading of no answer is `unknown`.
+     */
+    if (tx === undefined) {
+      return {
+        id: transactionId,
+        state: 'UNREPORTED',
+        result: 'unknown',
+        txHash: null,
+        errorReason: null,
+        errorDetails: 'Circle returned no transaction record',
+        timedOut: false,
+      };
+    }
+    return {
+      id: tx.id,
+      state: tx.state,
+      result: classifyTransactionState(tx.state),
+      txHash: tx.txHash ?? null,
+      errorReason: tx.errorReason ?? null,
+      errorDetails: tx.errorDetails ?? null,
+      timedOut: false,
+    };
+  };
 
   return {
     blockchain,
@@ -408,7 +524,72 @@ export function createWalletClient(config: WalletClientConfig): WalletClient {
       });
       return toSubmitted(response.data, 'contract execution');
     },
+
+    transaction: readTransaction,
+
+    awaitTransaction(transactionId, options) {
+      return pollTransaction(readTransaction, transactionId, { ...options, logger: log });
+    },
   };
+}
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+/**
+ * The waiting itself, over any single-read function.
+ *
+ * Polled here rather than through the SDK's `waitForState`, which **rejects** on a terminal
+ * failure. A thrown error cannot distinguish "the transaction reverted" from "the poll was
+ * aborted", and those are the two cases the three-way {@link TransactionResult} exists to
+ * keep apart — collapsing them is how a live deposit gets reported as money still in the
+ * wallet.
+ *
+ * Separated from the client so it can be exercised without a network, because every rule in
+ * it is about a case the happy path never reaches.
+ */
+export async function pollTransaction(
+  read: (transactionId: string) => Promise<TransactionOutcome>,
+  transactionId: string,
+  options?: (AwaitTransactionOptions & { readonly logger?: Logger | undefined }) | undefined,
+): Promise<TransactionOutcome> {
+  const budgetMs = options?.timeoutMs ?? 120_000;
+  const intervalMs = options?.pollIntervalMs ?? 2_000;
+  const sleep = options?.sleep ?? defaultSleep;
+  const deadline = Date.now() + budgetMs;
+
+  let last: TransactionOutcome = {
+    id: transactionId,
+    state: 'UNREPORTED',
+    result: 'unknown',
+    txHash: null,
+    errorReason: null,
+    errorDetails: null,
+    timedOut: false,
+  };
+
+  for (;;) {
+    try {
+      last = await read(transactionId);
+      if (last.result !== 'unknown') return last;
+      // `STUCK` is not an answer, but it is not going to become one by asking again.
+      if (STOP_WAITING_STATES.includes(last.state)) return last;
+    } catch (cause) {
+      /*
+       * A read that fails says nothing about the transaction. Keep the last thing we did
+       * know and try again until the budget is gone — the alternative is turning a
+       * transient network fault into a report that the agent's capital did not move.
+       */
+      options?.logger?.debug('could not read transaction state', {
+        transactionId,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+    if (Date.now() >= deadline) return { ...last, timedOut: true };
+    await sleep(intervalMs);
+  }
 }
 
 /**

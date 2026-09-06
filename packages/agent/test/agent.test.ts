@@ -34,6 +34,7 @@ import type {
   ContractCallInput,
   SubmittedTransaction,
   TokenBalance,
+  TransactionOutcome,
   TransferInput,
   WalletClient,
   WalletSetSummary,
@@ -336,6 +337,14 @@ function fakeWallet(initialUsdc: bigint | null, decimals = 6): FakeWallet {
     executeContract: notUsed('executeContract') as unknown as (
       i: ContractCallInput,
     ) => Promise<SubmittedTransaction>,
+    /*
+     * Fatal for the same reason. The loop never submits a transaction of its own, so it has
+     * nothing to read back — reading one here would mean something above had spent.
+     */
+    transaction: notUsed('transaction') as unknown as (id: string) => Promise<TransactionOutcome>,
+    awaitTransaction: notUsed('awaitTransaction') as unknown as (
+      id: string,
+    ) => Promise<TransactionOutcome>,
   };
 }
 

@@ -14,11 +14,14 @@ import {
   ARC_MIN_MAX_FEE_GWEI,
   ARC_TESTNET_BLOCKCHAIN,
   arcAbsoluteFee,
+  classifyTransactionState,
   createWalletClient,
   formatTokenAmount,
   parseTokenAmount,
+  pollTransaction,
   selectUsdcBalance,
   USDC_DECIMALS,
+  type TransactionOutcome,
 } from '../src/wallet.js';
 
 describe('constants come from @facture/shared, not from a second copy', () => {
@@ -224,5 +227,140 @@ describe('createWalletClient', () => {
     expect(client.blockchain).toBe('ARC-TESTNET');
     expect(client.usdcAddress).toBe(ARC_TESTNET.tokens.USDC.address);
     expect(client.usdcAddress).toBe('0x3600000000000000000000000000000000000000');
+  });
+});
+
+/* ── a write is not a receipt ────────────────────────────────────────────────────────── */
+
+/**
+ * The three-way reading of Circle's transaction states.
+ *
+ * This repo has shipped "the call succeeded so the transaction succeeded" twice — a
+ * `deployBond` selector and a uniqueness claim — and the money path here is the agent's own
+ * capital. What these guard is the opposite mistake, which is newer and worse: reporting a
+ * transaction that has not answered yet as one that failed.
+ */
+describe('classifyTransactionState', () => {
+  it('counts only a mined transaction as a success', () => {
+    expect(classifyTransactionState('CONFIRMED')).toBe('succeeded');
+    expect(classifyTransactionState('COMPLETE')).toBe('succeeded');
+  });
+
+  it('counts only a terminal refusal as a failure', () => {
+    expect(classifyTransactionState('FAILED')).toBe('failed');
+    expect(classifyTransactionState('DENIED')).toBe('failed');
+    expect(classifyTransactionState('CANCELLED')).toBe('failed');
+  });
+
+  it('reads everything in flight as unknown, not as failure', () => {
+    for (const state of ['INITIATED', 'QUEUED', 'CLEARED', 'SENT']) {
+      expect(classifyTransactionState(state)).toBe('unknown');
+    }
+  });
+
+  /*
+   * STUCK is a transaction Circle has broadcast and cannot get mined at the fee it bid. It
+   * can still confirm, or be accelerated. Calling it failed would be a false negative on the
+   * one path where a false negative costs real money twice.
+   */
+  it('does not call a stuck transaction a failed one', () => {
+    expect(classifyTransactionState('STUCK')).toBe('unknown');
+    expect(classifyTransactionState('STUCK')).not.toBe('failed');
+  });
+});
+
+const outcome = (over: Partial<TransactionOutcome> = {}): TransactionOutcome => ({
+  id: 'tx-1',
+  state: 'INITIATED',
+  result: 'unknown',
+  txHash: null,
+  errorReason: null,
+  errorDetails: null,
+  timedOut: false,
+  ...over,
+});
+
+/** Replies with each queued outcome in turn, then repeats the last one. */
+const replies = (
+  queue: readonly (TransactionOutcome | Error)[],
+): ((id: string) => Promise<TransactionOutcome>) => {
+  let i = 0;
+  return async () => {
+    const next = queue[Math.min(i, queue.length - 1)];
+    i += 1;
+    if (next instanceof Error) throw next;
+    if (next === undefined) throw new Error('nothing queued');
+    return next;
+  };
+};
+
+const noWait = { pollIntervalMs: 0, sleep: async (): Promise<void> => {} };
+
+describe('pollTransaction', () => {
+  it('waits through the in-flight states and returns the answer', async () => {
+    const result = await pollTransaction(
+      replies([
+        outcome({ state: 'INITIATED' }),
+        outcome({ state: 'SENT' }),
+        outcome({ state: 'CONFIRMED', result: 'succeeded', txHash: '0xabc' }),
+      ]),
+      'tx-1',
+      { ...noWait, timeoutMs: 1_000 },
+    );
+    expect(result.result).toBe('succeeded');
+    expect(result.txHash).toBe('0xabc');
+    expect(result.timedOut).toBe(false);
+  });
+
+  it('returns a failure as soon as it is terminal', async () => {
+    const result = await pollTransaction(
+      replies([outcome({ state: 'FAILED', result: 'failed', errorReason: 'reverted' })]),
+      'tx-1',
+      { ...noWait, timeoutMs: 1_000 },
+    );
+    expect(result.result).toBe('failed');
+    expect(result.errorReason).toBe('reverted');
+  });
+
+  it('stops asking about a stuck transaction without calling it failed', async () => {
+    const result = await pollTransaction(replies([outcome({ state: 'STUCK' })]), 'tx-1', {
+      ...noWait,
+      timeoutMs: 1_000,
+    });
+    expect(result.state).toBe('STUCK');
+    expect(result.result).toBe('unknown');
+    expect(result.timedOut).toBe(false);
+  });
+
+  it('gives up as unknown, never as failed', async () => {
+    const result = await pollTransaction(replies([outcome({ state: 'SENT' })]), 'tx-1', {
+      ...noWait,
+      timeoutMs: 0,
+    });
+    expect(result.result).toBe('unknown');
+    expect(result.timedOut).toBe(true);
+  });
+
+  /*
+   * A read that throws says nothing about the transaction. Letting it propagate would turn a
+   * transient network fault into a report that the agent's capital did not move.
+   */
+  it('keeps polling through a read that throws', async () => {
+    const result = await pollTransaction(
+      replies([new Error('socket hang up'), outcome({ state: 'CONFIRMED', result: 'succeeded' })]),
+      'tx-1',
+      { ...noWait, timeoutMs: 1_000 },
+    );
+    expect(result.result).toBe('succeeded');
+  });
+
+  it('reports unknown rather than throwing when every read fails', async () => {
+    const result = await pollTransaction(replies([new Error('socket hang up')]), 'tx-1', {
+      ...noWait,
+      timeoutMs: 0,
+    });
+    expect(result.result).toBe('unknown');
+    expect(result.timedOut).toBe(true);
+    expect(result.id).toBe('tx-1');
   });
 });

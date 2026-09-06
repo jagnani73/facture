@@ -47,6 +47,25 @@ const baseEnvSchema = z.object({
     .string()
     .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 20-byte EVM address')
     .default(ARC_TESTNET.tokens.USDC.address),
+  /**
+   * `MandateVault` on Arc. **Optional, and unset disables funding rather than relaxing it**
+   * — the same shape as the Hedera pair below and as the venue's own issuance with no ATS
+   * factory. With no address `pnpm fund` refuses by name; it does not fall back to
+   * anything.
+   *
+   * Spelled exactly as the backend spells it, and that is not an accident. A separate
+   * `AGENT_MANDATE_VAULT_ADDRESS` is how a deployment comes to hold two addresses for one
+   * contract, and the wrong one here is a deposit into a vault the venue never reads.
+   *
+   * There is no second variable to forget, because the RPC below has a working default. The
+   * capability is one switch.
+   */
+  ARC_MANDATE_VAULT_ADDRESS: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 20-byte EVM address')
+    .optional(),
+  /** Arc JSON-RPC. Defaults to the shared chain config; override only for a private node. */
+  ARC_RPC_URL: z.string().url().default(ARC_TESTNET.rpcUrl),
 
   // ── The venue ─────────────────────────────────────────────────────────────────────
   FACTURE_API_URL: z.string().url().default('http://localhost:8787'),
@@ -78,6 +97,18 @@ const baseEnvSchema = z.object({
   // ── The wallet ────────────────────────────────────────────────────────────────────
   /** Circle wallet holding the mandates' capital. Its balance is what makes a bid firm. */
   AGENT_WALLET_ID: z.string().min(1, 'is required — the Circle wallet backing these mandates'),
+  /**
+   * The wallet set `AGENT_WALLET_ID` is expected to belong to.
+   *
+   * Optional, and read by exactly one thing: the funding path checks the wallet about to
+   * spend really is in this set before approving anything. A wallet id is an opaque UUID
+   * with no visible relationship to the deployment that made it, so pasting the wrong one
+   * looks identical to pasting the right one right up until the money leaves the wrong
+   * wallet. One read of `getWallet` turns that into a refusal.
+   *
+   * It was parsed and read by nothing at all before that — one of the mechanisms this
+   * repo's sweep counted.
+   */
   AGENT_WALLET_SET_ID: z.string().min(1).optional(),
 
   // ── Hedera — the x402 cash leg ────────────────────────────────────────────────────
