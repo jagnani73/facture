@@ -273,7 +273,7 @@ redeploying.
 **The note that used to stand here about `ON_CHAIN_REASON_CODE` was wrong in both halves, and
 is corrected rather than deleted because the wrong version was acted on.** It claimed the map
 "still translates to the old names" and was "now an identity map for the codes it covers" — a
-self-contradiction, and neither part true. `e6edbe6` corrected the values in the same commit
+self-contradiction, and neither part true. `78faa1a` corrected the values in the same commit
 that wrote the sentence. And it is not a full identity: seven codes map to themselves, two are
 `null`, and one is a real translation — `INELIGIBLE_JURISDICTION → CONTROL_LIST_BLOCKED`, which
 is **correct**, since the book does not decide jurisdiction (`AtsComplianceGate` does, from the
@@ -614,12 +614,16 @@ found in two days, and the only one propping up a headline product claim.
 `UniquenessRegistry` (`0x8eb9f00126bca50226e47b71a75f7b438e81d408`) is in the live path. It
 is checked before an invoice is listed and claimed after its instrument exists.
 
-**Of six deployed contracts this was the first ever called.** `MandateBook`,
-`InvoiceRegistry`, the Hedera `DvpEscrow` and `AtsComplianceGate` are still deployed and
-reached by nothing — `compliance.ts` reads the ATS security's own facets, not the gate — and
-there is no env var for any of their addresses, so the backend could not call them if it
-wanted to. That is the largest remaining gap between `packages/contracts` and the running
+**Of six deployed contracts this was the first ever called**, on 2026-09-03. `MandateBook`,
+`InvoiceRegistry`, the Hedera `DvpEscrow` and `AtsComplianceGate` were all deployed and reached
+by nothing, with no env var for any of their addresses, so the backend could not have called
+them if it wanted to. That was the largest gap between `packages/contracts` and the running
 product.
+
+**Six of seven are wired now.** `InvoiceRegistry` followed on 2026-09-03, and
+`AtsComplianceGate` and `MandateBook` on 2026-09-06 — see the two sections on them below. The
+Hedera `DvpEscrow` is the one that stays unreached, and that is a stated position rather than a
+gap; the reason is under _"Declined: the Hedera delivery escrow"_.
 
 - **The venue's hash is what gets claimed, never `computeHash`.** The contract's helper would
   mint a second hash for the same receivable — one for the ISIN, another for the registry —
@@ -659,10 +663,14 @@ no holdback.
   the debtor their answer, and a refused listing must not fail an issuance. Both are tested,
   because the natural way to write either is a bare `await`.
 
-**Still unwired: `MandateBook`, the Hedera `DvpEscrow`, and `AtsComplianceGate`** — three of
-six. The book is the interesting one: it reads rating and confirmation _from the invoice
-registry_ rather than taking them as arguments, which is what makes its refusals mean
-anything, and that registry is now populated.
+**Unwired when this was written: `MandateBook`, the Hedera `DvpEscrow`, and
+`AtsComplianceGate`** — three of six. The book was the interesting one, because it reads rating
+and confirmation _from the invoice registry_ rather than taking them as arguments, which is
+what makes its refusals mean anything, and that registry had just been populated.
+
+**Two of the three were wired on 2026-09-06** and the third is now a declined position; the
+sections near the end of this file carry both. The gate turned out not to be dormant but
+broken, which is the more useful half of that story.
 
 ### Resolved: two settlement rails, and one conversion between them
 
@@ -692,15 +700,20 @@ automation or multi-step settlement"_, which describes vault → escrow → hash
 verbatim. **Tokenization of Anything requires verified contracts on HashScan** — now confirmed
 done, see below. Every track requires a public repo.
 
-**The Privy control claim was overstated, and this corrects it.** Only the B2B track requires
-_"at least one Privy control, such as policies, signers, key quorums, or intents"_; Best
-financial flow does not. This build uses `useSendTransaction`, `useWallets` and identity-token
-verification. No policy, no key quorum, no intent, and no session or delegated signer. An
-embedded wallet signing its own transaction is the weakest reading of "signers" available, and
-this file already says that email plus an address is not a control. **Best financial flow is
-satisfied. Best B2B is not, and $2,500 turns on it.** Session signers would fit the
-architecture, and would also mean a seller gets paid without being online. That is a product
-decision, not plumbing.
+**The Privy control claim was overstated, then corrected, and the correction has since been
+built.** Only the B2B track requires _"at least one Privy control, such as policies, signers,
+key quorums, or intents"_; Best financial flow does not. For four days this build had none of
+the four — `useSendTransaction`, `useWallets` and identity-token verification, which is an
+embedded wallet signing its own transaction, the weakest reading of "signers" available, and
+this file already says that email plus an address is not a control.
+
+**Both tracks are satisfied as of 2026-09-06.** A Privy **policy** now scopes each seller's
+embedded wallet to `claim` on `DvpEscrow`: `to` equals the escrow, `chain_id` equals 5042002,
+and the decoded calldata names `claim`. Privy denies by default, so that is the entire
+permission the wallet holds. Policies were chosen over session signers on product grounds — a
+delegated signer would let the venue sign as the seller, which removes the one transaction a
+person signs, and that transaction is what satisfies the other track. See _"Privy signs exactly
+one thing"_ below, and `services/privy-policy.ts`.
 
 ### Resolved: one settlement conversion, in one place, with a direction
 
@@ -730,9 +743,10 @@ the dollar formatter and reported 5 USDC as *"Backed by $50,000.00"*.
   anything. `formatUsdc` is a separate function from `formatMoney` rather than an option on
   it: the two are never interchangeable and the failure is silent.
 
-Verified against the live vault: Harrow Point needs 0.05 USDC and holds 5, backed a hundred
-times over; the seeded mandates are correctly unbacked. The old comparison agreed on exactly
-one of them.
+Verified against the live vault when this was written: Harrow Point needed 0.05 USDC and held
+5, backed a hundred times over; the seeded mandates were correctly unbacked. The old comparison
+agreed on exactly one of them. **The vault reads 4.972731 USDC on 2026-09-06** — two Arc-rail
+sales have drawn on it since.
 
 ### Resolved: the seller has an Arc address that can actually be paid
 
@@ -1063,16 +1077,30 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
 
 Also dead, lower stakes: `Store.getCursor`/`setCursor` and `indexer_cursors` (residue of the
 removed indexer), `InvoiceRegistry.setRating` / `amendDueDate`, and a tail of unused helpers
-across all five packages. **`arc.ts` claims `PAYMENT_LOCK_DURATION` is "read from the deployed
-contract" — it is not in the ABI and never read**; the 24-hour figure is prose beside a
-hardcoded constant.
+across all five packages. `setCursor` does have one caller, in `db/seed.ts`; `getCursor` has
+none. **`arc.ts` claimed `PAYMENT_LOCK_DURATION` was "read from the deployed
+contract" — it is not in the ABI and never read.** The comment was corrected and now says so
+outright; the mechanism is still unread, so it is the accusation against the comment that is
+stale rather than the finding.
 
-The lesson stands and is now quantified: **nineteen mechanisms in this repo had a definition,
-documentation, and no caller.** Ten have a caller as of 2026-09-04 — seven outright (1, 2, 3,
-5, 6, 8 and 10) and three only partly (4, 7 and 9, where the caller exists and the claim beside
-it still does not hold) — so the count is **nine**. Nothing in the numbered list is untouched
-any more; what remains is the tail below it, plus `reclaimPayout` from the earlier nine, which
-stands deliberately.
+The lesson stands and is now quantified: **twenty-one mechanisms in this repo had a definition,
+documentation, and no caller.** Nineteen were found in this sweep; `provisionClaimPolicy` was
+the twentieth, on 2026-09-06, and the deployed `AtsComplianceGate` the twenty-first the same
+day.
+
+Thirteen have a caller. Ten as of 2026-09-04 — seven outright (1, 2, 3, 5, 6, 8 and 10) and
+three only partly (4, 7 and 9, where the caller exists and the claim beside it still does not
+hold) — plus the wallet policy, the compliance gate and `MandateBook` on 2026-09-06. So the
+count is **eight**. What remains is the tail below the numbered list, plus `reclaimPayout` and
+the Hedera `DvpEscrow`, both of which stand deliberately and say why.
+
+**The twenty-first changes what this pattern costs.** The twenty before it were inert: defined
+and documented and harmless. `AtsComplianceGate` was not harmless. It probed three ATS
+selectors that do not exist and refused every buyer on every instrument, so wiring it unchanged
+would have stopped the venue trading. Nothing had ever observed it doing that, which is the
+whole difficulty: an uncalled mechanism accumulates documentation describing behaviour nobody
+has checked, and the documentation gets more confident with age rather than less.
+
 Look for the caller before believing the comment — including comments written in this file.
 
 ### Resolved: the proof view carries the chain's own answer
@@ -1107,10 +1135,14 @@ and two spellings across two endpoints — the split-vocabulary shape this file 
 about. Nothing in the web reads that copy. It stays because changing a published wire field
 for a cosmetic win is the trade `X402_SETTLEMENT_SCALE_PPM` already refused.
 
-### Every status write, mapped — the machines and the code disagree
+### Every status write, mapped — the machines and the code disagreed
 
 A read-only pass over every place an invoice or mandate status is written, 2026-09-04. It asks
 the sweep's question backwards: not what has no caller, but what the callers actually do.
+
+**Both findings below were closed the same day**, by the section after this one. They are kept
+in the tense they were written in because the reasoning is what makes the fix legible — the
+point was never the two edges, it was that a machine nobody runs describes nothing.
 
 - **Two edges the running code performs are forbidden by the declared machine.**
   `confirmed -> sold` fires on **every trade, on both rails**, and
@@ -1119,7 +1151,7 @@ the sweep's question backwards: not what has no caller, but what the callers act
   writer at all. This is why wiring the machine in further is not a free change: dropping the
   `transitionInvoice` guard into the settlement paths would refuse the trade the product made
   this morning.
-- **The mandate machine has the same defect as `listed`, and it was not in the nineteen.**
+- **The mandate machine had the same defect as `listed`, and it was not in the nineteen.**
   `'funding'` is written by **nothing anywhere in the repo** — it appears in the status union,
   in the machine, in refusal prose and in fixtures, and nowhere else. `fundMandate` goes
   `draft -> active` in one write, which the machine also forbids, and all seven live mandates
@@ -1307,8 +1339,9 @@ Modelled on the `gantry` repo's `demo-reset.mjs` — numbered steps matching the
 relayer reported **first** because every step under it spends what it holds.
 
 - **It does not touch `facture.db`, and must not.** Provisioning and seeding are separate
-  there and separate here: the book is 29 invoices, 27 trades and two proven lifecycles, and
-  `db:seed` remains the empty-database-only path.
+  there and separate here: the book is 33 invoices, 38 trades of which 24 settled, six recorded
+  settlement outcomes and eight instruments that exist on Hedera, and `db:seed` remains the
+  empty-database-only path.
 - **The attester is the relayer.** It holds the float on Arc and tops up the seller and the
   buyer's wallet toward target balances. It cannot refill itself — Arc testnet has no faucet
   this script can call — so a dry relayer is a loud warning rather than a fix.
@@ -1366,6 +1399,185 @@ circumstances, and the only key that can is the one Privy made at sign-in.
 This also satisfies the Privy tracks' "at least one Privy control" requirement — but the
 reason to build it is that a seller could not otherwise be paid, and the requirement is
 downstream of that.
+
+### Resolved: the deployed gate refused everyone, and nothing could tell
+
+**`AtsComplianceGate` did not merely have no caller. It was wrong, and it would have stopped the
+venue trading the moment anything called it** (2026-09-06). It probed `isPaused()`,
+`isAuthorized(address)` and `getKycAccountStatus(address)` — the three selectors this file has
+recorded since 2026-09-02 as **not existing on a deployed ATS diamond**. Each reverts
+`FunctionNotFound`. The gate fails closed by design, so three missing selectors collapsed into
+`COMPLIANCE_PROBE_FAILED` and it answered `(false, COMPLIANCE_PROBE_FAILED)` for **every buyer
+on every instrument**.
+
+Read off MF-2051 (`0xb50567e02baaf768c834b0663f539db43d5b34b0`) against the buyer at
+`0.0.10314099`, whose control list and KYC both say yes:
+
+| probed                       |        | the real one             |                    |
+| ---------------------------- | ------ | ------------------------ | ------------------ |
+| `isPaused()`                 | revert | `paused()`               | `false`            |
+| `isAuthorized(buyer)`        | revert | `isInControlList(buyer)` | `true`             |
+| `getKycAccountStatus(buyer)` | revert | `getKycStatusFor(buyer)` | `1` (GRANTED)      |
+|                              |        | `getControlListType()`   | `true` (allowlist) |
+
+The old gate refused that buyer. The corrected one permits them.
+
+- **`services/compliance.ts` was correct the whole time**, having been fixed against live paper
+  on 2026-09-02. Two halves of one fact, maintained separately, and **the on-chain half was the
+  one a third party would call.** That is the split-vocabulary failure this file keeps warning
+  about, in its most expensive form.
+- **The unit tests passed against a fiction.** `MockAtsSecurity` implemented the same three
+  wrong selectors, because it was written from the same misreading as the contract. A fake that
+  agrees with the code under test cannot contradict it, and a mock is only evidence about
+  behaviour the mock did not choose — selector names are not that.
+- **Failing closed is what hid it.** The design's own header sells "a selector that has drifted
+  produces a named refusal, never a silent `true`", and that is true and was the right trade.
+  What it cannot do is distinguish a _wrong_ selector from an unreachable instrument. Only a
+  call against real paper does that, and only once something calls it.
+- **Membership is not permission, and the old contract said otherwise in a comment.** It claimed
+  `isAuthorized` "already resolves whitelist-versus-blacklist mode internally". It does not
+  exist, and had it existed as imagined, reading membership alone still admits exactly the party
+  a blocklist excludes. The control list is two probes now, and both must succeed: a readable
+  membership bit beside an unreadable mode is not half an answer.
+- **KYC is compared against `GRANTED` exactly**, not `!= 0`, which would read every status ATS
+  adds later as a valid grant.
+- **`PROBE_GAS` is now measured rather than asserted** — the four probes estimate at 49.5k–64.5k
+  including intrinsic, so 150k is about 3.4× the dearest.
+
+**The corrected gate is `0x6d78847e4ac257da68909c5a4c60ea1dcc060564`**, Sourcify `exact_match`,
+and `MandateBook.setComplianceGate` now points at it. The broken one is still live and still
+verified, deliberately — an address found in an old note should be identifiable rather than
+mysterious, and verifying it is what lets a reader see for themselves what it did.
+
+**The venue reads it, and the gate decides.** A cross-check that changes no outcome is
+decoration. But handing a contract the decision is exactly the risk this finding is about, so
+the direct facet reads were demoted rather than deleted: the gate permits and it is one read
+instead of four; the gate refuses and the facets supply the sentence, because a reason code is
+not something a seller can act on. **If the gate refuses while the facets permit, the trade is
+refused and marked indeterminate** — settlement must not move on a contradiction, and a
+contradiction is not a fact about the buyer either. That branch costs nothing on the happy path
+and would have named this bug on the first trade.
+
+Two things fell out of the redeploy that were separate faults:
+
+- **`deployHedera.ts` redeployed `UniquenessRegistry` unconditionally**, against its own comment
+  saying it must outlive a book upgrade. A second run would have minted an empty registry and
+  either silently abandoned every claim or made the deploy a no-op nobody noticed. Every
+  contract can be reused now, and a reused book is checked against the registry and escrow it is
+  actually bound to, because both references are immutable.
+- **Wiring authority came from `FACTURE_OWNER` rather than from the chain.** They disagree here:
+  the live book's `owner()` is the operator key while the env names another address, so every
+  wiring call was skipped with a message telling the reader to run them from a key that holds no
+  rights over the book.
+- **`verify.mjs` sent whichever build-info `readdirSync` returned first** to every contract.
+  Hardhat 3 emits one unit per root source, so the directory holds nineteen and "first" is
+  arbitrary; it reported `Contract not found in compiler output` for a contract deployed from
+  that very tree.
+
+### Resolved: the chain answers on the match the venue is arming
+
+**`MandateBook` is in the live path as of 2026-09-06**, five days after it was deployed. Three
+calls: `postMandate` when a mandate is created, `creditFunding` when it is funded, and
+`previewMatch` when a trade is armed.
+
+**`previewMatch` is what makes wiring the book worth doing, and it costs nothing.** It reads the
+rating, the confirmation status,
+the due date and the face value **out of `InvoiceRegistry`** rather than from whoever is asking
+— which is what `IInvoiceRegistry` means by "rating below floor only means something if the
+rating is not supplied by the party who wants the match to succeed". Everything else on the arm
+path is the venue checking its own homework. This is the one verdict there that the venue
+cannot have arranged.
+
+Verified live against all seven mandates and the eight invoices with real instruments. It is not
+a rubber stamp: MF-2072 is refused by five of seven on `RATING_BELOW_MANDATE` and taken by the
+two with an `UNRATED` floor, which is the same shape as the agent's own run; MF-2071 at 99 days
+is taken only by the two 120-day mandates; MF-2070 at 59 days is refused by the 30- and 45-day
+ones. MF-2046, MF-2051 and the second MF-2052 answer `INVOICE_UNKNOWN`, because they predate the
+registry wiring and were never listed on it.
+
+- **It decides nothing, deliberately.** The book **floors** the discount where
+  `@facture/shared` **ceils** it, and computes tenor as `ceil` off `block.timestamp` where the
+  venue counts UTC midnights. So the two legitimately differ by a minor unit, and sometimes by a
+  whole day of discount, on an invoice both would happily match. Measured: on MF-2072 the book
+  prices 392,094 against the venue's 392,093. Refusing on a price mismatch would reject good
+  trades for a rounding rule. **Compare the reason code, not the number**, and render a
+  disagreement rather than resolving it.
+- **Three states, never two.** No book configured, a mandate never posted, and a node that would
+  not answer are all `checked: false`. Folding any of them into `ok: false` prints a refusal the
+  chain never made — the `/health` cursor mistake, `ComplianceDecision.determinate` and the proof
+  view's registry block, in a fourth place.
+- **`mandates.chain_mandate_id` (migration `0008`) is the join, and it exists here or nowhere.**
+  The book MINTS its ids (`++_mandateCount`, no way to supply one); the Arc vault keys capital by
+  `uint256(keccak256(uuid))`; the book cannot read Arc and the vault never looks at the book.
+  `arc.ts` has carried a warning since it was written that anything posting these mandates would
+  have to reconcile the two rather than assume they line up. Without the column a mandate is
+  unaddressable the instant the posting transaction returns.
+- **Amounts are cents, never USDC.** The book prices from the registry's `faceValue`, which
+  issuance lists in the invoice's own minor units, so `EXPOSURE_EXHAUSTED` compares like with
+  like. Crediting the vault's 6-decimal figure would put a ppm-scaled number beside a cents one
+  on a contract nobody can patch — the `units.ts` defect, reproduced where it is permanent.
+- **The venue is the on-chain buyer of every mandate it posts**, because `postMandate` sets
+  `buyer = msg.sender` permanently and the real buyers hold no Hedera key. What the book records
+  is the venue's standing bid on their behalf. That is also why `authoriseRelease`, which is
+  buyer-only, is not wired.
+- **`depositRefFor` is the venue's reference, not the vault's.** The book's replay guard was
+  designed around a `depositRef` minted inside `MandateVault.deposit`; the buyer deposits from
+  their own wallet and the venue observes a balance rather than a deposit, so that reference is
+  never seen here. Keying on the mandate and its new cumulative total keeps the guard doing
+  something real — this venue cannot credit one funding state twice — while establishing nothing
+  about the vault having minted anything. Reading it as the stronger claim would be replay
+  protection removed while it still looks present.
+- **`scripts/post-mandates.mjs`** covers the seven mandates that predate the wiring; the routes
+  cover everything after. All seven are on the book, credited, and answering.
+
+**`tryMatch`, `confirmSettlement`, `confirmMaturity` and `authoriseRelease` stay unwired**, and
+the reason is the next section.
+
+### Declined: the Hedera delivery escrow, and the wall it hits
+
+**The Hedera `DvpEscrow` (`0x35a8a43d…`) is the one deployed contract with no caller, and it
+stays that way.** Like the secondary market and seller self-custody, this is a stated position
+rather than an oversight.
+
+Its only designed reader is `MandateBook.confirmSettlement`, which demands a **claimed delivery
+lock** whose `depositor`, `beneficiary` and `asset` equal the match's seller, buyer and
+instrument. This venue's asset leg is an **ATS hold**: `createHoldByPartition` moves units from
+free balance to held balance and they never leave the seller's ledger entry. Producing the
+escrow's proof instead would require, all of it:
+
+- **Moving a regulated security into the escrow contract.** `openLock` does
+  `safeTransferFrom(seller → escrow)`, so the escrow address must be on the instrument's
+  `ControlList` and hold a KYC grant. It is on neither, on any instrument the venue has issued —
+  and adding it means the venue asserting a KYC credential about a smart contract, on every
+  receivable it ever lists, because every receivable is its own diamond.
+- **The buyer signing `claim`.** `claim` checks `msg.sender == beneficiary`. Six of seven
+  mandates have no Hedera key. Same wall as the x402 seller leg and the declined relist.
+- **A timeout neither rail satisfies.** `MIN_LOCK_DURATION` is 900 seconds; the x402 challenge
+  window is 180 and `VAULT_HOLD_WINDOW_SECONDS` is 720. Raising the x402 window fivefold means
+  an unpaid trade holds the seller's whole position five times as long.
+- **An ERC-20 facade this repo has never exercised.** `ATS_ABI` carries no `approve`,
+  `transfer` or `transferFrom`, and `DvpEscrow.test.ts` opens every lock against `MockUSDC` with
+  `LegKind.Payment` — `Delivery` is declared and used nowhere. Given `deployBond`'s wrong
+  selector and the three dead compliance selectors, the facade's behaviour is **unestablished**,
+  not merely untested.
+- **An ordering that contradicts the venue's.** `IDvpEscrow` requires the secret's generator to
+  lock first with the longer timeout; the venue generates the secret and its Arc payment lock
+  runs a day. A Hedera delivery lock would have to be second and shorter — but `settleFromVault`
+  puts the asset leg first on purpose, because reversing it leaves the buyer holding paper
+  nobody paid for.
+
+**And the hashlock protects nobody here.** On Arc it is load-bearing: the venue cannot claim for
+a seller, and the seller's key is a Privy wallet the venue does not hold. On Hedera the venue is
+simultaneously the seller, the hold's escrow and the attester, so adding a hashlock inserts a
+party who must now sign to receive delivery in exchange for protecting the venue from itself.
+The ATS hold already gives four of the escrow's five properties — units immobilised, only the
+named escrow may execute or release, destination pre-bound, expiry — **without the paper leaving
+the holder's ledger entry**, which is the only reason the compliance problem above exists.
+
+`FACTURE_DELIVERY_ESCROW` exists in `packages/contracts/.env.example` and is a **deploy-time**
+variable only: it lets a redeployed book bind to the existing escrow rather than orphan it. The
+backend has no env var, no ABI entry and no code path that can address it, and should not
+acquire one without the five things above.
 
 ### Contracts are verified on Sourcify
 

@@ -9,7 +9,7 @@ deploy log. Where the chain and an earlier note disagreed, the chain won.
 
 ## Hedera testnet (chain 296)
 
-The live venue, redeployed after the refusal-code rename in `e6edbe6`.
+The live venue, redeployed after the refusal-code rename in `78faa1a`.
 
 | contract                   | address                                      | bytes  |
 | -------------------------- | -------------------------------------------- | ------ |
@@ -414,7 +414,7 @@ after a real funded bid existed from a buyer the security actually permits — H
 **A wrinkle worth naming, and this run is what found it.** The compliance gate ran only when a
 trade was armed, so the book could show a price from a bid whose buyer cannot hold that
 security. The refusal was correct and legible, and it arrived after the seller had decided to
-sell. `4b90e1f` moved the check into pricing on the same day: `priceOne` screens the winning
+sell. `3ea7592` moved the check into pricing on the same day: `priceOne` screens the winning
 bid and, if it is barred, drops it and looks again, at most three passes. `priceBook` screens
 nothing, deliberately — checking per row is the same on-chain read per row this design avoids
 everywhere. A book price is indicative; `priceOne` is what a seller acts on. The MF-2052 run
@@ -455,7 +455,7 @@ because the interesting part happened before the trade did.
 
 MF-2052's bond existed, with supply, allowlist and KYC all empty. The book quoted **nothing**
 for it: `mandatesMatching: 0`, `mandatesBarredByInstrument: 3`, `quote: null`. That is the
-compliance-aware pricing from `4b90e1f` working — three funded bids passed every economic test
+compliance-aware pricing from `3ea7592` working — three funded bids passed every economic test
 and were dropped because the security does not permit their buyers, and the seller was told so
 instead of being shown a price nobody could take.
 
@@ -493,7 +493,7 @@ venue's fee, not the holder's.
 
 Decoding this bond's own `deployBond` calldata gives `regulationType 1, regulationSubType 0` —
 Reg S, as decided. The invoice row said `reg-d-506c`, because the job carried the row's value to
-the adapter and the adapter used a venue-wide config value instead. Fixed in `083a26d`, and
+the adapter and the adapter used a venue-wide config value instead. Fixed in `c810389`, and
 migration `0003` has since been applied to `packages/backend/data/facture.db`: all 28 invoices
 read `reg-s`, the column default matches, and `integrity_check` and `foreign_key_check` are both
 clean with every row count unchanged — 28 invoices, 27 trades, 99 quotes, 91 refusal receipts.
@@ -530,7 +530,7 @@ outside both free balances, since an ATS hold moves units out of `balanceOf`.
 
 One trap worth naming: `6e1470e5`'s asset transaction reads `SUCCESS` on chain while its trade
 row says `failed`. An earlier version of this file cited that transaction pair as the first
-settled trade. It was the attempt before `c1bc54f`, and its recorded "unitsMinor does not track
+settled trade. It was the attempt before `e0af611`, and its recorded "unitsMinor does not track
 face value" gap was fixed by that commit. The settled trade is the one above.
 
 ## The vault's units, and a seller who could not be paid — 2026-09-03
@@ -864,3 +864,147 @@ for the armed trade that needs settling.
 
 **So this invoice carries three trade rows: one unwound, one failed, and one settled.** Recorded
 rather than tidied away, for the same reason as the MF-2046 debris.
+
+## The first full Arc-rail lifecycle — MF-2070, 2026-09-04
+
+Issued, sold out of the buyer's escrow, and matured. The Arc rail had carried a trade before this
+one; this is the first receivable to go all the way on it.
+
+|               |                                                                                           |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| invoice       | MF-2070, `4ec34f9d-cbac-4727-9cdb-88aaaa36625a`, $12,500 face, 60 days                    |
+| instrument    | `0.0.10363143`                                                                            |
+| trade         | `72d8448e-5281-4ad8-b311-1d35d4242eb9`, hold `1`                                          |
+| mandate       | `8b879d02-4593-4d66-82bf-52d4833401b6` — Harrow Point at 850 bps, the escrowed one        |
+| proceeds      | 1,232,534 cents, settled as **12,326 USDC minor**                                         |
+| cash, Arc     | `0xd28dfbbb52c137ac25b68c41807df7370cd618b3bc2174b0c17611cce161632b`, payer `0x1c755e95…` |
+| asset, Hedera | `0.0.10311549@1788523694.708650693`                                                       |
+| escrow lock   | `0x8d423031a260c768c15df1134451e43e85d03e824b00dcb6aef9bbae0449cfc6`                      |
+| preimage      | `0xd997a4c4698fa65edb5c90c82305676b35a6ba3f54de0fb81bbdb345eafe8d91`                      |
+| HCS match     | topic `0.0.10342152`, sequence **32**                                                     |
+| maturity      | schedule `0.0.10363391`, outcome `on_time`                                                |
+
+### It is also the evidence behind the rounding fix
+
+This is the trade where the Arc rail charged 12,326 for proceeds the x402 rail would have charged
+12,325 for. The payment leg was calling `usdcRequiredFor`, which rounds **up** because it sizes a
+collateral requirement, while `toSettlementAmount` rounds **down** so a payer is never billed money
+the invoice does not owe. `units.ts` states that rule, and `arc.ts` says "up, unlike the payment
+leg" directly above the function the payment leg was calling.
+
+At a 1 ppm scale an inexact division is the ordinary case rather than an edge, so the two rails
+quoted different money for one receivable most of the time. It matters more than a cent suggests:
+**`registerMatch` binds the price on chain and is one-shot**, so the wrong figure was permanent per
+trade. It survived because the rails-agree test that existed compared `toSettlementAmount` with
+itself.
+
+## Two more x402 settlements — MF-2071 and MF-2072, 2026-09-04
+
+|            | MF-2071                                          | MF-2072                                          |
+| ---------- | ------------------------------------------------ | ------------------------------------------------ |
+| invoice    | `43f68060-0a14-459d-aee8-f73d81bf2df6`           | `5fb64009-2923-47a0-bb73-17374e871348`           |
+| instrument | `0.0.10363355`                                   | `0.0.10363420`                                   |
+| trade      | `6ba856df-4be0-4296-ab6c-04a82c2c413b`, hold `2` | `04b109ee-be4f-43dc-803a-a4f909064f4f`, hold `2` |
+| mandate    | `402cfa47…` at 1850 bps, unescrowed              | the same                                         |
+| proceeds   | 759,452 cents, face $8,000                       | 391,890 cents, face $4,000                       |
+| cash       | `0.0.7162784@1788524693.933989558`               | `0.0.7162784@1788525051.116962644`               |
+| payer      | `0.0.10314099`                                   | `0.0.10314099`                                   |
+| asset      | `0.0.10311549@1788524701.373225965`              | `0.0.10311549@1788525052.964567515`              |
+| HCS match  | sequence 43                                      | sequence 54                                      |
+
+Each carries an `unwound` trade row before the settled one — `8ae840a2…` and `9fdde9ca…` — which is
+the signature of the recorded agent run on MF-2052, where a client timeout armed a trade nothing on
+the agent's side knew about.
+
+**Whether these two were agent ticks or hand-driven cannot be told from the ledger**, because the
+agent and the operator sign the x402 leg with the same key. They are recorded as x402 settlements
+and nothing here claims more.
+
+## The Privy wallet policy — `ptcr8aqgtaya`, 2026-09-06
+
+Created by `pnpm privy:policy` and pinned as `PRIVY_WALLET_POLICY_ID`. It scopes a signed-in
+seller's embedded wallet to one call — `claim` on `DvpEscrow` — under three conditions: `to` equals
+the escrow, `chain_id` equals 5042002, and the decoded calldata names `claim`. Privy denies by
+default, so that is the whole permission the wallet holds.
+
+Confirmed against the live API rather than the docs: four runs produced one policy, because the
+idempotency key digests the policy body, and all three conditions read back intact.
+
+The escrow address is read off the deployed vault rather than passed in. The address the policy
+names has to be the address the venue settles into, and a second literal is how those come to
+disagree.
+
+## The corrected compliance gate — `0x6d78847e…`, 2026-09-06
+
+`AtsComplianceGate` was redeployed because the original was wrong, not because it was old. It
+probed `isPaused()`, `isAuthorized(address)` and `getKycAccountStatus(address)`, none of which
+exists on a deployed ATS diamond, and therefore refused every buyer on every instrument. CLAUDE.md
+carries the full account.
+
+|                |                                                                          |
+| -------------- | ------------------------------------------------------------------------ |
+| corrected gate | `0x6d78847e4ac257da68909c5a4c60ea1dcc060564`, Sourcify `exact_match`     |
+| superseded     | `0x9a2c848ab62e715d2b49a4710f6451395978abbb`, still live, still verified |
+| rewired        | `MandateBook.setComplianceGate`, from the owner key                      |
+
+Read against MF-2051 (`0xb50567e02baaf768c834b0663f539db43d5b34b0`) and the buyer at
+`0.0.10314099`, whose control list and KYC both say yes:
+
+```
+old gate  canReceive(MF-2051, buyer) -> (false, COMPLIANCE_PROBE_FAILED)
+new gate  canReceive(MF-2051, buyer) -> (true,  NONE)
+```
+
+And against an address nobody allowlisted, which is where the difference is most useful, because
+the old gate could not say why it was refusing anyone:
+
+```
+old gate  -> (false, COMPLIANCE_PROBE_FAILED)
+new gate  -> (false, CONTROL_LIST_BLOCKED)
+```
+
+Cross-checked against the raw facets on all five deployed instruments plus the gas-probe bond, and
+they agree on every one. A nonexistent address still answers `COMPLIANCE_PROBE_FAILED`, so the
+fail-closed property is intact.
+
+The superseded gate stays on the Sourcify list deliberately, for the same reason the superseded
+venue table exists above: an address found in an old note should be identifiable rather than
+mysterious, and verifying it is what lets a reader see what it did.
+
+## The mandate book carries the venue's bids — 2026-09-06
+
+`MandateBook` (`0x361f9d4b1101898417b2b9148bc8aa522024a38f`) had been deployed since 2026-09-01 and
+called by nothing. All seven mandates are now posted and credited, by
+`node scripts/post-mandates.mjs --execute`.
+
+| on-chain id | mandate     | buyer                   | terms                     | credited   |
+| ----------- | ----------- | ----------------------- | ------------------------- | ---------- |
+| 1           | `8c6bc777…` | Ashgrove Treasury       | A / 60d / 800 bps         | 50,000,000 |
+| 2           | `5362b32a…` | Cordell Credit Partners | B / 90d / 925 bps         | 25,000,000 |
+| 3           | `76b9eb67…` | Ashgrove Treasury       | A / 30d / 675 bps         | 40,000,000 |
+| 4           | `3ab6b705…` | Tessellate Capital      | C / 120d / 1250 bps       | 15,000,000 |
+| 5           | `ac66e63d…` | Ashgrove Treasury       | UNRATED / 45d / 1600 bps  | 6,000,000  |
+| 6           | `402cfa47…` | Harrow Point            | UNRATED / 120d / 1850 bps | 20,000,000 |
+| 7           | `8b879d02…` | Harrow Point            | B / 90d / 850 bps         | 3,757,466  |
+
+Amounts are invoice-currency minor units — cents — because the book prices from
+`InvoiceRegistry.faceValue`, which issuance lists in cents. Mandate 7 reads 3,757,466 rather than
+its original 5,000,000 because maturity retires the Arc-rail commitment.
+
+### What `previewMatch` answers, read live
+
+Asked of every mandate against every invoice with a real instrument. It is not a rubber stamp, and
+the pattern it produces is the venue's own:
+
+| invoice                            | tenor | answer                                                                                     |
+| ---------------------------------- | ----- | ------------------------------------------------------------------------------------------ |
+| MF-2072                            | 39d   | taken by 5 and 6; **`RATING_BELOW_MANDATE`** from the other five, the debtor being UNRATED |
+| MF-2071                            | 99d   | taken by 4 and 6; **`TENOR_EXCEEDS_MANDATE`** from the five shorter mandates               |
+| MF-2070                            | 59d   | taken by five; refused by the 30-day and 45-day mandates                                   |
+| MF-2052                            | 44d   | taken by five; **`RATING_BELOW_MANDATE`** from the two A-floor mandates                    |
+| MF-2046, MF-2051, MF-2052 (second) | —     | **`INVOICE_UNKNOWN`** — issued before the registry was wired, so never listed on it        |
+
+**The book and the venue price the same trade one cent apart, by design.** On MF-2072 the book
+returns 392,094 and the venue quotes 392,093: the book **floors** the discount and
+`@facture/shared` **ceils** it, each deliberately, in opposite parties' favour. So the venue
+compares the reason code and publishes both prices, rather than treating a mismatch as a refusal.
