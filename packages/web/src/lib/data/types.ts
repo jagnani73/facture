@@ -13,7 +13,12 @@
  * swapping back a one-line change in `src/lib/api/config.ts`.
  */
 
-import type { CashLegLock, CashRail, MandateRecord } from '@/lib/api/contract';
+import type {
+  CashLegLock,
+  CashRail,
+  InvoiceRegistryAnswer,
+  MandateRecord,
+} from '@/lib/api/contract';
 import type {
   ChainKey,
   Debtor,
@@ -326,6 +331,16 @@ export interface ProofRecord {
     decision: 'confirmed' | 'disputed' | null;
     decidedAt: string | null;
   };
+  /**
+   * What the public `InvoiceRegistry` says about the same receivable.
+   *
+   * It sits beside `confirmation` because it answers the same question from the other side:
+   * that block is the venue's own column, this one is `isConfirmed(invoiceId)`, a public
+   * view anybody can call. That is the difference between a claim and a check — and the two
+   * are kept apart rather than reconciled here, because a disagreement between them is worth
+   * a reader seeing rather than resolving on their behalf.
+   */
+  registry: InvoiceRegistryAnswer;
   compliance: {
     allowed: boolean | null;
     checkedAt: string | null;

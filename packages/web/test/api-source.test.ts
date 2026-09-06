@@ -49,8 +49,16 @@ const proof = (over: Partial<TradeProofResponse> = {}): TradeProofResponse => ({
     isin: 'USQ72738QUM6',
     securityId: '0.0.10331926',
     securityExplorerUrl: null,
+    regulation: 'REG_S',
   },
   confirmation: { decision: 'confirmed', decidedAt: '2026-09-01T09:00:00.000Z' },
+  registry: {
+    checked: true,
+    listed: true,
+    confirmed: true,
+    contractAddress: '0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7',
+    explorerUrl: 'https://hashscan.io/testnet/contract/0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7',
+  },
   compliance: {
     allowed: true,
     checks: [],
@@ -129,6 +137,49 @@ describe('apiProof', () => {
 
     answer(proof());
     expect((await apiProof(TRADE_ID)).payout).toBeNull();
+  });
+
+  /*
+   * The instrument's own declaration, which this source hardcoded to null for as long as
+   * the proof route had no such field — so the row rendered on the fixture path and never on
+   * the live one. It is read from the venue rather than from this build's configured
+   * default, because the row and the deploy calldata disagreed once and the default would
+   * have agreed with the wrong one.
+   */
+  it('carries the regulation the venue declared, rather than a default', async () => {
+    answer(proof());
+    expect((await apiProof(TRADE_ID)).instrument.regulation).toBe('REG_S');
+
+    answer(
+      proof({
+        invoice: { ...proof().invoice, regulation: 'REG_D_506_B' },
+      }),
+    );
+    expect((await apiProof(TRADE_ID)).instrument.regulation).toBe('REG_D_506_B');
+
+    answer(proof({ invoice: { ...proof().invoice, regulation: null } }));
+    expect((await apiProof(TRADE_ID)).instrument.regulation).toBeNull();
+  });
+
+  /*
+   * The registry answer crosses whole, `checked: false` included. The venue is the only
+   * party that knows whether it got an answer out of the node, so this source has no
+   * business turning "could not ask" into a no on the way to the screen — which is the
+   * shape of the defect that made `escrowVerified` a published field nobody read.
+   */
+  it('passes the registry answer through, unchecked and all', async () => {
+    answer(proof());
+    expect((await apiProof(TRADE_ID)).registry).toEqual(proof().registry);
+
+    const unreadable = {
+      checked: false,
+      listed: null,
+      confirmed: null,
+      contractAddress: '0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7',
+      explorerUrl: null,
+    };
+    answer(proof({ registry: unreadable }));
+    expect((await apiProof(TRADE_ID)).registry).toEqual(unreadable);
   });
 
   /*
@@ -451,6 +502,7 @@ describe('apiProof', () => {
           isin: null,
           securityId: null,
           securityExplorerUrl: null,
+          regulation: null,
         },
       }),
     );
@@ -467,6 +519,7 @@ describe('apiProof', () => {
           isin: 'USQ72738QUM6',
           securityId: '0.0.10331926',
           securityExplorerUrl: 'https://example.test/security',
+          regulation: 'REG_S',
         },
       }),
     );
@@ -484,6 +537,7 @@ describe('apiProof', () => {
           isin: null,
           securityId: null,
           securityExplorerUrl: null,
+          regulation: null,
         },
       }),
     );

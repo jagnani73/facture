@@ -333,9 +333,16 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
       tokenId: proof.invoice.securityId,
       isin: proof.invoice.isin,
       uniquenessHash: proof.invoice.uniquenessHash,
-      // The proof contract carries no SEC regulation field, so the row is omitted rather
-      // than filled with the default this build happens to issue under.
-      regulation: null,
+      /*
+       * The invoice's own declaration, not this build's default.
+       *
+       * It was hardcoded null here for as long as the proof contract had no such field, so
+       * the row rendered on the fixture path and never on the live one. Reading the venue's
+       * value rather than substituting `ATS_REGULATION_TYPE` is the whole point: the two
+       * disagreed once, and a screen showing the configured default would have agreed with
+       * the wrong one.
+       */
+      regulation: proof.invoice.regulation,
       maturity: null,
       issuedAt: null,
       issuedTxId: null,
@@ -350,6 +357,12 @@ export async function apiProof(tradeId: string, signal?: AbortSignal): Promise<P
           : null),
     },
     confirmation: proof.confirmation,
+    /*
+     * Passed through whole, including `checked: false`. The venue is the only party that
+     * knows whether it got an answer out of the node, and this source has no business
+     * turning "could not ask" into a no on the way to the screen.
+     */
+    registry: proof.registry,
     compliance: proof.compliance,
     assetLeg: {
       from: null,

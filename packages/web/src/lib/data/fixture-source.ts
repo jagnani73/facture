@@ -130,6 +130,20 @@ export function fixtureProof(tradeId: string): ProofRecord | null {
       decision: invoice?.status === 'disputed' ? 'disputed' : 'confirmed',
       decidedAt: proof.instrument.issuedAt,
     },
+    /*
+     * `checked: true`, because in this book the registry is imagined to have answered. The
+     * unchecked state is the honest one for a source with no chain behind it — but the
+     * fixture book's whole job is showing the screen fully populated, and every identifier
+     * on it is already invented. What matters is that the row exists on both paths: the
+     * defect this closes is a block that renders from fixtures and never from the venue.
+     */
+    registry: {
+      checked: true,
+      listed: proof.registry.listed,
+      confirmed: proof.registry.confirmed,
+      contractAddress: proof.registry.contractAddress,
+      explorerUrl: `${HEDERA.explorerUrl}/contract/${proof.registry.contractAddress}`,
+    },
     compliance: {
       allowed: proof.compliance.decision === 'allowed',
       checkedAt: proof.compliance.checkedAt,

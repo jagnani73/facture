@@ -671,6 +671,9 @@ function ComplianceCard({ record }: { record: ProofRecord }) {
             }
           />
         ) : null}
+
+        <RegistryBlock record={record} />
+
         {compliance.checkedAt ? (
           <Row term="Decided" value={formatDateTime(compliance.checkedAt)} />
         ) : null}
@@ -697,6 +700,82 @@ function ComplianceCard({ record }: { record: ProofRecord }) {
       </div>
     </Card>
   );
+}
+
+/**
+ * What the chain says about this invoice, beside what the venue says.
+ *
+ * `InvoiceRegistry.isConfirmed(invoiceId)` is a public view, and that is the whole point of
+ * this block: it moves "the customer acknowledged this" from a column only the venue can see
+ * to something a reader can call for themselves. The acknowledgement is what justifies
+ * advancing the full face value with no holdback, so it is the claim on this page most worth
+ * checking somewhere that is not us.
+ *
+ * **Three states per answer, never two.** `checked: false` is a question that went
+ * unanswered — no registry configured for this deployment, or a node that could not be read
+ * — and it renders as that rather than as a no. A registry blinking would otherwise print
+ * "not confirmed" one line under a confirmation the venue is certain of.
+ */
+function RegistryBlock({ record }: { record: ProofRecord }) {
+  const { registry } = record;
+
+  /*
+   * A disagreement is shown, not resolved. The venue's column and the public view are two
+   * parties answering one question; if they differ, that is the reader's to weigh. Picking
+   * one would leave the stronger-looking claim standing alone, which is the failure this
+   * whole screen is built against.
+   */
+  const contradicted =
+    registry.confirmed !== null &&
+    record.confirmation.decision !== null &&
+    registry.confirmed !== (record.confirmation.decision === 'confirmed');
+
+  // Bounded top and bottom, because the rows either side of it come from the venue.
+  return (
+    <div className="my-4 border-y border-rule py-3">
+      <Label className="mb-1">The public invoice registry</Label>
+
+      {registry.checked ? (
+        <>
+          <Row term="Listed on chain" value={<OnChain answer={registry.listed} />} />
+          <Row term="Confirmed on chain" value={<OnChain answer={registry.confirmed} />} />
+        </>
+      ) : (
+        <p className="py-2 text-xs text-muted">
+          Not asked. Either no registry is configured for this deployment, or the node could not be
+          read — so nothing here is the chain&rsquo;s answer about this invoice, which is not the
+          same as the chain answering no.
+        </p>
+      )}
+
+      {registry.contractAddress ? (
+        <Row term="Registry" value={<Mono>{elide(registry.contractAddress, 10, 8)}</Mono>} />
+      ) : null}
+
+      {contradicted ? (
+        <p className="mt-2 rounded-sm border border-rule bg-sunken px-3 py-2 text-xs text-ink">
+          The registry and the venue&rsquo;s own record disagree about this invoice. Both are shown
+          exactly as they were read, and neither is corrected here.
+        </p>
+      ) : null}
+
+      {/* No identifier, no link. A dead explorer link claims more than an absent one. */}
+      {registry.explorerUrl ? (
+        <Explorer href={registry.explorerUrl} label="Open the registry contract" />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One registry answer, in three states.
+ *
+ * `null` is "not answered" and is deliberately not styled as a refusal: a question the venue
+ * could not put to the node is not the node saying no.
+ */
+function OnChain({ answer }: { answer: boolean | null }) {
+  if (answer === null) return <span className="text-muted">Not answered</span>;
+  return <span className={answer ? 'text-pos' : 'text-neg'}>{answer ? 'Yes' : 'No'}</span>;
 }
 
 /* -------------------------------------------------------------------------- */

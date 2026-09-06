@@ -904,6 +904,20 @@ export interface TradeProof {
     issuedTxId: string;
     issuedAt: string;
   };
+  /**
+   * What the public invoice registry says, as this book imagines it.
+   *
+   * Both demo trades were confirmed by their customer and listed before they sold, so the
+   * chain and the venue agree here — which is what a working trade looks like and what the
+   * screen shows by default. The unchecked and disagreeing states are real and are exercised
+   * in the tests rather than staged in the book, because a demo that shows a registry it
+   * could not read teaches the wrong thing about the one screen that exists to be checked.
+   */
+  registry: {
+    listed: boolean;
+    confirmed: boolean;
+    contractAddress: string;
+  };
   compliance: {
     decision: 'allowed' | 'refused';
     checkedAt: string;
@@ -951,6 +965,12 @@ const BUYER_HEDERA_ACCOUNT = '0.0.6098431';
 const SELLER_HEDERA_ACCOUNT = '0.0.5512';
 const BUYER_ARC_ADDRESS = '0x9C41f5A8B2e70dD3c1A4e88F6b0C25dE7a913F04';
 const SELLER_ARC_ADDRESS = '0x2Ee0aB7c4915dF6b83C0a1E5d724Bf9068A3c17D';
+/**
+ * Invented, like every other identifier in this book, and deliberately not the address the
+ * live venue deploys `InvoiceRegistry` to. One real address among fiction would make the
+ * rest read as real.
+ */
+const INVOICE_REGISTRY = '0x7B3aF0c15D2e894b6A0F71cE3d8825aB94Ef60D2';
 
 export const tradeProofs: Readonly<Record<string, TradeProof>> = {
   'TRD-4417': {
@@ -963,6 +983,7 @@ export const tradeProofs: Readonly<Record<string, TradeProof>> = {
       issuedTxId: '0.0.5512@1755043211.442918331',
       issuedAt: '2026-08-12T08:40:11.000Z',
     },
+    registry: { listed: true, confirmed: true, contractAddress: INVOICE_REGISTRY },
     compliance: {
       decision: 'allowed',
       checkedAt: '2026-08-14T13:19:52.000Z',
@@ -995,6 +1016,7 @@ export const tradeProofs: Readonly<Record<string, TradeProof>> = {
       issuedTxId: '0.0.5512@1754388006.771204118',
       issuedAt: '2026-08-05T09:20:06.000Z',
     },
+    registry: { listed: true, confirmed: true, contractAddress: INVOICE_REGISTRY },
     compliance: {
       decision: 'allowed',
       checkedAt: '2026-08-20T10:02:19.000Z',

@@ -54,6 +54,9 @@ function refusal(read: () => unknown): ApiError {
 const replacer = (_key: string, value: unknown): unknown =>
   typeof value === 'bigint' ? `${value}n` : value;
 
+/** The real bond this venue issued, in the form a Solidity contract knows it by. */
+const EVM_ADDRESS = '0x9cb3468607a359c214cb27159d5d5853d5e83877';
+
 /** A minimally complete invoice: every field `readInvoice` requires and nothing else. */
 const INVOICE = {
   id: '9f1c6f1e-0000-4000-8000-000000000001',
@@ -165,11 +168,39 @@ describe('readInvoice', () => {
     expect(hasUniquenessHash(readInvoice({ ...INVOICE, uniquenessHash: '0xabc123' }))).toBe(true);
   });
 
-  it('reads the instrument under either of the two names the venue uses', () => {
-    expect(readInvoice({ ...INVOICE, securityId: '0.0.10331926' }).instrumentAddress).toBe(
-      '0.0.10331926',
-    );
-    expect(readInvoice({ ...INVOICE, instrumentAddress: '0xabc' }).instrumentAddress).toBe('0xabc');
+  /*
+   * The venue holds two identifiers for one instrument and sends both. They are not
+   * interchangeable: `instrumentAddress` is what `deployBond` returned and `securityId` is
+   * the account number the same diamond answers to, and neither is computable from the other
+   * outside the mirror node. This decoder used to read whichever arrived first into
+   * `instrumentAddress`, which is typed `0x${string}` — so a native id type-checked as an
+   * EVM address, and would have built an explorer link to nothing the first time anything
+   * asked for one.
+   */
+  it('keeps the two instrument identifiers apart', () => {
+    const invoice = readInvoice({
+      ...INVOICE,
+      instrumentAddress: EVM_ADDRESS,
+      securityId: '0.0.10331926',
+    });
+    expect(invoice.instrumentAddress).toBe(EVM_ADDRESS);
+    expect(invoice.securityId).toBe('0.0.10331926');
+  });
+
+  /*
+   * The native id no longer stands in for the address. `isIssued` reads the address, and the
+   * venue writes both in one update — an invoice carrying one and not the other is a
+   * half-written row, not a rendering to paper over here.
+   */
+  it('does not let a native id stand in for an EVM address', () => {
+    const invoice = readInvoice({ ...INVOICE, securityId: '0.0.10331926' });
+    expect(invoice.instrumentAddress).toBeUndefined();
+    expect(invoice.securityId).toBe('0.0.10331926');
+  });
+
+  it('refuses an instrument address that is not one', () => {
+    const error = refusal(() => readInvoice({ ...INVOICE, instrumentAddress: '0xabc' }));
+    expect(error.detail).toContain('invoice.instrumentAddress');
   });
 
   describe('the issuance block', () => {
@@ -615,6 +646,9 @@ describe('readPaymentRequirements', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('readTradeProof', () => {
+  /** The deployed `InvoiceRegistry` this venue reads back from. */
+  const REGISTRY = '0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7';
+
   const PROOF = {
     tradeId: '9f1c6f1e-0000-4000-8000-000000000t11',
     invoice: {
@@ -624,8 +658,16 @@ describe('readTradeProof', () => {
       isin: 'USQ72738QUM6',
       securityId: '0.0.10331926',
       securityExplorerUrl: 'https://hashscan.io/testnet/token/0.0.10331926',
+      regulation: 'REG_S',
     },
     confirmation: { decision: 'confirmed', decidedAt: '2026-09-01T09:00:00.000Z' },
+    registry: {
+      checked: true,
+      listed: true,
+      confirmed: true,
+      contractAddress: REGISTRY,
+      explorerUrl: `https://hashscan.io/testnet/contract/${REGISTRY}`,
+    },
     compliance: {
       decision: {
         allowed: true,
@@ -658,6 +700,151 @@ describe('readTradeProof', () => {
     expect(proof.compliance.allowed).toBe(true);
     expect(proof.compliance.checks).toHaveLength(1);
     expect(proof.settledAt).toBe(PROOF.settledAt);
+  });
+
+  /*
+   * The offering the instrument was actually deployed under, per invoice.
+   *
+   * The screen prints `REGULATIONS[key].label` off this, which is a claim about what was
+   * offered and to whom — and the venue's row and its deploy calldata disagreed once
+   * already. A spelling this build has no label for is refused rather than folded into null,
+   * because dropping it silently hides a declaration that was made.
+   */
+  describe('the regulation the instrument was declared under', () => {
+    it('reads the venue’s own declaration', () => {
+      expect(readTradeProof(PROOF).invoice.regulation).toBe('REG_S');
+
+      for (const key of ['REG_S', 'REG_D_506_B', 'REG_D_506_C'] as const) {
+        const body = { ...PROOF, invoice: { ...PROOF.invoice, regulation: key } };
+        expect(readTradeProof(body).invoice.regulation).toBe(key);
+      }
+    });
+
+    it('is null when the venue did not say', () => {
+      const unstated = { ...PROOF, invoice: { ...PROOF.invoice, regulation: null } };
+      expect(readTradeProof(unstated).invoice.regulation).toBeNull();
+
+      const { regulation: _dropped, ...invoice } = PROOF.invoice;
+      expect(readTradeProof({ ...PROOF, invoice }).invoice.regulation).toBeNull();
+    });
+
+    /*
+     * `reg-s` is the spelling the venue's own column carries. It is the same offering, and
+     * it is still refused: this decoder's job is to say it cannot read a shape, not to guess
+     * which of three declarations a lowercase word meant.
+     */
+    it('refuses a spelling it has no label for', () => {
+      const kebab = { ...PROOF, invoice: { ...PROOF.invoice, regulation: 'reg-s' } };
+      const error = refusal(() => readTradeProof(kebab));
+      expect(error.detail).toContain('invoice.regulation');
+      expect(error.detail).toContain('REG_S');
+    });
+  });
+
+  /*
+   * The chain's own account of the invoice, and the reason this block exists: `checked` is
+   * not a boolean answer, it is whether there was an answer at all. The screen has to be
+   * able to tell "the registry says no" from "nobody asked the registry", and this is where
+   * that distinction survives or is lost.
+   */
+  describe('the public invoice registry', () => {
+    const withRegistry = (registry: unknown) => readTradeProof({ ...PROOF, registry }).registry;
+
+    it('reads an answer the venue actually got', () => {
+      expect(
+        withRegistry({
+          checked: true,
+          listed: true,
+          confirmed: false,
+          contractAddress: REGISTRY,
+          explorerUrl: null,
+        }),
+      ).toEqual({
+        checked: true,
+        listed: true,
+        confirmed: false,
+        contractAddress: REGISTRY,
+        explorerUrl: null,
+      });
+    });
+
+    /*
+     * Unchecked is a third state, and the two answers are null rather than false. A venue
+     * that could not read the node has said nothing about this invoice — rendering that as
+     * "not confirmed" would contradict, on the same screen, the confirmation the venue is
+     * certain of.
+     */
+    it('keeps “could not ask” apart from “no”', () => {
+      const unchecked = withRegistry({
+        checked: false,
+        listed: null,
+        confirmed: null,
+        contractAddress: REGISTRY,
+        explorerUrl: null,
+      });
+      expect(unchecked.checked).toBe(false);
+      expect(unchecked.listed).toBeNull();
+      expect(unchecked.confirmed).toBeNull();
+      // The address survives: a registry configured but unreadable is still worth naming.
+      expect(unchecked.contractAddress).toBe(REGISTRY);
+    });
+
+    /*
+     * A stray answer beside `checked: false` did not come from the node, whatever it says.
+     * Carrying it through would let the screen print the chain's confirmation on the
+     * strength of a field the venue explicitly did not stand behind.
+     */
+    it('drops an answer that arrived beside “could not ask”', () => {
+      const contradictory = withRegistry({
+        checked: false,
+        listed: true,
+        confirmed: true,
+        contractAddress: null,
+        explorerUrl: null,
+      });
+      expect(contradictory.listed).toBeNull();
+      expect(contradictory.confirmed).toBeNull();
+    });
+
+    /** Absent means unchecked. A service from before this field is not an unreadable one. */
+    it('reads a missing block as unchecked rather than as a failure', () => {
+      const { registry: _dropped, ...body } = PROOF;
+      const registry = readTradeProof(body).registry;
+      expect(registry.checked).toBe(false);
+      expect(registry.listed).toBeNull();
+      expect(registry.confirmed).toBeNull();
+      expect(registry.contractAddress).toBeNull();
+      expect(registry.explorerUrl).toBeNull();
+    });
+
+    /*
+     * Absent `checked` reads as unchecked and never as `true`: the reading that cannot
+     * overclaim. The alternative presents whatever sat beside it as the chain's answer.
+     */
+    it('reads a missing flag as unchecked', () => {
+      expect(withRegistry({ listed: true, confirmed: true }).checked).toBe(false);
+      expect(withRegistry({ checked: 'yes', listed: true }).checked).toBe(false);
+    });
+
+    /*
+     * With `checked: true` the two answers are the point of the block, so a non-boolean is
+     * unreadable rather than quietly null — `null` there would render as "not answered" and
+     * hide a venue sending a shape this build cannot read.
+     */
+    it('refuses an answer that is not a boolean', () => {
+      const error = refusal(() => withRegistry({ checked: true, listed: 'yes', confirmed: true }));
+      expect(error.detail).toContain('registry.listed');
+    });
+
+    /*
+     * `checked: true` with a null answer is still three states. The venue does not send this
+     * today, and a decoder that collapsed it into `false` would invent a chain reading.
+     */
+    it('keeps a null answer null even when the registry was read', () => {
+      const partial = withRegistry({ checked: true, listed: true, confirmed: null });
+      expect(partial.listed).toBe(true);
+      expect(partial.confirmed).toBeNull();
+    });
   });
 
   /*

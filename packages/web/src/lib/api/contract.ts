@@ -121,12 +121,54 @@ function readBoolean(value: unknown, path: string): boolean {
   unreadable(path, 'should be a boolean');
 }
 
+/**
+ * A boolean, or the absence of one.
+ *
+ * `null` is a third state and not a `false`. Every caller here is a question the venue may
+ * not have been able to ask, and a screen that renders "unanswered" as "no" makes a negative
+ * claim nobody made.
+ */
+function readOptionalBoolean(value: unknown, path: string): boolean | null {
+  if (value === undefined || value === null) return null;
+  return readBoolean(value, path);
+}
+
 function readEnum<T extends string>(value: unknown, path: string, allowed: readonly T[]): T {
   const raw = readString(value, path);
   const found = allowed.find((option) => option === raw || option === raw.toUpperCase());
   if (found === undefined)
     unreadable(path, `should be one of ${allowed.join(', ')} — got "${raw}"`);
   return found;
+}
+
+/**
+ * The three offerings this build has a label for.
+ *
+ * Named once because two decoders read it — the `INELIGIBLE_JURISDICTION` refusal and the
+ * proof view's instrument block — and a spelling that drifted between them would refuse one
+ * offering while rendering the other.
+ */
+const REGULATION_KEYS = ['REG_D_506_B', 'REG_D_506_C', 'REG_S'] as const;
+
+/** The SCREAMING_SNAKE spelling the venue uses, or nothing. */
+export const regulationOf = (value: unknown): RegulationKey | null =>
+  isRegulationKey(value) ? value : null;
+
+/**
+ * The SEC regulation an instrument was declared under.
+ *
+ * Absent reads as null; a value this build has no label for is **unreadable**, on the same
+ * grounds as `readCashRail`. The proof view prints `REGULATIONS[key].label` as a claim about
+ * the offering, and quietly folding an unrecognised spelling into null would hide a
+ * declaration that was actually made rather than report a shape this build cannot read. A
+ * declaration is not something the venue can correct afterwards, so it is not something to
+ * drop silently either.
+ */
+function readRegulation(value: unknown, path: string): RegulationKey | null {
+  if (value === undefined || value === null || value === '') return null;
+  const key = regulationOf(value);
+  if (key === null) unreadable(path, `should be one of ${REGULATION_KEYS.join(', ')}`);
+  return key;
 }
 
 /**
@@ -192,14 +234,49 @@ export function readPage<T>(
 /* Domain records                                                              */
 /* -------------------------------------------------------------------------- */
 
-export function readInvoice(raw: unknown, path = 'invoice'): Invoice {
+/**
+ * An invoice as this package carries it: the shared `Invoice`, plus the instrument's native
+ * Hedera id where the venue sent one.
+ *
+ * Extending rather than widening keeps `@facture/shared` frozen, on the same grounds as
+ * `TradeRecord` below.
+ */
+export interface InvoiceRecord extends Invoice {
+  /**
+   * The `0.0.x` the ATS diamond answers to — the same contract as `instrumentAddress` under
+   * its other name, and never a stand-in for it.
+   */
+  readonly securityId?: string | undefined;
+}
+
+/** An EVM address, and nothing that merely looks like one: 20 bytes, hex, `0x`-prefixed. */
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+export function readInvoice(raw: unknown, path = 'invoice'): InvoiceRecord {
   const body = readObject(raw, path);
 
   const hash = readOptionalString(field(body, 'uniquenessHash'), `${path}.uniquenessHash`);
-  const instrument = readOptionalString(
-    field(body, 'instrumentAddress', 'securityId'),
-    `${path}.instrumentAddress`,
-  );
+
+  /*
+   * Two names for one instrument, and they are not interchangeable. The venue sends
+   * `instrumentAddress` — the EVM address `deployBond` returned — beside `securityId`, the
+   * native id the same diamond answers to. One is derived from the deployment and the other
+   * from an account number; neither can be computed from the other outside the mirror node,
+   * so none is computed here.
+   *
+   * This used to read whichever arrived first into `instrumentAddress`, which is typed
+   * `0x${string}` — so `0.0.10331926` satisfied the compiler while being the wrong
+   * identifier, harmless only for as long as nothing built an EVM link out of it. They are
+   * read apart now, and an address-shaped field carrying something that is not an address is
+   * unreadable rather than cast. `isIssued` still answers off the address, which the venue
+   * writes in the same update as the native id.
+   */
+  const address = readOptionalString(field(body, 'instrumentAddress'), `${path}.instrumentAddress`);
+  if (address !== null && !EVM_ADDRESS.test(address)) {
+    unreadable(`${path}.instrumentAddress`, 'should be an EVM address — `0x` and 40 hex digits');
+  }
+  const securityId = readOptionalString(field(body, 'securityId'), `${path}.securityId`);
+
   const partition = readOptionalString(field(body, 'partition'), `${path}.partition`);
 
   const invoice: Invoice = {
@@ -219,7 +296,8 @@ export function readInvoice(raw: unknown, path = 'invoice'): Invoice {
 
   return {
     ...invoice,
-    instrumentAddress: (instrument as `0x${string}` | null) ?? undefined,
+    instrumentAddress: (address as `0x${string}` | null) ?? undefined,
+    securityId: securityId ?? undefined,
     partition: (partition as `0x${string}` | null) ?? undefined,
     isin: readOptionalString(field(body, 'isin'), `${path}.isin`) ?? undefined,
     issuance: readIssuance(field(body, 'issuance'), `${path}.issuance`),
@@ -612,11 +690,11 @@ function readRefusal(raw: unknown, code: RefusalCode, path: string): Refusal {
       const allowed = field(body, 'allowedJurisdictions');
       return {
         code,
-        regulation: readEnum(field(body, 'regulation'), `${path}.regulation`, [
-          'REG_D_506_B',
-          'REG_D_506_C',
-          'REG_S',
-        ] as const) as RegulationKey,
+        regulation: readEnum(
+          field(body, 'regulation'),
+          `${path}.regulation`,
+          REGULATION_KEYS,
+        ) as RegulationKey,
         buyerJurisdiction: readString(
           field(body, 'buyerJurisdiction'),
           `${path}.buyerJurisdiction`,
@@ -714,7 +792,7 @@ export function readLiveQuote(raw: unknown, path = 'quote'): LiveQuoteResponse {
  * mints — a handle to a specific price is only owed to someone about to sell at it.
  */
 export interface InvoiceRow {
-  invoice: Invoice;
+  invoice: InvoiceRecord;
   debtor: Debtor | null;
   quote: Quote | null;
   tenorDays: number | null;
@@ -746,7 +824,7 @@ export function readInvoiceRow(raw: unknown, path = 'invoice'): InvoiceRow {
  * returns. One shape for a price, wherever it came from.
  */
 export interface InvoiceDetail {
-  invoice: Invoice;
+  invoice: InvoiceRecord;
   debtor: Debtor | null;
   pricing: LiveQuoteResponse;
 }
@@ -1160,6 +1238,68 @@ export interface ProofCheck {
   passed: boolean;
 }
 
+/**
+ * What the public invoice registry says about this receivable — `InvoiceRegistry` on Hedera,
+ * read back rather than asserted.
+ *
+ * Three states, and the third is the one this block exists for. `checked: false` means no
+ * registry is configured, or the node could not be read; it is a question that went
+ * unanswered and **not** a negative answer, so `listed` and `confirmed` are null rather than
+ * false whenever it is. Collapsing that into "not confirmed" would have the proof view
+ * contradict, a card away, the confirmation the venue is certain of — the same distinction
+ * `/health` lost and `ComplianceDecision.determinate` exists to keep.
+ */
+export interface InvoiceRegistryAnswer {
+  checked: boolean;
+  listed: boolean | null;
+  confirmed: boolean | null;
+  /** The deployed `InvoiceRegistry`. Present even unchecked, when one is configured. */
+  contractAddress: string | null;
+  explorerUrl: string | null;
+}
+
+export function readInvoiceRegistry(raw: unknown, path: string): InvoiceRegistryAnswer {
+  /*
+   * A venue that sends no block at all was never asked, which is exactly what `checked:
+   * false` says — so an older service reads as unchecked rather than as an unreadable
+   * response.
+   */
+  if (raw === undefined || raw === null) {
+    return {
+      checked: false,
+      listed: null,
+      confirmed: null,
+      contractAddress: null,
+      explorerUrl: null,
+    };
+  }
+
+  const body = readObject(raw, path);
+  const contractAddress = readOptionalString(
+    field(body, 'contractAddress'),
+    `${path}.contractAddress`,
+  );
+  const explorerUrl = readOptionalString(field(body, 'explorerUrl'), `${path}.explorerUrl`);
+
+  /*
+   * Absent reads as unchecked, which is the reading that cannot overclaim: a missing flag
+   * defaulted to `true` would present whatever happened to sit beside it as the chain's own
+   * answer. The two answers are dropped in that case rather than carried — a value next to
+   * "could not ask" did not come from the node, whatever it says.
+   */
+  if (field(body, 'checked') !== true) {
+    return { checked: false, listed: null, confirmed: null, contractAddress, explorerUrl };
+  }
+
+  return {
+    checked: true,
+    listed: readOptionalBoolean(field(body, 'listed'), `${path}.listed`),
+    confirmed: readOptionalBoolean(field(body, 'confirmed'), `${path}.confirmed`),
+    contractAddress,
+    explorerUrl,
+  };
+}
+
 export interface TradeProofResponse {
   tradeId: string;
   invoice: {
@@ -1169,11 +1309,21 @@ export interface TradeProofResponse {
     isin: string | null;
     securityId: string | null;
     securityExplorerUrl: string | null;
+    /**
+     * The offering this instrument was declared under, per invoice.
+     *
+     * Per invoice rather than per deployment, because those two disagreed once: MF-2052's row
+     * said Reg D 506(c) and its bond went out `1/0`, Reg S. The row is what deploys now, so
+     * this is the field a reader checks against the instrument's own calldata.
+     */
+    regulation: RegulationKey | null;
   };
   confirmation: {
     decision: 'confirmed' | 'disputed' | null;
     decidedAt: string | null;
   };
+  /** The chain's own account of the same invoice, beside the venue's. */
+  registry: InvoiceRegistryAnswer;
   compliance: {
     allowed: boolean | null;
     checks: ProofCheck[];
@@ -1341,6 +1491,7 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
         field(invoice, 'securityExplorerUrl'),
         `${path}.invoice.securityExplorerUrl`,
       ),
+      regulation: readRegulation(field(invoice, 'regulation'), `${path}.invoice.regulation`),
     },
     confirmation: {
       decision: decision === 'confirmed' || decision === 'disputed' ? decision : null,
@@ -1349,6 +1500,7 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
         `${path}.confirmation.decidedAt`,
       ),
     },
+    registry: readInvoiceRegistry(field(body, 'registry'), `${path}.registry`),
     compliance: {
       ...readChecks(field(compliance, 'decision'), `${path}.compliance.decision`),
       reason: readOptionalString(
@@ -1460,9 +1612,6 @@ export function readTradeProof(raw: unknown, path = 'proof'): TradeProofResponse
     settledAt: readOptionalString(field(body, 'settledAt'), `${path}.settledAt`),
   };
 }
-
-export const regulationOf = (value: unknown): RegulationKey | null =>
-  isRegulationKey(value) ? value : null;
 
 /* -------------------------------------------------------------------------- */
 /* Debtor confirmation — `GET /v1/confirm/:token`                              */
