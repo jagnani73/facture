@@ -21,7 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { call, createHarness, fakeArcEscrow, listInvoice, type Harness } from './helpers.js';
 import { MARKET_NOW_ISO, marketNow } from '../src/db/seed.js';
-import { usdcPayoutFor, usdcRequiredFor, type ArcEscrow } from '../src/services/arc.js';
+import { usdcPayoutFor, type ArcEscrow } from '../src/services/arc.js';
 
 let h: Harness;
 
