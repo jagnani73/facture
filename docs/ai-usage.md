@@ -353,10 +353,12 @@ whose job is to be checkable cannot have history quietly removed from underneath
   account that exists specifically so that a payout cannot be drawn on the operator.
 - Every transaction run by hand rather than by the venue: the contract deployments on both chains,
   and the ten-transaction sequence that turns a deployed bond into a tradeable one. The deployment
-  transactions were driven from `facture-prep`, outside this repository, because they carry keys.
-  The preparation sequence has since moved in, as `scripts/prepare-security.mjs`, which reads the
-  operator key from `packages/backend/.env` and holds none of its own — the extraction was
-  assisted, the runs against live instruments were not.
+  transactions were driven from `facture-prep`, outside this repository, because they carry keys;
+  that directory was deleted on 2026-09-06. Two sequences have since moved in:
+  `scripts/prepare-security.mjs`, which reads the operator key from `packages/backend/.env`, and
+  `scripts/sign-maturity-payout.mjs`, which reads the collection key from `.env.ops`. Neither
+  holds a key of its own — the extraction was assisted, the runs against live instruments were
+  not.
 - The archaeology on the deployed ATS factory `0.0.9213391` — 27 historical `deployBond` calls read
   off the mirror node to price issuance without spending anything.
 - Reading the deployed contract's own source for the regulation enum values rather than trusting

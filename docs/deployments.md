@@ -360,7 +360,7 @@ tinybars of fees, which is the venue's cost and not the holder's.
 | ----------- | -------------------------------------------- |
 | account     | `0.0.10331559`                               |
 | EVM address | `0x54027f5e33f9ea9fb4f3ee7e1ce77b1908b7e9bf` |
-| key         | ECDSA, held in `facture-prep`, never in git  |
+| key         | ECDSA, in `.env.ops`, gitignored             |
 | created by  | `0.0.10311549`, 5 HBAR                       |
 
 It exists because it must not be the operator. A `ScheduleCreateTransaction` executes the
@@ -368,6 +368,10 @@ moment its required signatures are present and the operator signs the create, so
 drawn on the operator would fire on the spot — reporting the debtor as having paid at the
 instant the receivable matured. Keeping the payer separate is what lets the obligation sit
 unsigned.
+
+Sign one by hand with `pnpm sign:payout <schedule id> --sign`. The script checks the key
+against the account on the ledger before it submits anything, and refuses a schedule that has
+already executed.
 
 ### Idempotency, tested by accident
 

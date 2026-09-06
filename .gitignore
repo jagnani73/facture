@@ -13,10 +13,11 @@ typechain-types/
 broadcast/
 forge-cache/
 
-# env — .env.example is committed, real env files never are
+# env — the .example files are committed, real env files never are
 .env
 .env.*
 !.env.example
+!.env.ops.example
 
 # local
 *.log

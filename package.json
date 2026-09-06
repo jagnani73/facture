@@ -12,7 +12,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "demo:reset": "node scripts/demo-reset.mjs",
-    "prepare:security": "node scripts/prepare-security.mjs"
+    "prepare:security": "node scripts/prepare-security.mjs",
+    "sign:payout": "node scripts/sign-maturity-payout.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.38.0",

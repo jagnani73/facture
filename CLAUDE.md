@@ -48,8 +48,9 @@ The pooled-facility fallback is not needed. Heterogeneous per-invoice paper stan
 
 ## Day-one blockers — ALL RESOLVED 2026-09-01
 
-Kept for the record; none of these gate feature work any more. Full evidence lives outside the
-repo in `facture-prep/BLOCKERS.md`.
+Kept for the record; none of these gate feature work any more. The working notes behind them
+lived in `facture-prep/`, outside the repo, which was deleted on 2026-09-06 once nothing
+depended on it. The conclusions are written out below.
 
 1. **Gas / per-invoice model.** Resolved — see the architecture decision above. No transaction
    needed; the answer was already in the deployed factory's history.
