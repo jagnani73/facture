@@ -21,7 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { call, createHarness, fakeArcEscrow, listInvoice, type Harness } from './helpers.js';
 import { MARKET_NOW_ISO, marketNow } from '../src/db/seed.js';
-import { usdcRequiredFor, type ArcEscrow } from '../src/services/arc.js';
+import { usdcPayoutFor, usdcRequiredFor, type ArcEscrow } from '../src/services/arc.js';
 
 let h: Harness;
 
@@ -42,8 +42,15 @@ afterEach(() => {
 
 const asOf = `?asOf=${marketNow().toISOString()}`;
 
-/** What the seeded book's ordinary invoice costs, in USDC minor units at the test scale. */
-const priceOf = (proceedsMinor: bigint) => usdcRequiredFor(proceedsMinor, 'USD', 1);
+/**
+ * What the seeded book's ordinary invoice costs, in USDC minor units at the test scale.
+ *
+ * `usdcPayoutFor`, not `usdcRequiredFor`. These two rounded the same way until 2026-09-04
+ * and this helper pinned the wrong one: a payment rounds down and a backing requirement
+ * rounds up, so at 1 ppm they differ by a unit on every inexact division. Using the
+ * requirement here made the tests agree with the defect.
+ */
+const priceOf = (proceedsMinor: bigint) => usdcPayoutFor(proceedsMinor, 'USD', 1);
 
 /** A vault holding enough for anything on the book, recording every call it receives. */
 function vault(overrides: Partial<ArcEscrow> = {}) {

@@ -13,6 +13,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { usdcPayoutFor, usdcRequiredFor } from '../src/services/arc.js';
 import { toSettlementAmount } from '../src/units.js';
 
 /** USD and EUR. */
@@ -43,6 +44,46 @@ describe('one receivable, one price, either rail', () => {
        */
       expect(onHedera / 100n).toBe(onArc);
     }
+  });
+
+  /*
+   * The test above compares `toSettlementAmount` with itself and therefore could never have
+   * caught what actually went wrong: the two rails did not disagree about the conversion,
+   * they disagreed about the ROUNDING, and each reached it through a different service
+   * function. The Arc rail priced a trade with `usdcRequiredFor` — the backing requirement,
+   * which rounds up — while x402 used the default, which rounds down.
+   *
+   * At 1 ppm an inexact division is the normal case, so the rails quoted different money for
+   * one receivable nearly every time. Observed live on MF-2070: 1,232,534 cents of proceeds
+   * settled 12,326 on Arc where x402 would have charged 12,325.
+   *
+   * So this compares the functions the services actually call.
+   */
+  it('charges the same on either rail, through the functions the rails really use', () => {
+    for (const cents of [1_232_534n, 5_933_178n, 1_224_315n, 999_999n, 1n]) {
+      const arcCharges = usdcPayoutFor(cents, 'USD', PPM);
+      const hederaCharges = toSettlementAmount(cents, USD, HBAR, PPM);
+
+      // Same statement as above: equal to the precision of the coarser asset.
+      expect(hederaCharges / 100n).toBe(arcCharges);
+    }
+  });
+
+  /*
+   * And the two questions stay different, which is the reason one answer cannot serve both.
+   * A requirement that rounded down would let an empty vault back anything under a dollar.
+   */
+  it('keeps a backing requirement above the payment it backs', () => {
+    for (const cents of [1_232_534n, 999_999n, 1n]) {
+      expect(usdcRequiredFor(cents, 'USD', PPM)).toBeGreaterThanOrEqual(
+        usdcPayoutFor(cents, 'USD', PPM),
+      );
+    }
+
+    // And strictly above wherever the division leaves a remainder.
+    expect(usdcRequiredFor(1_232_534n, 'USD', PPM)).toBe(
+      usdcPayoutFor(1_232_534n, 'USD', PPM) + 1n,
+    );
   });
 
   it('reads $50,000.00 as 0.05 of the settlement asset on both', () => {

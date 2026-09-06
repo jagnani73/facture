@@ -578,7 +578,13 @@ export const settlementService: SettlementService = {
    */
   async chooseRail({ mandateId, proceedsMinor, currency, sellerArcAddress }) {
     const escrow = getArcEscrow();
-    const priceUsdcMinor = escrow.requiredFor(proceedsMinor, currency);
+    /*
+     * `payoutFor`, not `requiredFor`: this figure is what the buyer is charged and what
+     * `registerMatch` binds on chain. The requirement rounds up and a payment rounds down,
+     * and using the wrong one made an Arc trade cost a unit more than the same invoice on
+     * x402 — two prices for one receivable, which is what the shared scale exists to stop.
+     */
+    const priceUsdcMinor = escrow.priceFor(proceedsMinor, currency);
 
     if (!escrow.enabled) {
       return {
@@ -685,7 +691,7 @@ export const settlementService: SettlementService = {
     }
 
     const sellerEvmAddress = accountIdToEvmAddress(intent.sellerHederaAccountId);
-    const priceUsdcMinor = escrow.requiredFor(intent.proceedsMinor, intent.currency);
+    const priceUsdcMinor = escrow.priceFor(intent.proceedsMinor, intent.currency);
 
     /*
      * Read before the hold, because a hold moves units out of the free balance and the same

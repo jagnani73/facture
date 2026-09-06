@@ -214,6 +214,14 @@ export interface ArcEscrow {
    */
   requiredFor(amountMinor: bigint, currency: string): bigint;
   /**
+   * What a payment of `amountMinor` actually costs. Rounds DOWN where {@link requiredFor}
+   * rounds up; see {@link usdcPayoutFor} for why one answer cannot serve both questions.
+   *
+   * Named apart from `payoutFor` below, which reads a payout off the vault by trade id and
+   * is a different question entirely.
+   */
+  priceFor(amountMinor: bigint, currency: string): bigint;
+  /**
    * USDC the vault may return when `withdrawnMinor` of `currency` comes off a book that stood
    * at `committedBeforeMinor`, in the same ERC-20 minor units (6dp) {@link depositedFor}
    * answers in.
@@ -368,6 +376,36 @@ export const usdcRequiredFor = (amountMinor: bigint, currency: string, scalePpm:
   );
 
 /**
+ * What a trade's proceeds actually cost the buyer, in USDC minor units.
+ *
+ * **Down, unlike the backing requirement above, and the difference is not a nicety.**
+ * `units.ts` states the rule: a payment rounds down, because the amount is what a payer is
+ * charged and rounding up bills them for money the invoice does not owe. A requirement
+ * rounds up, because it is the figure capital must reach.
+ *
+ * The payment leg used `usdcRequiredFor` until 2026-09-04 — the function whose own comment
+ * says "up, unlike the payment leg". At 1 ppm a remainder is the normal case, so the two
+ * rails quoted different money for one receivable whenever the division was inexact: MF-2070
+ * settled 12,326 on Arc where x402 would have charged 12,325 for the same 1,232,534 cents.
+ *
+ * That is precisely the property the shared scale exists to protect. `units.ts`: "one
+ * invoice settles as the same nominal amount whichever way it goes... that property is what
+ * makes two settlement rails honest rather than two different prices for one receivable."
+ * A shared `scalePpm` does not deliver it on its own; the rounding has to agree too.
+ *
+ * It matters more here than the size suggests, because `registerMatch` binds the price on
+ * chain and is irreversible. A wrong figure is permanent for that trade.
+ */
+export const usdcPayoutFor = (amountMinor: bigint, currency: string, scalePpm: number): bigint =>
+  toSettlementAmount(
+    amountMinor,
+    CURRENCY_DECIMALS[currency as Currency] ?? 2,
+    USDC_DECIMALS,
+    scalePpm,
+    'down',
+  );
+
+/**
  * What the vault may pay back when `withdrawnMinor` comes off a book that stood at
  * `committedBeforeMinor`.
  *
@@ -425,6 +463,8 @@ export function createDisabledArcEscrow(scalePpm = 1): ArcEscrow {
   return {
     enabled: false,
     requiredFor: (amountMinor, currency) => usdcRequiredFor(amountMinor, currency, scalePpm),
+    priceFor: (amountMinor: bigint, currency: string): bigint =>
+      usdcPayoutFor(amountMinor, currency, scalePpm),
     releasableFor: (committedBeforeMinor, withdrawnMinor, currency) =>
       usdcReleasableFor(committedBeforeMinor, withdrawnMinor, currency, scalePpm),
     depositedFor: () => Promise.resolve(0n),
@@ -577,6 +617,10 @@ export function createArcEscrow(config: ArcEscrowConfig): ArcEscrow {
 
     requiredFor(amountMinor, currency) {
       return usdcRequiredFor(amountMinor, currency, config.settlementScalePpm);
+    },
+
+    priceFor(amountMinor: bigint, currency: string): bigint {
+      return usdcPayoutFor(amountMinor, currency, config.settlementScalePpm);
     },
 
     releasableFor(committedBeforeMinor, withdrawnMinor, currency) {
