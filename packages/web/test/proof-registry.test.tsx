@@ -157,6 +157,36 @@ describe('the public invoice registry, on the proof view', () => {
   });
 
   /*
+   * The case the demo book is made of, and the one that was wrong.
+   *
+   * `isListed` is the contract's own "does this receivable have a record here at all", so a
+   * `confirmed: false` beside `listed: false` is the absence of a row rather than a debtor
+   * saying no. Every seeded trade is a confirmed invoice that was never written to the
+   * registry, so the note fired on all of them and accused the venue of contradicting a
+   * chain that had never been told anything.
+   */
+  it('does not call it a disagreement when the chain has no record', () => {
+    show(
+      { checked: true, listed: false, confirmed: false },
+      { decision: 'confirmed', decidedAt: '2026-08-14T13:19:52.000Z' },
+    );
+
+    expect(within(block()).queryByText(/disagree about this invoice/)).toBeNull();
+    expect(within(block()).getByText('No record to confirm')).toBeTruthy();
+  });
+
+  it('still reports the invoice as not listed in that case', () => {
+    show(
+      { checked: true, listed: false, confirmed: false },
+      { decision: 'confirmed', decidedAt: '2026-08-14T13:19:52.000Z' },
+    );
+
+    // The absence is a real answer and is still shown; only the accusation is withheld.
+    expect(within(block()).getByText('Listed on chain')).toBeTruthy();
+    expect(within(block()).getByText('No')).toBeTruthy();
+  });
+
+  /*
    * A null identifier produces no link, on this screen above all others: an explorer URL
    * that 404s converts "verifiable" into "looks verifiable".
    */

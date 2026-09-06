@@ -1,9 +1,16 @@
 /**
  * The single seam between the web package and `@facture/shared`.
  *
- * Nothing else in `src/` imports `@facture/shared` directly. Domain types, the curve
- * maths, the eligibility screen and the chain constants are all owned there and
+ * Every piece of market logic reaches `@facture/shared` through here. Domain types, the
+ * curve maths, the eligibility screen and the chain constants are all owned there and
  * re-exported here, so the UI has exactly one place where it meets the domain.
+ *
+ * One file bypasses it, deliberately and visibly: `components/privy-provider.tsx` imports
+ * `ARC_TESTNET` to declare the chain to Privy. That is configuration handed to a third-party
+ * SDK at mount, not market logic, and routing it through this seam would put a chain
+ * constant in the domain surface to serve one provider's constructor. The rule this comment
+ * states is the one worth keeping; it used to claim nothing else imported shared at all,
+ * which stopped being true and made the seam look tighter than it is.
  *
  * Two conventions from the shared package that the whole UI inherits:
  *

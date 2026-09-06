@@ -720,12 +720,27 @@ function RegistryBlock({ record }: { record: ProofRecord }) {
   const { registry } = record;
 
   /*
+   * `isListed` is the contract's own "does this receivable have a record here at all" —
+   * `status != Unknown`. So when it is false, `isConfirmed` is false for a reason that has
+   * nothing to do with the debtor: there is no row to be confirmed. The two cases have to
+   * be told apart on this screen, because collapsing them says the chain contradicts the
+   * venue when the chain has simply never been told.
+   */
+  const onRegistry = registry.checked && registry.listed === true;
+
+  /*
    * A disagreement is shown, not resolved. The venue's column and the public view are two
    * parties answering one question; if they differ, that is the reader's to weigh. Picking
    * one would leave the stronger-looking claim standing alone, which is the failure this
    * whole screen is built against.
+   *
+   * It requires `onRegistry`, and that is not a detail. Every seeded trade in the demo book
+   * has a confirmed invoice that was never written to the registry, so without this the
+   * note fired on all of them and accused the venue of contradicting a chain that held no
+   * opinion — the exact overclaim the three-state handling above exists to prevent.
    */
   const contradicted =
+    onRegistry &&
     registry.confirmed !== null &&
     record.confirmation.decision !== null &&
     registry.confirmed !== (record.confirmation.decision === 'confirmed');
@@ -738,7 +753,14 @@ function RegistryBlock({ record }: { record: ProofRecord }) {
       {registry.checked ? (
         <>
           <Row term="Listed on chain" value={<OnChain answer={registry.listed} />} />
-          <Row term="Confirmed on chain" value={<OnChain answer={registry.confirmed} />} />
+          {onRegistry ? (
+            <Row term="Confirmed on chain" value={<OnChain answer={registry.confirmed} />} />
+          ) : (
+            <Row
+              term="Confirmed on chain"
+              value={<span className="text-muted">No record to confirm</span>}
+            />
+          )}
         </>
       ) : (
         <p className="py-2 text-xs text-muted">
