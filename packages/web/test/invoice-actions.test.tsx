@@ -32,6 +32,16 @@ import { InvoiceDetailView } from '@/components/views/invoice-detail-view';
 /** The demo book's two open statuses, both priced. */
 const CONFIRMED = 'INV-2041';
 const LISTED = 'INV-2038';
+/**
+ * Paper somebody already bought, and paper that is finished.
+ *
+ * `SOLD` is the case with no card of its own: it is not quotable, so the price card and the
+ * refusal card both stand down, and the offer control has to be given a site here or the
+ * venue's resale is reachable from nothing on this screen. `MATURED` is the control case —
+ * same absent cards, and nothing to offer.
+ */
+const SOLD = 'INV-2033';
+const MATURED = 'INV-2029';
 
 /** Held on Hedera, cash leg unsigned — the venue's own definition of an armed trade. */
 const armedTrade = readTrade({
@@ -58,7 +68,8 @@ const show = (invoiceId: string, market: Market = fixtureMarket()) => {
 };
 
 const sellButton = () => screen.queryByRole('button', { name: /^sell for/i });
-const listButton = () => screen.queryByRole('button', { name: /offer it for sale/i });
+const listButton = () => screen.queryByRole('button', { name: /^offer it for sale$/i });
+const relistButton = () => screen.queryByRole('button', { name: /offer it for sale again/i });
 const withdrawButton = () => screen.queryByRole('button', { name: /take it off the book/i });
 
 beforeEach(() => {
@@ -134,5 +145,45 @@ describe('a listed invoice', () => {
     show(LISTED, { ...book, trades: [...book.trades, armedTrade, abandoned] });
 
     expect(withdrawButton()).toBeNull();
+  });
+});
+
+describe('a sold invoice', () => {
+  /*
+   * The wiring the resale actually needs, and the reason it is asserted from this file
+   * rather than from the control's own.
+   *
+   * `OfferControl` renders a resale for a `sold` invoice, but this screen used to have
+   * nowhere to put it: both of its existing sites are inside cards that a sold invoice does
+   * not get. The price card wants terms, and a sold invoice is not quotable so it has none;
+   * the refusal card wants `quotable` outright. A control that renders correctly into a
+   * branch nothing evaluates is the shape this repo keeps finding — a mechanism with a
+   * definition and no caller — so what is pinned here is the caller.
+   */
+  it('can be offered back into the same bids', () => {
+    show(SOLD);
+
+    expect(relistButton()).not.toBeNull();
+    // The first listing and the withdrawal are both somebody else's decision by now.
+    expect(listButton()).toBeNull();
+    expect(withdrawButton()).toBeNull();
+  });
+
+  it('is not offered a sale directly, because it is not on the book', () => {
+    show(SOLD);
+    expect(sellButton()).toBeNull();
+  });
+
+  /*
+   * The control case. Matured paper reaches this screen with the same two cards missing, so
+   * a render site keyed on anything looser than `sold` would offer a resale on a receivable
+   * that has already paid out.
+   */
+  it('offers nothing once the receivable has matured', () => {
+    show(MATURED);
+
+    expect(relistButton()).toBeNull();
+    expect(listButton()).toBeNull();
+    expect(sellButton()).toBeNull();
   });
 });

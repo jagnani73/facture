@@ -297,6 +297,19 @@ function InvoiceDetail({
 
           {trade ? <TradeCard market={market} trade={trade} /> : null}
 
+          {/*
+           * Where a resale is offered from, and it needs a site of its own.
+           *
+           * A `sold` invoice is not quotable, so it has no terms and neither card above
+           * renders — the price card wants terms and the refusal card wants `quotable`. Both
+           * of the existing sites for the offer control are inside them, so without this one
+           * the venue's `sold -> listed` edge would be reachable from nothing on this screen.
+           *
+           * It sits under the trade because that is the order a reader needs: this is what
+           * happened to the invoice, and this is what can still be done with it.
+           */}
+          {invoice.status === 'sold' ? offer : null}
+
           {terms && liveRate !== null ? (
             <Card>
               <CardHead title="Where it sits on the curve" />
