@@ -139,7 +139,8 @@ const SELLER = {
    */
   hederaAccountId: '0x2Da63Ac0F6AE2C3059091d8DF38b3175a237ee71',
   /*
-   * Real, and derived rather than invented — unlike four of the five buyer addresses below.
+   * Real, and derived rather than invented — unlike three of the four buyers below, whose
+   * wallets are fiction on both chains.
    *
    * This is the operator's ECDSA alias, and operator and seller are the same account in this
    * build. An EVM address comes from the key rather than from a chain, so the one key that
@@ -159,12 +160,40 @@ interface BuyerSpec {
   label: string;
   name: string;
   email: string;
+  /*
+   * Who the desk is on Hedera, and the column every on-chain path resolves a counterparty
+   * from — the compliance gate at arm time, the ATS transfer, the hold, the maturity payout.
+   *
+   * `accountIdToEvmAddress` passes a `0x…` alias straight through and converts a `0.0.x` to
+   * the LONG-ZERO form derived from the account *number*. Those are unrelated keys to the
+   * security's own `ControlList` and `Kyc` mappings, so a grant against one is invisible to
+   * the other. An invented `0.0.x` is therefore worse than an empty column: it resolves, it
+   * is well formed, and it reaches nobody — the refusal lands at the compliance gate rather
+   * than here, naming a buyer who looks properly configured.
+   * `scripts/prepare-security.mjs` refuses a long-zero buyer for exactly that reason.
+   */
   hederaAccountId: string;
   arcAddress: string;
   /** Set for the agent-run desks. Presented as exactly that; fake liquidity undoes it all. */
   agent?: { label: string; capsMinor: string };
 }
 
+/*
+ * Four desks, and only one of them is a party this venue can actually transact with.
+ *
+ * Harrow Point's two identities are both real, and `test/seed.test.ts` checks that they
+ * resolve to something a grant can reach rather than merely that they look like addresses.
+ * The other three are invented on both chains and stay that way, deliberately: there is no
+ * fourth ECDSA key in this build to derive them from, and a *plausible* address is precisely
+ * the failure being corrected here — inventing three more would trade a visible fiction for
+ * an invisible one. `scripts/demo-reset.mjs` already refuses to send them money and reports
+ * them rather than degrading the run.
+ *
+ * They are also never resolved on chain. The three invented desks hold seeded positions
+ * only — demo history, settled before this book existed — while Harrow Point holds none and
+ * is the desk a live trade actually fills, which is why its identity is the one that has to
+ * be real.
+ */
 const BUYERS: readonly BuyerSpec[] = [
   {
     label: 'BUY-ASHGROVE',
@@ -192,11 +221,37 @@ const BUYERS: readonly BuyerSpec[] = [
     label: 'BUY-HARROW',
     name: 'Harrow Point',
     email: 'ops@harrowpoint.example',
-    hederaAccountId: '0.0.6098467',
+    /*
+     * The buyer's own account: the ECDSA **alias** of `0.0.10314099`, which is the account
+     * that signs the x402 cash leg and the one `scripts/prepare-security.mjs` allowlists on
+     * an instrument. Real, and the only real Hedera identity in this list.
+     *
+     * This said `0.0.6098467` — invented, like the three above, and the exact defect the
+     * seller's `hederaAccountId` carried one table over. The live database does not hold it:
+     * the row was corrected by hand before anything could be allowlisted against this desk,
+     * and no migration recorded the correction, so a fresh clone seeded a Harrow Point that
+     * no grant could reach and could not reproduce the demo's own headline run.
+     *
+     * The alias rather than the id, because to a Solidity mapping those are different keys
+     * and only the alias is the one the buyer calls from. Nothing is lost by storing it this
+     * way: `services/schedule.ts` resolves an alias back to a `0.0.x` through the mirror
+     * node, which is how a maturity payout finds an account to credit.
+     *
+     * Note what the comment below was already saying while this line was fiction — the Arc
+     * wallet is "the only one in this list that is" real. It was, on the Arc side, beside an
+     * invented Hedera identity for the same desk.
+     */
+    hederaAccountId: '0xA25796399A9B3E8006d2d45Ff48a3B830C7f020B',
     /*
      * A real wallet, and the only one in this list that is. It is the Circle
      * developer-controlled wallet the agent operates, which is what makes Harrow Point the
      * one seeded desk whose mandate can actually be escrowed on Arc.
+     *
+     * A different key to the Hedera identity above, deliberately, and the one place in this
+     * file where the two wallet columns are not one key. The seller's two columns are, because
+     * operator and seller are the same account here; the buyer's are two because the Circle
+     * wallet funds the vault and cannot produce a native Hedera `TransferTransaction`, so the
+     * x402 leg needs a key of its own.
      *
      * The rest of these addresses are invented, and that is survivable only while nothing
      * pays them. `MandateVault.executeRelease` returns capital to the address registered

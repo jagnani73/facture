@@ -101,11 +101,18 @@ const isoOrNull = (value: Date | null): string | null => value?.toISOString() ??
  * A seller as their own screens read them.
  *
  * Both wallet fields are nullable and mean different things when null. `arcAddress` is an
- * ordinary EVM address and is usable the moment it is recorded. `hederaAccountId` is a
- * `0.0.x`, and a wallet made from an email address does not have one yet: the address it
- * was issued is an *alias*, and Hedera creates the account behind it on first funding. So
- * a seller can hold a perfectly good address and still have no account id here, and the
- * screen has to say which of those it is rather than printing an empty cell.
+ * ordinary EVM address and is usable the moment it is recorded.
+ *
+ * `hederaAccountId` holds **either** a `0.0.x` **or** an ECDSA alias, and the name is older
+ * than that fact: the seeded seller and the one buyer that settles both carry aliases, and
+ * `services/ats.ts` passes a `0x…` straight through while converting a `0.0.x` to its
+ * long-zero form. The two are different keys to a Solidity contract, which is why an
+ * invented account id is worse here than an empty column.
+ *
+ * A wallet made from an email address has an alias and no account id at all: Hedera creates
+ * the account behind it on first funding. So a seller can hold a perfectly good address and
+ * still have no id, and the screen has to say which of those it is rather than printing an
+ * empty cell.
  */
 export const wireSeller = (row: SellerRow) => ({
   id: row.id,

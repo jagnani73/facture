@@ -16,6 +16,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MARKET_NOW_ISO, marketNow } from '../src/db/seed.js';
+import { ZERO_ADDRESS, accountIdToEvmAddress } from '../src/services/ats.js';
 import { quoteEngine } from '../src/services/quote-engine.js';
 import { ratingService } from '../src/services/rating.js';
 import { createHarness, type Harness } from './helpers.js';
@@ -56,8 +57,8 @@ describe('the seeded book', () => {
    * The seller's Arc address is where a sale's proceeds land once the vault pays out:
    * `MandateVault` locks a payout claimable by that address and no other, so an invented one
    * is a payout that settles, reports success, and pays nobody until it is reclaimed to the
-   * buyer a day later. Four of the five seeded buyer addresses are invented and say so; this
-   * one must not be.
+   * buyer a day later. Three of the four seeded buyer desks are invented on both chains and
+   * say so; this one must not be.
    *
    * The check is that it is the *same key* as the Hedera side rather than merely non-empty,
    * because "looks like an address" is exactly what the invented one also satisfied. An EVM
@@ -69,6 +70,82 @@ describe('the seeded book', () => {
 
     expect(seller?.arcAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
     expect(seller?.arcAddress?.toLowerCase()).toBe(seller?.hederaAccountId?.toLowerCase());
+  });
+
+  /*
+   * The same defect on the Hedera side, and the property is not "looks like an address".
+   *
+   * `accountIdToEvmAddress` is what every on-chain path resolves a counterparty through —
+   * the compliance gate at arm time, the ATS transfer, the hold. It passes a `0x…` alias
+   * through and converts a `0.0.x` to the long-zero form derived from the account *number*,
+   * which is a different key to the security's own `ControlList` and `Kyc` mappings. So an
+   * invented `0.0.x` produces a perfectly well-formed address that no grant can ever reach,
+   * and the venue finds that out at the gate rather than here. Harrow Point's row said
+   * `0.0.6098467` while the live database held the alias, corrected by hand.
+   *
+   * Long-zero is the shape — twelve zero bytes then the entity number — and a key-derived
+   * alias having them is a one-in-2^96 accident, so this is a heuristic and it is the right
+   * way round: it fails rather than passes when it cannot tell.
+   * `scripts/prepare-security.mjs` refuses a buyer on the same test.
+   */
+  const reachableOnChain = (accountId: string | null | undefined): boolean => {
+    const evm = accountIdToEvmAddress(accountId);
+    return evm !== ZERO_ADDRESS && !/^0x0{24}/.test(evm);
+  };
+
+  it('gives every settling party a Hedera identity a grant can actually reach', async () => {
+    const seller = await h.store.getSeller(h.seeded.sellerId);
+    const harrow = await h.store.getBuyer(h.seeded.buyerIds['BUY-HARROW'] ?? '');
+
+    /*
+     * The two parties a live trade in this book resolves on chain: the venue holds and moves
+     * the paper as the seller, and Harrow Point is the desk whose mandate is really escrowed
+     * and whose account really signs the x402 cash leg. No seeded position sits on Harrow
+     * Point's mandate, so this is the only thing standing between its identity and fiction.
+     */
+    const parties: readonly (readonly [string, string | null | undefined])[] = [
+      ['Meridian Fabrication', seller?.hederaAccountId],
+      ['Harrow Point', harrow?.hederaAccountId],
+    ];
+
+    expect(Object.fromEntries(parties.map(([who, id]) => [who, reachableOnChain(id)]))).toEqual({
+      'Meridian Fabrication': true,
+      'Harrow Point': true,
+    });
+
+    /*
+     * And the buyer's two wallet columns are two keys, unlike the seller's. Operator and
+     * seller are the same account here, so one key controls both of the seller's; the buyer
+     * funds the vault from a Circle wallet that cannot produce a native Hedera
+     * `TransferTransaction`, so the x402 leg needs a key of its own. Asserting these equal
+     * would import the seller's fact into a party it is not true of.
+     */
+    expect(accountIdToEvmAddress(harrow?.hederaAccountId).toLowerCase()).not.toBe(
+      harrow?.arcAddress?.toLowerCase(),
+    );
+  });
+
+  /*
+   * The complement, said out loud rather than left to a comment: the other three desks are
+   * invented and stay that way. Each resolves to a long-zero address — well formed, and a
+   * key no `ControlList` grant reaches — which is fine for a desk that only ever holds demo
+   * history and is not fine for one a live trade fills. If a fourth desk is ever wired to a
+   * real key, this fails and the fix is to move it into the check above, not to relax this.
+   */
+  it('leaves the three demo desks unreachable on chain rather than plausible', async () => {
+    const desks = ['BUY-ASHGROVE', 'BUY-CORDELL', 'BUY-TESSELLATE'];
+    const resolved = await Promise.all(
+      desks.map(async (label) => {
+        const buyer = await h.store.getBuyer(h.seeded.buyerIds[label] ?? '');
+        return [label, reachableOnChain(buyer?.hederaAccountId)] as const;
+      }),
+    );
+
+    expect(Object.fromEntries(resolved)).toEqual({
+      'BUY-ASHGROVE': false,
+      'BUY-CORDELL': false,
+      'BUY-TESSELLATE': false,
+    });
   });
 
   it('derives mandate allocation from settled trades rather than a stored number', async () => {
