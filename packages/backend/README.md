@@ -3,12 +3,13 @@
 The API behind the book. Hono on Node, SQLite via Drizzle, Hedera for the paper and Arc
 for the cash.
 
-> **Status: deployed and settling.** Every route and service body is written and exercised
-> by tests, and the chain-facing half is live rather than pending: six contracts across
-> Hedera and Arc testnets, bonds issued by this service through the ATS factory, two
-> complete lifecycles settled and one receivable matured and paid. `pnpm db:migrate` builds
-> the schema; `db:seed` fills an **empty** database with the demo book and must not be run
-> against a populated one.
+> **Status: deployed and settling, on both rails.** Every route and service body is written
+> and exercised by tests, and the chain-facing half is live rather than pending: seven
+> contracts across Hedera and Arc testnets, all verified on Sourcify; bonds issued by this
+> service through the ATS factory; trades settled over x402 on Hedera **and** out of a
+> buyer's escrowed USDC on Arc; receivables matured and paid, and one defaulted on the
+> record. `pnpm db:migrate` builds the schema; `db:seed` fills an **empty** database with the
+> demo book and must not be run against a populated one.
 >
 > The seams that reach a chain still fail loudly rather than simulating — `ATS_FACTORY_ID`
 > unset disables issuance instead of faking it, and `ARC_MANDATE_VAULT_ADDRESS` unset
@@ -46,28 +47,39 @@ configure a service.
 Grouped by actor. `/health` sits outside the version prefix because it is operational,
 not product surface.
 
-| Method | Path                                    | Actor  |                                                      |
-| ------ | --------------------------------------- | ------ | ---------------------------------------------------- |
-| GET    | `/health`                               | ops    | service status, indexer cursor vs chain head, queue  |
-| POST   | `/v1/invoices`                          | seller | create; queues issuance, returns `202`               |
-| GET    | `/v1/invoices`                          | seller | the book, each row with a live price                 |
-| GET    | `/v1/invoices/:id`                      | seller | detail incl. issuance state                          |
-| POST   | `/v1/invoices/:id/confirmation-request` | seller | email the debtor a confirmation link                 |
-| GET    | `/v1/confirm/:token`                    | debtor | one sentence, two buttons — no wallet, no signup     |
-| POST   | `/v1/confirm/:token`                    | debtor | confirm or dispute                                   |
-| GET    | `/v1/invoices/:id/quote`                | seller | best live quote **plus refusals**                    |
-| POST   | `/v1/invoices/:id/mature`               | ops    | maturity — pays the current holder, cash leg pending |
-| POST   | `/v1/mandates`                          | buyer  | post a standing bid                                  |
-| POST   | `/v1/mandates/:id/fund`                 | buyer  | escrow — this is what makes the quote firm           |
-| GET    | `/v1/mandates`                          | buyer  | list                                                 |
-| GET    | `/v1/mandates/exposure`                 | buyer  | exposure across the book                             |
-| GET    | `/v1/mandates/:id/exposure`             | buyer  | exposure for one mandate                             |
-| POST   | `/v1/mandates/:id/withdraw`             | buyer  | withdraw unallocated capital only                    |
-| POST   | `/v1/trades`                            | both   | execute a sale (DvP)                                 |
-| GET    | `/v1/trades`                            | both   | list                                                 |
-| GET    | `/v1/trades/:id`                        | both   | detail                                               |
-| POST   | `/v1/trades/:id/unwind`                 | both   | release an armed trade and its capital               |
-| GET    | `/v1/trades/:id/proof`                  | both   | the audit view, one click from any trade             |
+| Method | Path                                    | Actor  |                                                       |
+| ------ | --------------------------------------- | ------ | ----------------------------------------------------- |
+| GET    | `/health`                               | ops    | service status, per-rail chain reachability, queue    |
+| POST   | `/v1/sellers`                           | seller | sign in — **no body**; a Privy identity token is read |
+| GET    | `/v1/sellers/:id`                       | seller | the business, and the wallet recorded against it      |
+| POST   | `/v1/invoices`                          | seller | create; queues issuance, returns `202`                |
+| GET    | `/v1/invoices`                          | seller | the book, each row with a live price                  |
+| GET    | `/v1/invoices/:id`                      | seller | detail incl. issuance state                           |
+| POST   | `/v1/invoices/:id/confirmation-request` | seller | mint the debtor's confirmation link                   |
+| GET    | `/v1/confirm/:token`                    | debtor | one sentence, two buttons — no wallet, no signup      |
+| POST   | `/v1/confirm/:token`                    | debtor | confirm or dispute                                    |
+| GET    | `/v1/invoices/:id/quote`                | seller | best live quote **plus refusals**                     |
+| POST   | `/v1/invoices/:id/list`                 | seller | offer it for sale — `confirmed` → `listed`            |
+| POST   | `/v1/invoices/:id/delist`               | seller | take the offer back — `listed` → `confirmed`          |
+| POST   | `/v1/invoices/:id/mature`               | ops    | maturity — pays the current holder, cash leg pending  |
+| POST   | `/v1/invoices/:id/default`              | ops    | the debtor never paid, and the venue says so          |
+| POST   | `/v1/mandates`                          | buyer  | post a standing bid; registers it on the Arc vault    |
+| POST   | `/v1/mandates/:id/fund`                 | buyer  | escrow — this is what makes the quote firm            |
+| GET    | `/v1/mandates`                          | buyer  | list                                                  |
+| GET    | `/v1/mandates/exposure`                 | buyer  | exposure across the book                              |
+| GET    | `/v1/mandates/:id/exposure`             | buyer  | exposure for one mandate                              |
+| POST   | `/v1/mandates/:id/withdraw`             | buyer  | withdraw unallocated capital only                     |
+| POST   | `/v1/trades`                            | both   | execute a sale (DvP)                                  |
+| GET    | `/v1/trades`                            | both   | list                                                  |
+| GET    | `/v1/trades/:id`                        | both   | detail                                                |
+| POST   | `/v1/trades/:id/unwind`                 | both   | release an armed trade and its capital                |
+| GET    | `/v1/trades/:id/proof`                  | both   | the audit view, one click from any trade              |
+
+**Listing is an act, and arming refuses anything that is not `listed`.** A `confirmed`
+invoice is _quotable_ — that is what puts a live price beside every green line the moment
+the book loads — and a `listed` one is _sellable_. Those are different permissions, so they
+are different states. Delisting is refused while a trade is armed against the invoice;
+without that a seller could withdraw the offer between the `402` and the buyer's signature.
 
 Errors are `application/problem+json` with a stable `code` and the request id, so a client
 can branch on the failure without matching on prose.
@@ -121,18 +133,39 @@ edit — `allocated_minor` is a real column, so the release goes through the sto
 
 ## Services
 
-| Module                     | What it does                                                         |
-| -------------------------- | -------------------------------------------------------------------- |
-| `services/quote-engine.ts` | wraps `bestQuote`; `priceOne`, and `priceBook` in one batched pass   |
-| `services/issuance.ts`     | serial, paced, backoff; persists queue state through `IssuanceSink`  |
-| `services/ats.ts`          | `deployBond` and the ATS hold, over `@hiero-ledger/sdk`              |
-| `services/compliance.ts`   | the pre-match `ControlList` / `Kyc` / `isPaused` probe; fails closed |
-| `services/settlement.ts`   | prepare / execute / unwind / maturity, both legs                     |
-| `services/x402.ts`         | facilitator client — `supported`, `verify`, `settle`                 |
-| `services/rating.ts`       | the ladder, plus the idempotent outcome ledger behind it             |
-| `services/confirmation.ts` | debtor tokens: HMAC tag checked first, SHA-256 stored                |
-| `services/notifier.ts`     | **no mail transport** — the link is logged, and that is said plainly |
-| `services/indexer.ts`      | chain heads read for real; cursors persisted                         |
+| Module                         | What it does                                                                        |
+| ------------------------------ | ----------------------------------------------------------------------------------- |
+| `services/quote-engine.ts`     | wraps `bestQuote`; `priceOne` screens the winner, `priceBook` prices in one pass    |
+| `services/issuance.ts`         | serial, paced, backoff; persists queue state through `IssuanceSink`                 |
+| `services/ats.ts`              | `deployBond` and the ATS hold, over `@hiero-ledger/sdk`                             |
+| `services/compliance.ts`       | the `getControlListType` / `isInControlList` / `getKycStatusFor` / `paused()` probe |
+| `services/settlement.ts`       | prepare / execute / unwind / maturity / default, both rails and both legs           |
+| `services/x402.ts`             | facilitator client — `supported`, `verify`, `settle`                                |
+| `services/arc.ts`              | `MandateVault` and the Arc `DvpEscrow`: funding read as a view, then the payout     |
+| `services/schedule.ts`         | maturity's payout as a Hedera Scheduled Transaction, drawn on a collection account  |
+| `services/uniqueness.ts`       | `UniquenessRegistry` — checked before listing, claimed once the instrument exists   |
+| `services/invoice-registry.ts` | `InvoiceRegistry` — the terms and the debtor's confirmation, as a public view       |
+| `services/hcs.ts`              | refusal and match commitments on an HCS topic — a digest, never the reason          |
+| `services/privy.ts`            | verifies a Privy **identity** token into a seller; unset config disables the route  |
+| `services/rating.ts`           | the ladder, plus the idempotent outcome ledger behind it                            |
+| `services/confirmation.ts`     | debtor tokens: HMAC tag checked first, SHA-256 stored                               |
+| `services/notifier.ts`         | **no mail transport** — the link is logged, and that is said plainly                |
+| `services/indexer.ts`          | per-rail reachability for `/health`. **Nothing here indexes** — see below           |
+
+### `/health` reports reachability, because nothing here indexes
+
+The venue _originates_ its chain transactions rather than following a stream, so everything
+it stores is a transaction id or a consensus timestamp — identifiers, not resumable
+positions. `Indexer.advance()` was the only writer of a cursor, nothing ever called it, and
+the lag therefore printed as the whole chain height: `/health` returned `503` from before
+the first settled trade. `advance()` is gone rather than left waiting for its loop.
+
+What is reported instead is a real dependency probe. Arc's RPC carries the cash leg;
+Hedera's mirror node is what the compliance gate reads and what a payout's status is asked
+of. A failed read builds a fresh row rather than spreading the last good one, and `state`
+names which of `unread` / `reachable` / `unreachable` produced it — "not asked yet" and
+"asked, no answer" have different fixes and must not render as the same thing. viem's
+4-second block cache is off for that reason.
 
 ### The persistence seam
 
@@ -258,13 +291,33 @@ seller is worth less than the same history from five). See `services/rating.ts`.
 - **`ATS_FACTORY_ID` unset disables issuance; it does not simulate it.** A plausible
   security id for an instrument that does not exist would survive as far as the proof
   view, which is the one screen whose whole job is to be checkable.
-- **The debtor's maturity payment has no rail here.** `POST /v1/invoices/:id/mature` runs
-  `settleAtMaturity`: it finds the current holder — the most recent settled trade on that
-  receivable, not the first buyer — writes the outcome to the settlement-outcome ledger,
-  releases the mandate's capital, and reports the cash leg as `pending` with the payout
-  requirement built. Marking it `settled` would put a payment on the proof view that
-  nobody made. It is operator-triggered because nothing here observes debtor payments;
-  when a rail exists, a Hedera Scheduled Transaction is the right shape for the payout.
+- **The debtor's maturity payment has a rail, and the rail is a schedule.**
+  `POST /v1/invoices/:id/mature` runs `settleAtMaturity`: it finds the current holder — the
+  most recent settled trade on that receivable, not the first buyer — writes the outcome to
+  the settlement-outcome ledger, retires or releases the mandate's commitment depending on
+  which rail paid for it, and creates a Hedera Scheduled Transaction paying face value to
+  that holder. **The cash leg stays `pending` anyway**: a schedule is an obligation, not a
+  receipt, and it becomes a payment when the collection key signs. Marking it `settled`
+  earlier would put a payment on the proof view that nobody made.
+  - **The schedule must not be drawn on the operator.** A `ScheduleCreateTransaction`
+    executes the moment its signatures are present and the operator signs the create, so an
+    operator-funded payout fires on the spot and reports the debtor as having paid at the
+    instant the receivable matured. `MATURITY_COLLECTION_ACCOUNT_ID` must be a different
+    account; `services/schedule.ts` refuses the configuration rather than trusting a comment.
+  - **A rail that is down cannot un-mature a receivable.** The ledger write and the capital
+    release happen first, and a scheduling failure comes back as `payoutError`, never as a
+    throw. A null `payout` with no error means no collection account is configured — a
+    different fact, and not collapsed into the first.
+  - **Whether the holder was paid is asked, never remembered.** `payoutStatus` reads the
+    schedule off the mirror node on every call, and both sides of the transfer come from the
+    executed transaction rather than from configuration. There is no "paid" flag to be wrong
+    about.
+- **A receivable that is never paid is a default, and an operator says so.**
+  `POST /v1/invoices/:id/default` writes the outcome and marks the debtor permanently. It is
+  an act rather than a timer for the mirror of the reason maturity is: only the venue can say
+  the money is never coming, and there is no route that takes the mark back. Maturity refuses
+  to guess — an absent `paidAt` past the due date is a `409` with a sentence, not a silent
+  `late`, which is a default recorded as a payment.
 - **Maturity is idempotent through the ledger, not through a flag.** The unique index on
   `(debtor_id, invoice_id)` is the fact, and the invoice's `matured` status marks the
   second half. So a replay cannot tighten a rating or release capital twice, and a run that

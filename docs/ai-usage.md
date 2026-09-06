@@ -2,7 +2,8 @@
 
 ETHGlobal asks entrants to say which parts of a project were built with AI assistance and which
 files those were. This is that statement, reconstructed from the repository rather than from memory:
-95 commits, their messages, their diffs, and the two documents the work was steered by.
+116 commits, their messages, their diffs, and the two documents the work was steered by. Every count
+below was recomputed from the tree on 2026-09-04 rather than carried forward.
 
 The short version: **a model did nearly all of the typing, and a person made every decision the
 typing was constrained by.** That division is not a hedge. It is legible in the repo, because the
@@ -16,8 +17,8 @@ constraints were written down before the code was, and the file they were writte
 [Claude Code](https://claude.com/claude-code), Anthropic's CLI, driven by one person in an
 interactive terminal. No autonomous agent loop, no code generation service, no scaffolding
 generator. Sessions ran in two shapes: one person and one model working through a
-problem, and — on the third day — an orchestrating session that fanned five parallel agents across
-package boundaries that could not collide, then reviewed and committed their work itself. Model
+problem, and — on the third and fourth days — orchestrating sessions that fanned parallel agents
+across package boundaries that could not collide, then reviewed and committed their work. Model
 choice varied across sessions and the repository does not record which model wrote which commit, so
 this document does not claim one.
 
@@ -31,26 +32,26 @@ claim of hand-authorship, and this file exists so the choice does not amount to 
 
 ## Shape of the work
 
-95 commits, 2026-09-01 through 2026-09-03. Three days: 29, then 32, then 34.
+116 commits, 2026-09-01 through 2026-09-04. Four days: 29, then 32, then 34, then 21.
 
 The first seven landed within 90 seconds of each other — a workspace scaffold, five package
 skeletons and the two steering documents, staged together rather than developed commit by commit.
 Everything after `685f821` is incremental, and the later history reads like what it was: a feature
 landing, a live transaction failing, and a fix commit naming exactly what the failure was.
 
-| package              | tracked lines | what it is                                                 |
-| -------------------- | ------------- | ---------------------------------------------------------- |
-| `packages/backend`   | 26,536        | Hono venue, SQLite store, ATS/x402/schedule/chain adapters |
-| `packages/web`       | 15,214        | Next.js screens, one data seam over API or fixtures        |
-| `packages/contracts` | 9,451         | 19 Solidity files, Hardhat, deploy scripts                 |
-| `packages/agent`     | 6,861         | market-maker on a Circle wallet and a Hedera key           |
-| `packages/shared`    | 4,075         | domain types, ISIN, pricing, state machines                |
-| docs and READMEs     | 5,271         | six READMEs, `CLAUDE.md`, `docs/`                          |
+| package              | tracked lines | what it is                                                         |
+| -------------------- | ------------- | ------------------------------------------------------------------ |
+| `packages/backend`   | 31,666        | Hono venue, SQLite store, ATS/x402/Arc/schedule/HCS/chain adapters |
+| `packages/web`       | 17,381        | Next.js screens, one data seam over API or fixtures                |
+| `packages/contracts` | 9,451         | 19 Solidity files, Hardhat, deploy and Sourcify-verify scripts     |
+| `packages/agent`     | 9,418         | market-maker on a Circle wallet and a Hedera key                   |
+| `packages/shared`    | 4,075         | domain types, ISIN, pricing, state machines                        |
+| docs and READMEs     | 5,916         | six READMEs, `CLAUDE.md`, `docs/`                                  |
 
-47 test files, 15,034 lines. 812 of those tests run under vitest and the contracts package adds its
-own under Hardhat. Written in the same sessions as the code they cover. `packages/web` had no test
-runner at all until the third day; it was added specifically because `tsc --noEmit` cannot see a
-decoder reading the wrong field.
+57 test files, 20,629 lines. 1,114 of those tests run under vitest — backend 464, web 229, agent
+237, shared 184 — and the contracts package adds 129 more under Hardhat. Written in the same
+sessions as the code they cover. `packages/web` had no test runner at all until the third day; it
+was added specifically because `tsc --noEmit` cannot see a decoder reading the wrong field.
 
 ## What the human decided
 
@@ -91,14 +92,18 @@ been reasoning from the wrong one:
   charges `gasUsed × gasPrice`. Discovered by a send being refused for insufficient funds against a
   fee it could easily have paid.
 
-**The scope decisions on day three**, every one of which the model raised as a question rather
-than resolved on its own:
+**The scope decisions on days three and four**, every one of which the model raised as a question
+rather than resolved on its own:
 
-- **Privy is onboarding and only onboarding.** It signs a seller in and records the wallet; it
-  touches nothing in the settlement path. The boundary is the decision, not a first phase. What
-  settled it was a fact the model had earlier stated backwards and then corrected: the x402 cash
-  leg is a **native Hedera `TransferTransaction`**, not `signTypedData`, so a Privy signer cannot
-  produce it at all.
+- **Privy signs exactly one thing.** It signs a seller in and records the wallet, and it touches
+  nothing in the settlement path — the boundary is the decision, not a first phase. What settled it
+  was a fact the model had earlier stated backwards and then corrected: the x402 cash leg is a
+  **native Hedera `TransferTransaction`**, not `signTypedData`, so a Privy signer cannot produce it
+  at all. The boundary then moved by exactly one transaction, and by necessity rather than by taste:
+  a sale settled out of the buyer's escrow opens a `DvpEscrow` lock, `claim` checks
+  `msg.sender == beneficiary`, and the venue therefore cannot collect for a seller under any
+  circumstances. The only key that can is the one Privy made at sign-in. The seller still signs
+  nothing to _sell_ — not to list, not to be matched, not to settle.
 - **Escrow is funded from the buyer's own wallet**, not the venue's, because depositing the venue's
   USDC and calling it escrowed buyer capital would have been a fresh overclaim of exactly the kind
   the README had just been corrected for.
@@ -106,6 +111,16 @@ than resolved on its own:
   problem by construction: capital behind a demo mandate is the venue's, capital behind yours is
   yours, and which account is in view decides whose money moves.
 - **`UniquenessRegistry` before `MandateBook`** when picking which deployed contract to wire first.
+- **The machines were not edited to match the code.** Both state machines forbade edges the running
+  product performed on every trade, and declared states nothing ever wrote. The tidier fix is to
+  correct the transition tables; the decision was the other direction, because a machine edited to
+  match the code can never catch the code being wrong. What that cost was a route — listing is an
+  act now, and arming refuses anything not listed.
+- **The secondary market was declined rather than deferred**, and the reasoning is written down so
+  it is not relitigated: `createHoldByPartition` acts on the caller's own tokens, so after a sale
+  the venue is not the holder, and no wallet this build issues can produce the ERC-1400 operator
+  grant that would fix it. The honest options were a relist that prices and matches but cannot
+  deliver, or none.
 - **Nothing is pushed** without being asked, and it still has not been.
 
 **The product argument in `README.md`.** The thesis — that invoices are not fungible so you
@@ -129,7 +144,7 @@ surfaces when a funder reads a receipt.
 
 **`packages/backend`** — the whole venue. Routes, the quote engine, the settlement service, the
 issuance queue and its pacing, the ATS adapter, the x402 client, the schedule adapter, the SQLite
-store and its migrations, the 1,025-line seeded demo book, and the tests.
+store and its eight migrations, the 1,237-line seeded demo book, and the tests.
 
 **`packages/web`** — every screen, the fixture book, and the data seam that lets the same components
 render against the venue or against fixtures.
@@ -145,7 +160,7 @@ against the challenge. That mattered, because the failure on this rail is not an
 payload built from the wrong field is a valid signature over the wrong transfer, and the
 facilitator submits it.
 
-**The documentation**, including `docs/deployments.md`, the four package READMEs, and the upstream
+**The documentation**, including `docs/deployments.md`, the five package READMEs, and the upstream
 bug report in `docs/upstream/`. Every address and gas figure in the deployment record was read back
 from Hedera and pasted in by the model; a human decided that reading it back rather than copying a
 deploy log was the rule.
@@ -218,9 +233,24 @@ median of 6,976,378.
 
 ### The dominant failure mode, once there was enough code to see it
 
-**A mechanism built carefully, commented well, and called by nothing.** Six were found, and the
-pattern is worth naming because it is not a coding error — every one of them typechecks, reads well
-in review, and is invisible to a test suite that never asks whether anybody calls it.
+**A mechanism built carefully, commented well, and called by nothing.** This is the single most
+distinctive result in the project, and it is not a coding error — every one of them typechecks,
+reads well in review, and is invisible to a test suite that never asks whether anybody calls it.
+
+**Nineteen were found.** Nine came one at a time, over three days of tripping over them; the other
+ten came at once, from a deliberate pass over every export, interface member, column, env var,
+contract function and wire field, asking only _what calls this outside its own tests_. That the
+systematic pass more than doubled the count in one sitting is the finding: they were never a run of
+bad luck, and looking for them is a different activity from reviewing code.
+
+The running tally — which have a caller now, which stand, and which stand deliberately — is kept in
+`CLAUDE.md` under **"The full sweep for mechanisms nobody calls"**, because it changes with the
+code and a number copied here would be stale within a day. `reclaimPayout` is the one that stands on
+purpose: it recovers a stranded payout, it is permissionless, and automating it would mean the venue
+writing to Arc on a timer for a case that needs a judgement about whether the seller has simply not
+claimed yet.
+
+Six of the nineteen, as a sample of how they present:
 
 | what                         | how it presented                                                                                                                                                                                            |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -281,6 +311,34 @@ Written down once against viem's receipt wait on the Arc rail, then learned agai
 against `fetch` in the agent, where the comment calls it a rollback rather than a revert and means
 the same thing.
 
+### Day four, and a guard that was only accidentally safe
+
+The fourth day was mostly closing the sweep above — giving callers to mechanisms that had none. An
+adversarial review of that work found six defects, and the first of them is the one worth reading,
+because it is a shape rather than a slip.
+
+**Wiring a mechanism made an old guard dangerous without changing the guard.**
+`withdrawFromMandate` had always marked a mandate `withdrawn` once its book hit zero, and
+`fundMandate` refuses a withdrawn one. That was harmless for exactly as long as withdrawal moved
+nothing but a SQLite row. Then `MandateVault.executeRelease` — one of the nineteen — was given its
+caller, and the same status became a way to lose money: any outcome short of a completed release
+left real USDC in the vault under `keccak256(uuid)` with nothing in the repo able to move it, and a
+replacement mandate is a new UUID and a new bucket. **A test had pinned that state and called it
+recoverable.** The route is ask-book-chain-close now, an unknown outcome leaves the mandate open at
+a zero balance, and closing is a separate act.
+
+It is the same shape as the Arc rail's double-spend and the delist guard: **a guard that holds only
+because some other constraint happens to hold, with nothing in the guard naming the constraint.**
+Wiring the mechanism it was quietly relying on is what makes the hole reachable — which means
+closing a dead-mechanism finding is exactly when to re-read the guards around it.
+
+The other five were ordinary and are listed in `CLAUDE.md`. Two are worth a line: withdrawing in
+sub-unit slices bled the escrow, because the release quantity took `floor()` per call and five
+99-cent withdrawals at 1 ppm released nothing while the book decremented in full — measuring the
+wrong thing rather than rounding it wrongly, and the invariant held on every single call while the
+capital drained across them. And a default freed the debtor concentration it had just lost money on,
+because `defaulted` sat in the list of statuses that return capital.
+
 ### And one careless act, recorded rather than tidied away
 
 While testing the duplicate check the model posted an invoice under a slightly different debtor
@@ -309,11 +367,13 @@ whose job is to be checkable cannot have history quietly removed from underneath
 ## Reproducing this claim
 
 ```
-git log --format='%h %ad %s' --date=short          # 95 commits, three days
+git log --format='%h %ad %s' --date=short          # 116 commits, four days
 git log --stat cb9d567                             # the selector fix
 git show 7430e05                                   # README and CLAUDE.md, first commit of prose
 git show 9008136                                   # a mechanism with no caller, removed
 git show 9625b8d                                   # a deployed contract, finally called
+git show 649fcb8                                   # the systematic sweep, ten more at once
+git show 4d0dce5                                   # what the adversarial review caught
 ```
 
 `CLAUDE.md` is the constraint record. `docs/deployments.md` is the chain record, and every figure in

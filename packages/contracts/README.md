@@ -403,7 +403,7 @@ either way.
 Tests use the Node built-in runner (`node:test`) — that is what `hardhat-toolbox-viem` ships, not
 Mocha.
 
-**Getting a network connection.** `hardhat@3.12.0` ships three methods on `NetworkManager`, verified
+**Getting a network connection.** `hardhat@3.15.0` ships three methods on `NetworkManager`, verified
 against the package's shipped `dist/src/types/network.d.ts`:
 
 | Call            | Behaviour                                                | Used by        |
@@ -412,7 +412,7 @@ against the package's shipped `dist/src/types/network.d.ts`:
 | `create()`      | always opens a fresh connection                          | deploy scripts |
 | `connect()`     | **`@deprecated`**, "will be removed in a future version" | nothing here   |
 
-Tutorials and older docs still show `network.connect()`. It compiles and runs in 3.12.0, but it is
+Tutorials and older docs still show `network.connect()`. It compiles and runs in 3.15.0, but it is
 marked deprecated in the shipped types, so nothing in this package uses it.
 
 ## Deploying
@@ -454,9 +454,14 @@ Copy `.env.example` to `.env` first. **Hedera keys must be ECDSA** — ED25519 a
 HTS tokens fine but cannot sign EVM transactions at all, and the failure surfaces late as
 `INVALID_SIGNATURE`.
 
-On Arc, `maxFeePerGas` is pinned at 20 Gwei in the config because anything lower is rejected as
+On Arc, the fee is pinned at 20 Gwei in the config because anything lower is rejected as
 "transaction underpriced". It is a floor, not a tuning knob. Gas there is natively USDC, which is
 also why no Paymaster is wired up.
+
+**The field is `gasPrice`, not Hardhat 2's `maxFeePerGas`.** Hardhat 3's `HttpNetworkUserConfig`
+exposes exactly one fee knob — `gas`, `gasMultiplier`, `gasPrice` — and `maxFeePerGas` on it is a
+type error rather than a silently ignored key. Copying the EIP-1559 spelling out of an older config
+does not compile.
 
 ### Gas
 
@@ -477,10 +482,32 @@ Everything else is far cheaper and gets its own override: role grant ~180k, KYC 
 None of this applies on Arc, which has ordinary EVM refund semantics — an unused limit costs nothing
 there, so `deployArc.ts` lets estimation do its job.
 
-## What is stubbed
+## Verifying
 
-Signatures, events, errors and storage layout are all deliberate and complete. The bodies left as
-`TODO` are the ones that depend on packages outside this one:
+```bash
+pnpm --filter @facture/contracts verify
+```
+
+All seven deployed contracts — five on Hedera testnet, two on Arc — are verified on Sourcify, which
+is where HashScan reads its badge from. Every one of them read `match: null` before the script
+existed: deployed, called, and unreadable by anyone without this repo.
+
+`scripts/verify.mjs` posts the solc standard JSON that `artifacts/build-info` already holds, and it
+asks Sourcify first, so re-running it sends nothing for a contract already verified. No
+`hardhat-verify` plugin, because a new dependency here brings an unapproved build script that breaks
+`pnpm -r`. Two things that cost time and are worth knowing: **`server-verify.hashscan.io` is
+retired** and answers `308` to `sourcify.dev/server` while dropping the path, so a direct query comes
+back as a bare `Cannot GET /`; and **Hardhat 3 prefixes source names with `project/`**, which
+Sourcify matches exactly, so `contracts/Foo.sol:Foo` matches nothing.
+
+## What is left open
+
+**Nothing here is a stub.** Every function body is written and exercised by the suite; the section
+used to say the residuals below were bodies left as `TODO`, and they never were. The only `TODO`s in
+the tree are forward-looking NatSpec — `TODO(v2)` on `IMandateVault`'s attester and on
+`MandateBook`'s partial-sale storage, and `TODO(deployment)` in `deployHedera.ts` — each naming work
+that depends on something outside this package rather than a gap in what compiles. What follows is
+that list:
 
 - The attester itself is a single trusted relay, and lives outside this package. The v2 replacement
   (threshold attestation, or a light-client proof of the Arc deposit log) needs no interface change
@@ -505,8 +532,9 @@ Signatures, events, errors and storage layout are all deliberate and complete. T
 - Partial position sales. Storage is shaped so this does not need a migration — a `Match` already
   snapshots `faceValue` and `price` separately — but the instrument-side split is an ATS partition
   concern and out of scope here.
-- `scripts/deployHedera.ts` does not yet verify on HashScan, write an address manifest, or perform HTS
-  association. **Association is not optional on Hedera** and is the failure that broke the reference
-  x402 proof of concept until it was added explicitly.
+- `scripts/deployHedera.ts` does not write an address manifest or perform HTS association.
+  **Association is not optional on Hedera** and is the failure that broke the reference x402 proof of
+  concept until it was added explicitly. Verification is no longer on this list — it moved to its own
+  script, below.
 
 [ats]: https://github.com/hashgraph/asset-tokenization-studio

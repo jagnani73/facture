@@ -34,10 +34,12 @@ pragma solidity ^0.8.24;
  *          B claims A's leg second, using the now-public preimage.
  *
  *      Reverse it and A can wait until B's timeout has nearly lapsed, then claim, leaving B unable
- *      to claim in time. `MIN_LEG_GAP` enforces a floor on the difference between the two timeouts
- *      so that B always has a usable window; it cannot enforce which party generated the secret,
- *      because this contract cannot see the other chain. That part is the integrator's obligation
- *      and is why {openLock} takes the timeout explicitly rather than deriving it.
+ *      to claim in time. `MIN_LEG_GAP` publishes a recommended floor on the difference between the
+ *      two timeouts so that B always has a usable window. It is advisory and appears in no
+ *      `require`: this contract sees one leg and cannot compare it with a timeout on another chain,
+ *      so neither the gap nor which party generated the secret can be enforced here. Both are the
+ *      integrator's obligation, which is why {openLock} takes the timeout explicitly rather than
+ *      deriving it.
  *
  *      THE FREE-OPTION PROBLEM, disclosed rather than hidden. Between locking and claiming, the
  *      party holding the preimage holds a free option: if the price moves against them they can

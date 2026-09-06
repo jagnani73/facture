@@ -655,13 +655,20 @@ before each step so a re-run costs nothing. It prints a plan and spends nothing 
 `--send`. It signs with the operator key out of `packages/backend/.env` and carries none of its
 own, which is why it is in the repo at `scripts/prepare-security.mjs` rather than beside it.
 
-**Balances, read on 2026-09-02:**
+**Balances, read off the mirror node on 2026-09-04:**
 
 | account                   | balance     | what it pays for                   |
 | ------------------------- | ----------- | ---------------------------------- |
-| operator `0.0.10311549`   | 881.73 HBAR | issuance, holds, schedule creation |
-| buyer `0.0.10314099`      | 48.34 HBAR  | the cash leg                       |
+| operator `0.0.10311549`   | 858.04 HBAR | issuance, holds, schedule creation |
+| buyer `0.0.10314099`      | 48.33 HBAR  | the cash leg                       |
 | collection `0.0.10331559` | 4.87 HBAR   | maturity payouts, and nothing else |
+
+The operator was at 881.73 on 2026-09-02; the difference is issuance and the agent's own trade.
+Read them again before presenting rather than trusting this table. The number that matters is not
+the ~8 HBAR an issuance is charged but `gasLimit x gasPrice`, which Hedera reserves up front:
+`ISSUANCE_GAS_LIMIT` is 10,000,000 and the observed price is 104-126 tinybar/gas, so about 10.4 to
+12.6 HBAR has to be free per issuance or the send is refused for insufficient funds while the fee
+itself would have been affordable.
 
 **Resetting the book is not free and mostly not worth it.** Deleting `packages/backend/data/facture.db*`
 and re-running `db:migrate` then `db:seed` restores the 28 seeded invoices with their ids

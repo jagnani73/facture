@@ -17,16 +17,16 @@ pnpm --filter @facture/web build
 
 ## Routes
 
-| Route               | What it is                                                                        |
-| ------------------- | --------------------------------------------------------------------------------- |
-| `/`                 | The thesis. An invoice is a zero-coupon bond that nobody ever priced.             |
-| `/book`             | **The seller's book.** The core screen. Quotable invoices carry a live price.     |
-| `/book/[invoiceId]` | One invoice: face, tenor, annualised rate, discount, proceeds, and a sell action. |
-| `/book/new`         | Add invoices — single entry, or pasted straight out of a spreadsheet.             |
-| `/confirm/[token]`  | The debtor confirmation page. One sentence, two buttons, no account.              |
-| `/mandates`         | The buyer's side: standing bids, exposure used, weighted yield, maturity ladder.  |
-| `/mandates/new`     | Write a mandate, with the implied price and its matches shown as you type.        |
-| `/proof/[tradeId]`  | The audit view. The only screen where chain vocabulary is allowed.                |
+| Route               | What it is                                                                       |
+| ------------------- | -------------------------------------------------------------------------------- |
+| `/`                 | The thesis. An invoice is a zero-coupon bond that nobody ever priced.            |
+| `/book`             | **The seller's book.** The core screen. Quotable invoices carry a live price.    |
+| `/book/[invoiceId]` | One invoice: face, tenor, rate, discount, proceeds, and offering it for sale.    |
+| `/book/new`         | Add invoices — single entry, or pasted straight out of a spreadsheet.            |
+| `/confirm/[token]`  | The debtor confirmation page. One sentence, two buttons, no account.             |
+| `/mandates`         | The buyer's side: standing bids, exposure used, weighted yield, maturity ladder. |
+| `/mandates/new`     | Write a mandate, with the implied price and its matches shown as you type.       |
+| `/proof/[tradeId]`  | The audit view. The only screen where chain vocabulary is allowed.               |
 
 Worth opening against the demo book: `/book/INV-2041` (four mandates would take it, at 8.00%),
 `/book/INV-2046` and `/book/INV-2047` (confirmed, and one clears at 18.50% while nothing at all
@@ -38,6 +38,12 @@ market chrome — no masthead, no nav, no bid prices. Somebody's accounts payabl
 shown a page of paper prices to acknowledge their own ledger entry. The record that page reads
 (`ConfirmationRecord`) has no price on it at all, so there is nothing to leak even by accident, and
 every state of the page — loading, failed, expired, answered — renders through the same bare shell.
+
+The Privy provider is mounted in the `(app)` group and **not** in the root layout, which is what
+keeps sign-in away from that page: a debtor confirms with no wallet and no signup, and giving a
+customer a key to manage collapses the behavioural argument the whole product rests on. A seller
+signs in by email and the wallet Privy makes is recorded against the business; the only thing that
+wallet ever signs is `ClaimPayout`, on the proof view, after the trade is done.
 
 ## Design direction
 
@@ -81,16 +87,23 @@ sits in a column.
 | `refusal-notice`  | A refusal in words, naming its reason. Never "transaction reverted".              |
 | `curve-strip`     | The curve — which is nothing but the standing bids, plotted.                      |
 | `market-ticker`   | The masthead's strip of figures, read from the market rather than assembled.      |
+| `offer-control`   | List and delist. Quotable and sellable are different permissions.                 |
+| `claim-payout`    | The one transaction a person signs — collecting an Arc escrow lock.               |
 | `money`           | The only sanctioned way to put an amount on screen.                               |
 | `ui/primitives`   | Card, Button, Field, Row, Label, PageHeader.                                      |
 | `ui/async`        | Waiting, and not getting an answer. Both written the way a refusal is written.    |
 
 ## Where the domain stops and the UI starts
 
-`src/lib/domain.ts` is the **only** file that imports `@facture/shared`; everything else imports
-from it. That is the seam, and it is deliberately thin: eligibility, ranking, refusals and the curve
-maths are all the shared package's, so the screen and the venue cannot disagree about who would take
-an invoice or at what price.
+`src/lib/domain.ts` is the seam onto `@facture/shared`, and every piece of market logic goes through
+it. It is deliberately thin: eligibility, ranking, refusals and the curve maths are all the shared
+package's, so the screen and the venue cannot disagree about who would take an invoice or at what
+price.
+
+One file imports shared directly and is not domain logic — `privy-provider.tsx` takes `ARC_TESTNET`
+to declare the one chain the app transacts on, and a chain id read from anywhere else is how a
+provider ends up pointed at a different network than the venue. The invariant is that **market
+logic** comes through `domain.ts`, not that the import appears nowhere else.
 
 - **`bestQuote(invoice, mandates, debtor, { asOf })`** is what the venue matches on. Against the
   demo book it is also what produces every price on screen. Against the live venue the price comes
@@ -129,7 +142,7 @@ interface, and which one answers is decided in exactly one place:
 | `src/lib/api/problem.ts`         | RFC 9457 `application/problem+json`, turned into a sentence.                                                                                   |
 | `src/lib/data/api-source.ts`     | The live book.                                                                                                                                 |
 | `src/lib/data/fixture-source.ts` | The demo book, over the untouched `src/lib/fixtures.ts`.                                                                                       |
-| `src/lib/data/index.ts`          | The door. Reads, and the four things a person can actually do.                                                                                 |
+| `src/lib/data/index.ts`          | The door. Reads, and the seven things a person can actually do.                                                                                |
 | `src/lib/data/hooks.ts`          | `useMarket`, `useConfirmation`, `useProof` — three states, never a fourth.                                                                     |
 | `src/lib/settlement.ts`          | Where a trade actually got to. Six states, derived from the legs first.                                                                        |
 
@@ -214,7 +227,7 @@ venue later marks `failed` (so the proof view reads the legs, not the timestamp)
 
 ### Loading and failing
 
-Three states, handled on all nine routes. A screen either has the venue's figures, is waiting for
+Three states, handled on all eight routes. A screen either has the venue's figures, is waiting for
 them, or says in words what happened — there is no fourth state where a number is shown that nobody
 stands behind. `Pending` is a ruled gap where a figure will be; `Failure` names what was being read
 and what came back, with the technical trace kept to a footnote and a retry beside it. Nothing on
@@ -237,8 +250,12 @@ Stated on screen rather than left as an empty panel:
 - **Which mandates matched.** The quote route answers _how many_ would take an invoice, never which;
   a seller does not choose a counterparty. The invoice page shows the count and the nearest refusal
   instead of a ranked list.
-- **Confirmation links.** Tokens are minted by the venue and emailed to the customer, so the
-  seller's screen never sees one and "preview what they see" appears only against the demo book.
+- **Confirmation delivery.** There is no mail transport in this build, so the venue mints the token
+  and hands the link back outside production — and the seller is given it rather than told their
+  customer "has been sent the link", which is what this layer used to say after discarding the
+  response. In production `link` is `null` on purpose: a seller who can read it can confirm their
+  own invoices, which is the behavioural argument undone in one field. A null link and a failed
+  request stay different answers.
 - **Mandate names.** A standing bid has no name at the venue, so it is labelled by its own policy —
   "A or better, 60 days".
 
@@ -271,13 +288,17 @@ the wide end of the book, for different reasons:
 
 Both mandates holding Orrin paper bought it before the default. The dates say so.
 
-### A note on the README's worked example
+### The README's worked example, and why the screen shows a different price
 
-The root README quotes "$40,000 · due in 60 days · worth $39,180 today · 8.0% annualised · three
-mandates would take this". The fixtures reproduce the tenor and the rate exactly. The proceeds come
-out at **$39,473.97** (discount $526.03), which is what the shared package's simple-discount
-actual/365 pricer gives for those terms — `$39,180` corresponds to about 12.5% annualised, not 8%.
-Worth confirming which number the root README should carry.
+The root README quotes "$40,000 · due in 60 days · worth **$39,178** today · 12.5% annualised", and
+it has said exactly that since its first commit. It checks out: the shared package's simple-discount
+actual/365 pricer gives discount $821.92 and proceeds $39,178.08 on those terms, 2.05% of face.
+
+`INV-2041` is those terms in the fixture book — $40,000, sixty days from `MARKET_NOW` — and it
+clears at **8.00%** for $39,473.97, because 8.00% is the tightest standing bid this demo book
+happens to carry. Both numbers are right; they are prices from two different curves, which is the
+product's own point. The note that used to stand here read the two as one quote and reported the
+README as internally inconsistent. It is not.
 
 ## What is not here yet
 

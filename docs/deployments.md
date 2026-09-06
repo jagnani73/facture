@@ -1,6 +1,8 @@
 # Deployed addresses
 
-Testnet only. Recorded 2026-09-01, re-verified against chain 2026-09-02.
+Testnet only. Recorded 2026-09-01, re-verified against chain 2026-09-03. Sections carry their own
+dates; where one contradicted a later one, the later one has been kept and the earlier corrected in
+place rather than deleted.
 
 Every address, size and transaction below was read back from Hedera rather than copied from a
 deploy log. Where the chain and an earlier note disagreed, the chain won.
@@ -135,7 +137,7 @@ listed, issued, and cost real gas.
 
 Recorded rather than removed, for the same reason as the MF-2046 debris: a book whose job is
 to be checkable cannot have history quietly deleted from underneath it. The consequences to
-know about are that the demo book holds **29 invoices, two named MF-2052**, and two debtors
+know about are that the demo book holds **two invoices named MF-2052** and two debtors
 called Petra Foods Group — the seeded one rated `B`, the accidental one `UNRATED`.
 
 ## The invoice registry, in the live path — 2026-09-03
@@ -263,11 +265,15 @@ it without spending a transaction.
 Two failed attempts on the old encoding are on chain and cost 45,540 gas each:
 `0.0.10311549@1788339438.757403377` and `0.0.10311549@1788339442.795193807`.
 
-### Four orphan bonds
+### Two orphan bonds
 
-Two rounds of deployment happened before the record was correct, and their bonds exist with
-nothing pointing at them. They are listed because a security with no owner is exactly the kind
-of thing that should not be discovered later by accident.
+A round of deployment happened before the record was correct, and its bonds exist with nothing
+pointing at them. They are listed because a security with no owner is exactly the kind of thing
+that should not be discovered later by accident.
+
+This heading used to say **four**, counting the two wrong-encoding attempts above alongside
+these. Those two never deployed anything — they reverted at 45,540 gas — so there is no
+instrument to orphan, and only these two exist.
 
 | security       | EVM address                                  | why orphaned                    |
 | -------------- | -------------------------------------------- | ------------------------------- |
@@ -401,12 +407,14 @@ Cordell is a seeded buyer with no allowlist entry on this instrument. The trade 
 after a real funded bid existed from a buyer the security actually permits — Harrow Point at
 850 bps, which won the auction on price rather than by anything being removed from the book.
 
-**A wrinkle worth naming.** The compliance gate runs when a trade is armed, not when a price is
-quoted, so the book can show a price from a bid whose buyer cannot hold that security. The
-refusal is correct and legible, but the quote that preceded it was not honourable. Checking
-every mandate against every security's control list on every book render is an on-chain read
-per row, which is the cost this design avoids elsewhere — so the fix is a decision, not an
-oversight to patch quietly.
+**A wrinkle worth naming, and this run is what found it.** The compliance gate ran only when a
+trade was armed, so the book could show a price from a bid whose buyer cannot hold that
+security. The refusal was correct and legible, and it arrived after the seller had decided to
+sell. `4b90e1f` moved the check into pricing on the same day: `priceOne` screens the winning
+bid and, if it is barred, drops it and looks again, at most three passes. `priceBook` screens
+nothing, deliberately — checking per row is the same on-chain read per row this design avoids
+everywhere. A book price is indicative; `priceOne` is what a seller acts on. The MF-2052 run
+below is that fix working.
 
 ### Preparing a security
 
@@ -576,11 +584,13 @@ USDC on Arc, ERC-20 view, 2026-09-03:
 | **seller `0x2Da63Ac0…`**  | **0**      | **can receive; cannot pay gas to claim**               |
 
 The last row is the one with a consequence. Arc gas is USDC, so a seller holding nothing can
-be paid into the escrow and then cannot afford the transaction that claims it. Whether that
-matters depends on who may call `DvpEscrow.claim` — if the lock pays its named recipient
-regardless of who submits the claim, the venue can submit it and the money still lands with
-the seller. If only the recipient may call, the seller needs a gas top-up before any payout is
-claimable, and that is a step the demo has to include rather than discover.
+be paid into the escrow and then cannot afford the transaction that claims it.
+
+**It matters. `DvpEscrow.claim` requires `msg.sender == beneficiary`** — the venue cannot
+submit the claim for a seller even while holding the public preimage, and
+`MandateVault.test.ts` asserts exactly that by refusing the attester with `NotBeneficiary`.
+So the seller needs an Arc gas top-up before any payout is claimable, and that is a step the
+demo includes rather than discovers. `pnpm demo:reset` is what does it.
 
 ### The seller's Arc address was invented
 
@@ -608,14 +618,16 @@ row **had been corrected by hand with no migration recording it**, so a fresh se
 book that could not settle.
 
 Migration `0005_meridian_real_arc_wallet` — a plain UPDATE, applied after a `VACUUM INTO`
-backup. Six migrations applied, `integrity_check` ok, `foreign_key_check` clean, 29 invoices
-and 27 trades intact.
+backup. Six migrations applied at that point, `integrity_check` ok, `foreign_key_check` clean,
+29 invoices and 27 trades intact. The book has traded since: eight migrations applied, 30 invoices
+and 33 trades as of 2026-09-04.
 
 ## The Arc rail, in the build — 2026-09-03
 
 Nothing new deployed. `MandateVault` and the Arc `DvpEscrow` were reached by nothing until
-now; the backend calls both. **No live trade has settled on this rail yet** — what follows is
-what the code does and what the chain is configured to allow, not a settlement record.
+now; the backend calls both. What follows is what the code does and what the chain is
+configured to allow. **The settlement record is below** — MF-2061 took this rail the same day,
+so the caveat that stood here, that no live trade had settled on it, is closed.
 
 |                      |                                                                                |
 | -------------------- | ------------------------------------------------------------------------------ |
