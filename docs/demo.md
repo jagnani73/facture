@@ -4,7 +4,7 @@ Five moves, in the order the README argues them: list, quote, match, settle, mat
 against the venue as it actually runs on 2026-09-03, with the ids and transaction hashes it
 actually holds, so a judge can check a claim instead of taking it. Prices and tenors are as of that
 date and shorten by a day each day; the invoice statuses were re-read on 2026-09-04, after listing
-became something a seller does.
+became something a seller does, and the counts and due dates again on 2026-09-06.
 
 Everything below is either a URL to open or a request to send. Where a move is staged rather than
 live, it says so in place. Where the thing on screen is a fiction from the seeded book rather than
@@ -30,7 +30,7 @@ Two processes, both already running in the sessions this was written in:
 
 The masthead says **Demo book · Sign in**, and that is the whole of the account model.
 
-- **Signed out** you are looking at the shared demo book: a seeded seller with 30 invoices,
+- **Signed out** you are looking at the shared demo book: a seeded seller with 33 invoices,
   settled trades and matured receivables in it. Nothing to create, nothing to fund, and it is
   labelled rather than implied.
 - **Sign in** with an email address and Privy makes a wallet. The venue reads the email out of a
@@ -49,9 +49,9 @@ Signed out, the screens read their identity from `packages/web/.env.local`:
 Those ids appear in every seller-scoped and buyer-scoped request below. They are UUIDv5 derived
 from fixture labels, so they survive a reseed unchanged.
 
-**The buyer is Harrow Point deliberately.** It is the agent-operated desk, it is the buyer in both
-settled trades, and it holds the one mandate actually escrowed on Arc — so its two bids show a
-backed one and an unbacked one side by side.
+**The buyer is Harrow Point deliberately.** It is the agent-operated desk, it is the buyer in every
+settled trade with a real instrument behind it, and it holds the one mandate actually escrowed on
+Arc — so its two bids show a backed one and an unbacked one side by side.
 
 **`GET /health` reads `ok`.** It reports per-rail reachability rather than an indexer lag, because
 this build originates its chain transactions rather than following a stream and has no position to
@@ -63,15 +63,18 @@ curl http://localhost:8787/health
 
 ### What is real and what is seeded
 
-The book holds 30 invoices. **Five of them have an instrument that exists on Hedera:**
+The book holds 33 invoices. **Eight of them have an instrument that exists on Hedera:**
 
-| invoice | security       | what it is                                              |
-| ------- | -------------- | ------------------------------------------------------- |
-| MF-2051 | `0.0.10331926` | its own bond, deployed by the venue. The clean one.     |
-| MF-2052 | `0.0.10331928` | its own bond, deployed by the venue.                    |
-| MF-2046 | `0.0.10316440` | the gas-probe bond, pointed at by hand. A stand-in.     |
-| MF-2061 | `0.0.10348484` | its own bond. The one that sold on the Arc rail.        |
-| MF-2052 | `0.0.10343726` | a **second** MF-2052. The one the agent bought. `sold`. |
+| invoice | security       | what it is                                                     |
+| ------- | -------------- | -------------------------------------------------------------- |
+| MF-2051 | `0.0.10331926` | its own bond, deployed by the venue. The clean one. `matured`. |
+| MF-2052 | `0.0.10331928` | its own bond, deployed by the venue. `matured`.                |
+| MF-2046 | `0.0.10316440` | the gas-probe bond, pointed at by hand. A stand-in. `matured`. |
+| MF-2061 | `0.0.10348484` | its own bond. The first sale on the Arc rail. `sold`.          |
+| MF-2052 | `0.0.10343726` | a **second** MF-2052. The one the agent bought. `sold`.        |
+| MF-2070 | `0.0.10363143` | its own bond. Second Arc sale, and the only one that matured.  |
+| MF-2071 | `0.0.10363355` | its own bond, sold on x402. A-rated, due December. `sold`.     |
+| MF-2072 | `0.0.10363420` | its own bond, sold on x402. Unrated customer. `sold`.          |
 
 The other 25 carry security ids in the `0.0.67xxxxx` range that were never deployed —
 `https://testnet.mirrornode.hedera.com/api/v1/contracts/0.0.6751909` answers `Not found`. They
@@ -173,8 +176,9 @@ Two more worth opening, in this order, because they make the curve legible:
 - **MF-2038**, `1cba5ccd-f5e4-54f6-8d93-ec6bd4d01282` — A-rated, 23 days, **675 bps**, the tight
   end. It is also the one row already offered for sale, so it is the one a Sell click can reach.
 
-Then the buyer's side: **`http://localhost:3000/mandates`**. Three standing bids, their committed
-capital, what each has allocated and what is left. A funder writes a mandate and walks away; the
+Then the buyer's side: **`http://localhost:3000/mandates`**. Two standing bids, their committed
+capital, what each has allocated and what is left. `/v1/mandates` is scoped to one buyer, so this
+is Harrow Point's book rather than the venue's seven. A funder writes a mandate and walks away; the
 book is what quotes.
 
 ## Move 3 — Match, and the refusal
@@ -208,7 +212,7 @@ is in [deployments.md](./deployments.md#the-refusal-happened-first-and-said-why)
 
 **Say plainly that this exact 403 is now hard to reproduce, and why.** It was a real wrinkle: the
 gate ran at arming, so the book could quote a price from a bid whose buyer the instrument bars.
-Commit `4b90e1f` moved the check into pricing — `priceOne` screens the winning bid and, if it is
+Commit `3ea7592` moved the check into pricing — `priceOne` screens the winning bid and, if it is
 barred, drops it and looks again, up to three passes. The refusal now arrives before the seller
 decides to sell rather than after, which is the correct place for it and also the reason a judge
 cannot trigger it by clicking Sell today. It surfaces instead as `mandatesBarredByInstrument` on the
@@ -297,12 +301,20 @@ USDC into `DvpEscrow` locked for the seller. The ordering is chosen by which way
 the cash commits into escrow before the paper moves, so a failed delivery leaves money that returns
 to the mandate rather than a buyer holding paper nobody paid for.
 
-**A trade has now taken it.** MF-2061 — a B-rated receivable the escrowed mandate won on merit,
+**Two trades have now taken it.** MF-2061 — a B-rated receivable the escrowed mandate won on merit,
 because the two tighter bids carry an A floor — settled out of the vault on 2026-09-03, and the
 seller collected with their own key. Cash `0x96c5c862…` on Arc, paper
 `0.0.10311549@1788439835.810844400` on Hedera, claim `0x290928b2…`. The seller's balance moved
 0.5 → 0.512972 USDC: they received 0.014843 and paid their own gas, because `claim` requires
 `msg.sender == beneficiary` and the venue cannot collect for them.
+
+**Show MF-2070, because it is the only Arc-rail receivable that also matured.** Settled out of the
+same vault on 2026-09-04 for 0.012326 — cash `0xd28dfbbb…`, paper
+`0.0.10311549@1788523694.708650693`, lock `0x8d423031…`, HCS sequence 32 — and schedule
+`0.0.10363391` then paid the holder 1,250,000 tinybars, exactly par. Say the untidy half too: that
+lock still reads `locked`. The seller has not claimed it, the 24-hour window expired on the 5th,
+and nothing has swept it back — the second bullet below is why. MF-2061 is the one where a seller
+collected; MF-2070 is the one that ran the whole lifecycle.
 
 Two operational facts a rehearsal has to include, both of which surprised us:
 
@@ -413,18 +425,22 @@ well as for "paid late", written into a customer's permanent record either way.
 
 ```
 curl -X POST http://localhost:8787/v1/invoices/<id>/mature \
-  -H 'content-type: application/json' -d '{"paidAt":"2026-09-07T00:00:00Z"}'
+  -H 'content-type: application/json' -d '{"paidAt":"2026-09-06T00:00:00Z"}'
 ```
 
 A **replay** is untouched by that and still succeeds bodyless whatever the clock says, because
 reading a settlement back decides nothing — which is what keeps this the route for asking whether
 the collection key has signed. MF-2046 was matured four times and the ledger carries one outcome.
 
-**Read the date before a rehearsal, because this will bite later in the month.** No sold invoice is
-past due on 4 September — the earliest is MF-2039 on the 5th — but five of the sixteen sold rows
-fall due on or before the 16th: MF-2039, MF-2037 and MF-2030, MF-2033, MF-2036. Each needs a
-`paidAt` from the day after it falls due. And if the money genuinely never arrived,
-`POST /v1/invoices/:id/default` is the other answer, and the one that marks the customer.
+**Read the date before a rehearsal, because it has already bitten.** On 6 September, one of the
+eighteen sold rows is past due: **MF-2039**, which fell due on the 5th. A bodyless mature on that
+one is refused, and it is the only sold row that is. The other seventeen still take no body.
+
+Four more join it inside the demo window — MF-2037 and MF-2030 on the 8th, MF-2033 on the 12th,
+MF-2036 on the 14th — so five of the eighteen need a `paidAt` by the 16th. Each needs one from the
+day after it falls due, and it cannot be a future date; the route refuses that too. And if the
+money genuinely never arrived, `POST /v1/invoices/:id/default` is the other answer, and the one
+that marks the customer.
 
 The reason the money comes from `0.0.10331559` and not from the operator is worth thirty seconds.
 A scheduled transaction executes the moment its required signatures are present, and the operator
@@ -515,6 +531,7 @@ http://localhost:3000/mandates
 http://localhost:3000/proof/3d129208-a99e-4667-bc4a-1d7bc5a537eb  MF-2051, the clean lifecycle
 http://localhost:3000/proof/6f0654c7-99fc-4f4c-a4fb-d0e7d2626b2e  MF-2052, second clean lifecycle
 http://localhost:3000/proof/07c9b966-5192-46f4-ae90-b7dab62b11ad  MF-2061, the Arc rail
+http://localhost:3000/proof/72d8448e-5281-4ad8-b311-1d35d4242eb9  MF-2070, the Arc rail, matured
 http://localhost:3000/proof/c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d  MF-2052 again, bought by the agent
 http://localhost:3000/proof/85c8efbe-9940-4067-97f9-096f0576a377  MF-2046, the honest mess
 ```
@@ -626,12 +643,13 @@ Vault [`0x217256d0fdf83ffd81bbc6884ad44f5c02501102`](https://testnet.arcscan.app
 on Arc holds Harrow Point's mandate capital, deposited by that buyer's own wallet. The mandates
 screen shows `Escrowed on Arc` on that bid and `Not escrowed` on the other.
 
-Be precise about what this is: **capital backing a bid, and a rail that has drawn on it once.** 5
-USDC went in; MF-2061 took 0.014843 out through `executePayout`, and the balance reads 4.985157.
-That difference is the whole argument — a bid is firm because the money is already there, and the
-proof is that some of it has left.
+Be precise about what this is: **capital backing a bid, and a rail that has drawn on it twice.** 5
+USDC went in; MF-2061 took 0.014843 out through `executePayout`, MF-2070 another 0.012326, and a
+$100 withdrawal released 0.0001 back to the buyer; the balance reads 4.972731. That difference is
+the whole argument — a bid is firm because the money is already there, and the proof is that some
+of it has left.
 
-And five seeded mandates still quote against capital nobody posted; the funding check stops that
+And six seeded mandates still quote against capital nobody posted; the funding check stops that
 growing rather than undoing it, which is why the screen labels each bid rather than claiming the
 book is uniformly backed. The screen now prints both figures — what the vault holds and what the
 mandate needs — because the check that compares them used to compare raw digits four orders of

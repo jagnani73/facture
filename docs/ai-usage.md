@@ -2,8 +2,8 @@
 
 ETHGlobal asks entrants to say which parts of a project were built with AI assistance and which
 files those were. This is that statement, reconstructed from the repository rather than from memory:
-116 commits, their messages, their diffs, and the two documents the work was steered by. Every count
-below was recomputed from the tree on 2026-09-04 rather than carried forward.
+131 commits, their messages, their diffs, and the two documents the work was steered by. Every count
+below was recomputed from the tree on 2026-09-06 rather than carried forward.
 
 The short version: **a model did nearly all of the typing, and a person made every decision the
 typing was constrained by.** That division is not a hedge. It is legible in the repo, because the
@@ -17,14 +17,14 @@ constraints were written down before the code was, and the file they were writte
 [Claude Code](https://claude.com/claude-code), Anthropic's CLI, driven by one person in an
 interactive terminal. No autonomous agent loop, no code generation service, no scaffolding
 generator. Sessions ran in two shapes: one person and one model working through a
-problem, and — on the third and fourth days — orchestrating sessions that fanned parallel agents
+problem, and — on the second and third days — orchestrating sessions that fanned parallel agents
 across package boundaries that could not collide, then reviewed and committed their work. Model
 choice varied across sessions and the repository does not record which model wrote which commit, so
 this document does not claim one.
 
 Supporting tools in the same sessions: MCP servers for PostgreSQL inspection and for Arc's live
 documentation. `.mcp.json` is gitignored because it carries a connection string, which is why the
-configuration itself is not in the tree — see commit `369abfe`.
+configuration itself is not in the tree — see commit `c49c830`.
 
 **No AI attribution appears in any commit message**, by the author's standing preference. `git log`
 carries no `Co-Authored-By` trailer and no generated-with footer. That is a formatting choice, not a
@@ -32,26 +32,29 @@ claim of hand-authorship, and this file exists so the choice does not amount to 
 
 ## Shape of the work
 
-116 commits, 2026-09-01 through 2026-09-04. Four days: 29, then 32, then 34, then 21.
+131 commits, 2026-09-04 through 2026-09-06. Three days: 23, then 79, then 29.
 
-The first seven landed within 90 seconds of each other — a workspace scaffold, five package
-skeletons and the two steering documents, staged together rather than developed commit by commit.
-Everything after `685f821` is incremental, and the later history reads like what it was: a feature
-landing, a live transaction failing, and a fix commit naming exactly what the failure was.
+The first seven span two hours and twenty-two minutes and 28,283 inserted lines — a workspace
+scaffold, four package skeletons, the two steering documents and an upstream bug report — each
+landing whole rather than developed commit by commit. Everything after `4a9aae6` is incremental, and
+the later history reads like what it was: a feature landing, a live transaction failing, and a fix
+commit naming exactly what the failure was.
 
 | package              | tracked lines | what it is                                                         |
 | -------------------- | ------------- | ------------------------------------------------------------------ |
-| `packages/backend`   | 31,666        | Hono venue, SQLite store, ATS/x402/Arc/schedule/HCS/chain adapters |
-| `packages/web`       | 17,381        | Next.js screens, one data seam over API or fixtures                |
-| `packages/contracts` | 9,451         | 19 Solidity files, Hardhat, deploy and Sourcify-verify scripts     |
-| `packages/agent`     | 9,418         | market-maker on a Circle wallet and a Hedera key                   |
+| `packages/backend`   | 34,756        | Hono venue, SQLite store, ATS/x402/Arc/schedule/HCS/chain adapters |
+| `packages/web`       | 17,461        | Next.js screens, one data seam over API or fixtures                |
+| `packages/contracts` | 9,908         | 19 Solidity files, Hardhat, deploy and Sourcify-verify scripts     |
+| `packages/agent`     | 9,445         | market-maker on a Circle wallet and a Hedera key                   |
 | `packages/shared`    | 4,075         | domain types, ISIN, pricing, state machines                        |
-| docs and READMEs     | 5,916         | six READMEs, `CLAUDE.md`, `docs/`                                  |
+| docs and READMEs     | 6,543         | six READMEs, `CLAUDE.md`, `docs/`                                  |
 
-57 test files, 20,629 lines. 1,114 of those tests run under vitest — backend 464, web 229, agent
-237, shared 184 — and the contracts package adds 129 more under Hardhat. Written in the same
-sessions as the code they cover. `packages/web` had no test runner at all until the third day; it
-was added specifically because `tsc --noEmit` cannot see a decoder reading the wrong field.
+60 test files, 21,882 lines. The figure printed here before counted four `vitest.config.ts` files in
+the lines and not in the files, which overstated the lines by 42; both now come off one list. 1,150
+of those tests run under vitest — backend 498, web 231, agent 237, shared 184 — and the contracts
+package adds 134 more under Hardhat. Written in the same sessions as the code they cover.
+`packages/web` had no test runner at all until the second day; it was added specifically because
+`tsc --noEmit` cannot see a decoder reading the wrong field.
 
 ## What the human decided
 
@@ -92,7 +95,7 @@ been reasoning from the wrong one:
   charges `gasUsed × gasPrice`. Discovered by a send being refused for insufficient funds against a
   fee it could easily have paid.
 
-**The scope decisions on days three and four**, every one of which the model raised as a question
+**The scope decisions on days two and three**, every one of which the model raised as a question
 rather than resolved on its own:
 
 - **Privy signs exactly one thing.** It signs a seller in and records the wallet, and it touches
@@ -104,6 +107,17 @@ rather than resolved on its own:
   `msg.sender == beneficiary`, and the venue therefore cannot collect for a seller under any
   circumstances. The only key that can is the one Privy made at sign-in. The seller still signs
   nothing to _sell_ — not to list, not to be matched, not to settle.
+- **And the key is allowed exactly that one thing.** A Privy wallet policy, created once by
+  `pnpm --filter @facture/backend privy:policy` and pinned in `PRIVY_WALLET_POLICY_ID`, carries a
+  single ALLOW rule over `eth_sendTransaction` with three conditions Privy decodes for itself: the
+  escrow address, read off the deployed vault rather than written down a second time; Arc's chain id
+  `5042002`; and a `function_name` of `claim`, decoded against an ABI holding that one function.
+  Everything no rule allowed is denied. `services/privy-policy.ts` attaches it at sign-in and
+  swallows its own failures, because an unavailable policy API should cost the control rather than
+  the account. Creating it is deliberately not automatic: Privy puts no uniqueness constraint on a
+  policy name, so a venue that created one on demand would mint a fresh policy per restart and then
+  be unable to say which one a given wallet carries. An email and an address are not a control; this
+  is.
 - **Escrow is funded from the buyer's own wallet**, not the venue's, because depositing the venue's
   USDC and calling it escrowed buyer capital would have been a fresh overclaim of exactly the kind
   the README had just been corrected for.
@@ -137,28 +151,31 @@ Essentially all of the source. Concretely, and by the seam it was asked to hold:
 tables. Written first, so nothing downstream could invent its own copy of a chain id.
 
 **`packages/contracts`** — `MandateBook`, `DvpEscrow`, `MandateVault`, `UniquenessRegistry`,
-`AtsComplianceGate`, `InvoiceRegistry`, their interfaces, the mocks, and 3,182 lines of Hardhat
+`AtsComplianceGate`, `InvoiceRegistry`, their interfaces, the mocks, and 3,280 lines of Hardhat
 tests. The refusal vocabulary in `libraries/ReasonCodes.sol` was later renamed to match
-`@facture/shared` exactly (`e6edbe6`), because two spellings of one refusal is a bug that only
+`@facture/shared` exactly (`78faa1a`), because two spellings of one refusal is a bug that only
 surfaces when a funder reads a receipt.
 
 **`packages/backend`** — the whole venue. Routes, the quote engine, the settlement service, the
 issuance queue and its pacing, the ATS adapter, the x402 client, the schedule adapter, the SQLite
-store and its eight migrations, the 1,237-line seeded demo book, and the tests.
+store and its nine migrations, the 1,292-line seeded demo book, and the tests.
 
 **`packages/web`** — every screen, the fixture book, and the data seam that lets the same components
 render against the venue or against fixtures.
 
 **`packages/agent`** — the market maker, its Circle wallet client, its mandate pre-flight, and a
-logger with a secret redactor registered before the environment is parsed. `src/cash.ts` was added
-last and is the one file in this package that spends: it holds the buyer's Hedera key and signs the
-x402 cash leg, a native `TransferTransaction` whose transaction id is generated against the
-facilitator's account so the buyer pays the quoted proceeds and no gas. It signs without touching
-the network, which is what makes it testable: `freezeWith` wants only the node addresses an SDK
-client already knows, and `sign` is arithmetic, so a test decodes the signed bytes and checks them
-against the challenge. That mattered, because the failure on this rail is not an exception. A
-payload built from the wrong field is a valid signature over the wrong transfer, and the
-facilitator submits it.
+logger with a secret redactor registered before the environment is parsed. Two files in this package
+spend. `src/cash.ts` holds the buyer's Hedera key and signs the x402 cash leg, a native
+`TransferTransaction` whose transaction id is generated against the facilitator's account so the
+buyer pays the quoted proceeds and no gas. It signs without touching the network, which is what
+makes it testable: `freezeWith` wants only the node addresses an SDK client already knows, and
+`sign` is arithmetic, so a test decodes the signed bytes and checks them against the challenge. That
+mattered, because the failure on this rail is not an exception. A payload built from the wrong field
+is a valid signature over the wrong transfer, and the facilitator submits it. `src/vault.ts` came
+after it and posts the agent's own Circle-wallet USDC into `MandateVault` — the one thing that
+wallet is for, since it pays for neither settlement rail — and `src/fund.ts` is the command that
+drives it: with no flags it reads the venue and the vault, prints the plan and moves nothing, and
+`--execute` is the only thing that authorises a spend.
 
 **The documentation**, including `docs/deployments.md`, the five package READMEs, and the upstream
 bug report in `docs/upstream/`. Every address and gas figure in the deployment record was read back
@@ -176,7 +193,7 @@ Three cases, all recoverable from `git log`.
 block is disclosure metadata with no enforcement path — no resale-hold check, no accreditation
 check, `resaleHoldPeriod` appearing nowhere in contract logic — and that all three regulation types
 are `ACCREDITATION_REQUIRED`, which killed the stated rationale for choosing 506(c). The decision to
-declare Reg S followed from that reading. `cb9d567` then changed one default in `env.ts`. The
+declare Reg S followed from that reading. `9833a3b` then changed one default in `env.ts`. The
 research was hours; the diff was one line.
 
 **The maturity payout rail.** The constraint that a debtor has no wallet is a product decision with
@@ -188,13 +205,13 @@ built the collection-account rail, the schedule, the idempotency, and the read-b
 quoted 925 bps from a buyer the instrument bars, and the 403 arrived after the seller had decided to
 sell. The decision about how to fix it — check the winner and fall through, never screen the whole
 book, treat an unreadable instrument as indeterminate rather than negative — is a judgement about
-what a quote is allowed to cost. `4b90e1f` is the model implementing that judgement.
+what a quote is allowed to cost. `3ea7592` is the model implementing that judgement.
 
 ## What the model got wrong
 
 Naming these is the point of the exercise. Every one is a commit in this repository.
 
-**The `deployBond` tuple that never once worked** (`cb9d567`) is the flagship. The struct the
+**The `deployBond` tuple that never once worked** (`9833a3b`) is the flagship. The struct the
 backend encoded was a plausible flattening of the real one. It compiled. It typechecked. It produced
 calldata. It encoded to selector `0x58a038dd`, which the deployed diamond does not have — so every
 issuance the service ever attempted reverted with `FunctionNotFound(0x5416eb98)` after 45,540 gas, a
@@ -209,22 +226,22 @@ The fix was not a better struct. It was `DEPLOY_BOND_SELECTOR`, asserted before 
 
 The same pattern, three more times:
 
-- `6ee1f16` — the compliance service called `isAuthorized`, `getKycAccountStatus` and `isPaused`.
+- `ca94b22` — the compliance service called `isAuthorized`, `getKycAccountStatus` and `isPaused`.
   None exist. The real surface is `getControlListType()`, `isInControlList(address)`,
   `getKycStatusFor(address)` and `paused()`. It also read membership without reading list _type_,
   which inverts the answer on a blocklist instrument and admits exactly the party it was configured
   to exclude.
-- `314d395` — `executeHold` called with the wrong argument shape.
-- `8b165fe` — the security id was taken from `contractFunctionResult.contractId`, which is the
+- `db06cfa` — `executeHold` called with the wrong argument shape.
+- `4ba0816` — the security id was taken from `contractFunctionResult.contractId`, which is the
   contract that was _called_. Every invoice was recorded as owning the factory. Two perfectly good
   bonds are orphaned on testnet because of it, listed in `deployments.md` for exactly that reason.
 
 Two more, of different kinds:
 
-- `a591465` deleted a 754-line PostgreSQL store written the same day and replaced it with SQLite.
+- `b69ba9f` deleted a 754-line PostgreSQL store written the same day and replaced it with SQLite.
   The reasoning in the new file — a file on disk cannot be a container that failed to start — is
   right, and it should have been the first choice.
-- `344465c` fixes a `tsx watch` invocation whose flags were in an order that does not work. Trivial,
+- `494ea2a` fixes a `tsx watch` invocation whose flags were in an order that does not work. Trivial,
   and it took a run to find.
 
 One correction ran the other way. The local Hardhat figure of 6,978,091 gas for `deployBond` was
@@ -237,11 +254,25 @@ median of 6,976,378.
 distinctive result in the project, and it is not a coding error — every one of them typechecks,
 reads well in review, and is invisible to a test suite that never asks whether anybody calls it.
 
-**Nineteen were found.** Nine came one at a time, over three days of tripping over them; the other
-ten came at once, from a deliberate pass over every export, interface member, column, env var,
-contract function and wire field, asking only _what calls this outside its own tests_. That the
-systematic pass more than doubled the count in one sitting is the finding: they were never a run of
-bad luck, and looking for them is a different activity from reviewing code.
+**Twenty-two were found.** Nine came one at a time, tripped over rather than looked for; ten came at
+once, from a deliberate pass over every export, interface member, column, env var, contract function
+and wire field, asking only _what calls this outside its own tests_. That the systematic pass more
+than doubled the count in one sitting is the finding: they were never a run of bad luck, and looking
+for them is a different activity from reviewing code. Three more arrived after that pass was
+supposed to have ended it — `provisionClaimPolicy`, named the twentieth in its own commit message
+(`3962b0b`), and the deployed `AtsComplianceGate` and `MandateBook`, which `CLAUDE.md` had been
+carrying as unwired contracts rather than as sweep findings and which got their first callers on the
+third day.
+
+`AtsComplianceGate` is the one worth reading, because having no caller turned out not to be its
+worst property. It probed `isPaused()`, `isAuthorized(address)` and `getKycAccountStatus(address)` —
+three functions a deployed ATS diamond does not have — so every probe reverted `FunctionNotFound`,
+the gate failed closed, and it refused every buyer on every instrument, including ones the
+instrument affirmatively permits. `services/compliance.ts` had carried the right four selectors
+since `ca94b22`, corrected against live paper: two halves of one fact maintained apart, and the
+on-chain half was the one a third party would call. Its contract tests all passed, because
+`MockAtsSecurity` implemented the same three wrong selectors. **A mock built from the same
+misreading as the code under test cannot contradict it.**
 
 The running tally — which have a caller now, which stand, and which stand deliberately — is kept in
 `CLAUDE.md` under **"The full sweep for mechanisms nobody calls"**, because it changes with the
@@ -250,21 +281,21 @@ purpose: it recovers a stranded payout, it is permissionless, and automating it 
 writing to Arc on a timer for a case that needs a judgement about whether the seller has simply not
 claimed yet.
 
-Six of the nineteen, as a sample of how they present:
+Six of them, as a sample of how they present:
 
-| what                         | how it presented                                                                                                                                                                                            |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Indexer.advance()`          | `/health` returned 503 from before the first settled trade. Nothing ever advanced the cursor, so the lag printed as the whole chain height.                                                                 |
-| HCS refusal receipts         | The schema had the topic and sequence columns, the proof view rendered a link off them, and the seed filled them in. Nothing had ever written to a topic.                                                   |
-| `IssuanceJob.regulationType` | Read off the invoice, carried through two layers, then ignored — the adapter used a venue-wide config value. MF-2052's row said Reg D 506(c) while its bond went out Reg S.                                 |
-| `identity.ts` `subscribe`    | Written so a sign-in could re-render the book. Nothing subscribed, so signing in changed the identity and the screen kept showing the previous seller's invoices.                                           |
-| `assetLeg.unitsMinor`        | The venue published it precisely so a trade moving one unit of a face-value-many issuance could not hide. The decoder had no such field, so the row rendered on the fixture path and never on the live one. |
-| `UniquenessRegistry`         | Deployed on day one, backing the README's sharpest fraud claim, and called by nothing until day three.                                                                                                      |
+| what                         | how it presented                                                                                                                                                                                                                   |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Indexer.advance()`          | `/health` returned 503 from before the first settled trade. Nothing ever advanced the cursor, so the lag printed as the whole chain height.                                                                                        |
+| HCS refusal receipts         | The schema had the topic and sequence columns, the proof view rendered a link off them, and the seed filled them in. Nothing had ever written to a topic.                                                                          |
+| `IssuanceJob.regulationType` | Read off the invoice, carried through two layers, then ignored — the adapter used a venue-wide config value. MF-2052's row said Reg D 506(c) while its bond went out Reg S.                                                        |
+| `identity.ts` `subscribe`    | Written so a sign-in could re-render the book. Nothing subscribed, so signing in changed the identity and the screen kept showing the previous seller's invoices.                                                                  |
+| `assetLeg.unitsMinor`        | The venue published it precisely so a trade moving one unit of a face-value-many issuance could not hide. The decoder had no such field, so the row rendered on the fixture path and never on the live one. `34924a1` gave it one. |
+| `UniquenessRegistry`         | Deployed on day one, backing the README's sharpest fraud claim, and called by nothing until day two.                                                                                                                               |
 
 The lesson the model kept relearning: **the test that would have caught each of these is not a test
 of the mechanism, it is a test that something reaches it.** Several of the fixes are exactly that.
 
-### Three more from the third day
+### Three more from the second day
 
 - **`writeContract` does not mean the transaction succeeded.** The first draft of the uniqueness
   service reported a _second_ claim on an already-bound receivable as a success, because viem
@@ -311,17 +342,17 @@ Written down once against viem's receipt wait on the Arc rail, then learned agai
 against `fetch` in the agent, where the comment calls it a rollback rather than a revert and means
 the same thing.
 
-### Day four, and a guard that was only accidentally safe
+### Day three, and a guard that was only accidentally safe
 
-The fourth day was mostly closing the sweep above — giving callers to mechanisms that had none. An
+The third day carried on closing the sweep above — giving callers to mechanisms that had none. An
 adversarial review of that work found six defects, and the first of them is the one worth reading,
 because it is a shape rather than a slip.
 
 **Wiring a mechanism made an old guard dangerous without changing the guard.**
 `withdrawFromMandate` had always marked a mandate `withdrawn` once its book hit zero, and
 `fundMandate` refuses a withdrawn one. That was harmless for exactly as long as withdrawal moved
-nothing but a SQLite row. Then `MandateVault.executeRelease` — one of the nineteen — was given its
-caller, and the same status became a way to lose money: any outcome short of a completed release
+nothing but a SQLite row. Then `MandateVault.executeRelease` — one of the sweep's ten — was given
+its caller, and the same status became a way to lose money: any outcome short of a completed release
 left real USDC in the vault under `keccak256(uuid)` with nothing in the repo able to move it, and a
 replacement mandate is a new UUID and a new bucket. **A test had pinned that state and called it
 recoverable.** The route is ask-book-chain-close now, an unknown outcome leaves the mandate open at
@@ -369,13 +400,13 @@ whose job is to be checkable cannot have history quietly removed from underneath
 ## Reproducing this claim
 
 ```
-git log --format='%h %ad %s' --date=short          # 116 commits, four days
-git log --stat cb9d567                             # the selector fix
-git show 7430e05                                   # README and CLAUDE.md, first commit of prose
-git show 9008136                                   # a mechanism with no caller, removed
-git show 9625b8d                                   # a deployed contract, finally called
-git show 649fcb8                                   # the systematic sweep, ten more at once
-git show 4d0dce5                                   # what the adversarial review caught
+git log --format='%h %ad %s' --date=short          # 131 commits, three days
+git log --stat 9833a3b                             # the selector fix
+git show 1456033                                   # README and CLAUDE.md, first commit of prose
+git show bea7201                                   # a mechanism with no caller, removed
+git show fcf7b64                                   # a deployed contract, finally called
+git show 64239a3                                   # the systematic sweep, ten more at once
+git show f7fde24                                   # what the adversarial review caught
 ```
 
 `CLAUDE.md` is the constraint record. `docs/deployments.md` is the chain record, and every figure in

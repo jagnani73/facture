@@ -11,7 +11,8 @@
  * beside the venue's own — so the tests that matter are the ones proving it cannot do damage.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { call, createHarness, listInvoice, type Harness } from './helpers.js';
 import {
   BOOK_MAX_TENOR_DAYS,
   BOOK_MAX_YIELD_BPS,
@@ -23,7 +24,20 @@ import {
   ensureMandatePosted,
   ratingOrdinal,
   type MandateBook,
+  type MatchPreview,
 } from '../src/services/mandate-book.js';
+
+let h: Harness;
+
+/** List, quote, arm. The seeded book is confirmed rather than listed, so listing comes first. */
+async function armATrade() {
+  const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+  await listInvoice(h.app, invoiceId);
+  const quote = await call(h.app, 'GET', `/v1/invoices/${invoiceId}/quote`);
+  return call(h.app, 'POST', '/v1/trades', {
+    body: { invoiceId, quoteId: quote.body.quoteId },
+  });
+}
 
 const MANDATE = {
   id: '8b879d02-4593-4d66-82bf-52d4833401b6',
@@ -291,5 +305,87 @@ describe('previewMatch', () => {
     expect(preview.checked).toBe(false);
     expect(preview.ok).toBeNull();
     expect(preview.detail).toContain('That is not a refusal');
+  });
+});
+
+describe('the book on the arm path', () => {
+  /**
+   * The route calls `previewMatch` and publishes the answer. These cover the seam rather than the
+   * service, because the failure worth catching is the response quietly losing the field: nothing
+   * downstream depends on `book`, so a decoder that stopped reading it would break no test and no
+   * screen, and the claim that a buyer can check the venue against the chain would go with it.
+   */
+  afterEach(() => {
+    h.restore();
+  });
+
+  const bookSaying = (preview: MatchPreview): MandateBook => ({
+    ...createDisabledMandateBook(),
+    enabled: true,
+    address: '0x361f9d4b1101898417b2b9148bc8aa522024a38f',
+    previewMatch: () => Promise.resolve(preview),
+  });
+
+  const agrees: MatchPreview = {
+    checked: true,
+    ok: true,
+    code: null,
+    priceMinor: '392094',
+    tenorDays: 39,
+    detail: 'the book would take this match',
+  };
+
+  it('publishes the chain answer on the challenge', async () => {
+    h = await createHarness({ mandateBook: bookSaying(agrees) });
+    const armed = await armATrade();
+
+    expect(armed.status).toBe(402);
+    expect(armed.body.book).toMatchObject({ checked: true, ok: true, tenorDays: 39 });
+  });
+
+  /**
+   * The venue prices 392093 where the book prices 392094, because one ceils the discount and the
+   * other floors it. Both numbers are published and neither is corrected — refusing on the
+   * difference would reject a trade both parties would take, over a rounding rule.
+   */
+  it('arms the trade even when the book prices it a minor unit apart', async () => {
+    h = await createHarness({ mandateBook: bookSaying(agrees) });
+    const armed = await armATrade();
+
+    expect(armed.status).toBe(402);
+    expect(armed.body.book.priceMinor).toBe('392094');
+  });
+
+  /**
+   * The one that decides whether wiring the book was safe. The chain refusing is published, and
+   * the sale still happens, because the book is a second opinion on a decision the venue has
+   * already made against its own ledger. If this ever starts returning 4xx, the book has quietly
+   * become an authority nobody agreed to give it.
+   */
+  it('does not let a refusal from the chain block the sale', async () => {
+    h = await createHarness({
+      mandateBook: bookSaying({
+        checked: true,
+        ok: false,
+        code: 'RATING_BELOW_MANDATE',
+        priceMinor: '0',
+        tenorDays: 39,
+        detail: 'the book would refuse this match',
+      }),
+    });
+
+    const armed = await armATrade();
+
+    expect(armed.status).toBe(402);
+    expect(armed.body.book).toMatchObject({ ok: false, code: 'RATING_BELOW_MANDATE' });
+  });
+
+  /** No book configured is the default, and it must read as "not asked" rather than as a no. */
+  it('reports checked:false rather than a refusal when no book is configured', async () => {
+    h = await createHarness();
+    const armed = await armATrade();
+
+    expect(armed.status).toBe(402);
+    expect(armed.body.book).toMatchObject({ checked: false, ok: null, code: null });
   });
 });

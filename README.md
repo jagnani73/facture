@@ -10,8 +10,8 @@
 
 ---
 
-> **Status: running on testnet.** The five moves below have each happened on chain, once, for
-> real. A receivable was issued as an ATS zero-coupon bond, priced off a standing mandate,
+> **Status: running on testnet.** The five moves below have each happened on chain, more than
+> once, for real. A receivable was issued as an ATS zero-coupon bond, priced off a standing mandate,
 > checked against the security's own control list, settled delivery-versus-payment, and
 > matured — paying its holder par. Addresses, transaction ids and balances either side of each
 > of those are in [docs/deployments.md](./docs/deployments.md), which is written so that every
@@ -177,17 +177,18 @@ already done &mdash; **no challenge and no signature, because a funded mandate a
 anything meeting its terms. That is what "firm bid" means.** An unfunded bid gets the x402 exchange
 instead. Both answers carry the rail and the reason, so nothing is inferred.
 
-**Five receivables have sold on chain, and four of them took their payment over x402 on
+**Eight receivables have sold on chain, and six of them took their payment over x402 on
 `hedera:testnet`**, in HBAR, with face value in cents mapped to tinybars 1:1 under a declared scale.
-The fifth is the paragraph below. The Hedera book's `cashLeg()` returns Arc's chain id and the vault
-address as immutables recorded at construction, so the cross-chain link cannot be redirected.
+The other two are the paragraph below. The Hedera book's `cashLeg()` returns Arc's chain id and the
+vault address as immutables recorded at construction, so the cross-chain link cannot be redirected.
 
-**A sale has now been paid in USDC on Arc.** `MandateVault` held 5 USDC against one mandate,
+**Two sales have now been paid in USDC on Arc.** `MandateVault` held 5 USDC against one mandate,
 deposited by that buyer's own wallet; MF-2061 drew 0.014843 of it, the payout locked in
 `DvpEscrow`, and the seller claimed it with their own key &mdash; 0.5 &rarr; 0.512972 USDC, the
 difference being the gas they paid, because `claim` checks the caller and the venue cannot collect
-for them. The venue still refuses to count a mandate as holding more than the vault does;
-`balanceOf` is a view, so checking costs nothing.
+for them. MF-2070 drew another 0.012326 and matured; its lock still reads `locked`, because the
+seller has not claimed it and `reclaimPayout` is not wired. The venue still refuses to count a
+mandate as holding more than the vault does; `balanceOf` is a view, so checking costs nothing.
 
 One consequence worth stating, because it surprised us: **the seller claims their own payout.**
 `DvpEscrow.claim` requires `msg.sender == beneficiary`, so a payout lands in an escrow lock rather
@@ -391,7 +392,7 @@ Recorded here so they are not relitigated mid-build.
   behind that bound is `MandateVault` on Arc. Funding is checked against what the vault actually
   holds &mdash; `balanceOf` is a view, so it costs nothing to ask &mdash; and a mandate cannot be
   credited with capital nobody deposited. One mandate is backed this way today, with 5 USDC posted
-  by that buyer's own wallet. **The five seeded mandates are not**, and still quote against capital
+  by that buyer's own wallet. **The six seeded mandates are not**, and still quote against capital
   nobody posted: the check stops that growing rather than undoing it, and the demo book says which
   is which.
 - **Where a rating comes from.** Earned on the platform out of settled payment behaviour, starting

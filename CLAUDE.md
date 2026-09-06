@@ -1083,19 +1083,25 @@ contract" — it is not in the ABI and never read.** The comment was corrected a
 outright; the mechanism is still unread, so it is the accusation against the comment that is
 stale rather than the finding.
 
-The lesson stands and is now quantified: **twenty-one mechanisms in this repo had a definition,
-documentation, and no caller.** Nineteen were found in this sweep; `provisionClaimPolicy` was
-the twentieth, on 2026-09-06, and the deployed `AtsComplianceGate` the twenty-first the same
-day.
+The lesson stands and is now quantified: **twenty-two mechanisms in this repo had a definition,
+documentation, and no caller.** Nine came one at a time and ten came at once, from this sweep.
+Three arrived after it: `provisionClaimPolicy`, named the twentieth in its own commit message,
+and the deployed `AtsComplianceGate` and `MandateBook`, which this file had been carrying as
+unwired contracts rather than as sweep findings. They are the same thing and are counted here
+as such.
 
 Thirteen have a caller. Ten as of 2026-09-04 — seven outright (1, 2, 3, 5, 6, 8 and 10) and
 three only partly (4, 7 and 9, where the caller exists and the claim beside it still does not
-hold) — plus the wallet policy, the compliance gate and `MandateBook` on 2026-09-06. So the
-count is **eight**. What remains is the tail below the numbered list, plus `reclaimPayout` and
-the Hedera `DvpEscrow`, both of which stand deliberately and say why.
+hold) — plus those three on 2026-09-06. So the count is **nine**. What remains is the tail below
+the numbered list, plus `reclaimPayout`, which stands deliberately and says why.
 
-**The twenty-first changes what this pattern costs.** The twenty before it were inert: defined
-and documented and harmless. `AtsComplianceGate` was not harmless. It probed three ATS
+The Hedera `DvpEscrow` is deliberately **not** on this list, though it has no caller either. It
+was never meant to have one: it is `MandateBook.confirmSettlement`'s evidence source, and
+`deployHedera.ts` says as much by binding it to the book and nowhere else. A component of a
+design this build does not reach is a different thing from a mechanism that lost its caller.
+
+**The last of the twenty-two changes what this pattern costs.** The ones before it were inert:
+defined and documented and harmless. `AtsComplianceGate` was not harmless. It probed three ATS
 selectors that do not exist and refused every buyer on every instrument, so wiring it unchanged
 would have stopped the venue trading. Nothing had ever observed it doing that, which is the
 whole difficulty: an uncalled mechanism accumulates documentation describing behaviour nobody

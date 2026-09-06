@@ -37,6 +37,11 @@ import type { MaturityPayoutRequest, ScheduleAdapter } from '../src/services/sch
 import { setScheduleAdapter } from '../src/services/schedule.js';
 import type { ComplianceDecision, ComplianceGate } from '../src/services/compliance.js';
 import { setComplianceGate } from '../src/services/compliance.js';
+import {
+  createDisabledMandateBook,
+  setMandateBook,
+  type MandateBook,
+} from '../src/services/mandate-book.js';
 import { initIssuanceQueue } from '../src/services/issuance.js';
 import {
   createDisabledHcsPublisher,
@@ -353,6 +358,8 @@ export interface HarnessOptions {
   hcs?: HcsPublisher;
   /** Absent means no registry: uniqueness is the database's index alone, as today. */
   uniqueness?: UniquenessRegistry;
+  /** Absent means no book: the chain is not asked whether it would take the match. */
+  mandateBook?: MandateBook;
   /** Absent means no registry: terms and confirmation stay inside the database. */
   invoiceRegistry?: InvoiceRegistry;
 }
@@ -492,6 +499,12 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
   setHcsPublisher(options.hcs ?? createDisabledHcsPublisher());
   setUniquenessRegistry(options.uniqueness ?? createDisabledUniquenessRegistry());
   setInvoiceRegistry(options.invoiceRegistry ?? createDisabledInvoiceRegistry());
+  /*
+   * Disabled by default, so the chain is not asked about a match in a unit test. The trade
+   * response still carries `book`, reporting `checked: false` — which is the state a deployment
+   * with no book configured is in, and the one a test must not silently skip past.
+   */
+  setMandateBook(options.mandateBook ?? createDisabledMandateBook());
   setNotifier(silentNotifier);
 
   initIssuanceQueue({ minIntervalMs: 0, maxAttempts: 3, backoffBaseMs: 1 });
@@ -529,6 +542,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
       setAtsAdapter(undefined);
       setScheduleAdapter(undefined);
       setComplianceGate(undefined);
+      setMandateBook(undefined);
       setPrivyVerifier(undefined);
       setPrivyPolicyClient(undefined);
       setArcEscrow(undefined);
