@@ -1033,9 +1033,10 @@ luck. Ranked by the claim each one falsely supports, not by how odd the code loo
    market the README's argument rests on has a table row and no code — which
    `settlement.ts` already concedes in a comment. **Closed 2026-09-04:**
    `POST /v1/invoices/:id/list` writes it and arming refuses anything else, so the status is
-   reachable and load-bearing. What stays unbuilt is the other edge — `sold -> listed`, the
-   relist, which is the half the README's secondary-market argument actually rests on. See
-   _Declined: the secondary market_ below for the wall that one hits.
+   reachable and load-bearing. **The other edge — `sold -> listed`, the relist — landed
+   2026-09-06**, so the status is now reachable from both directions and the README's
+   secondary-market argument has code under it. See _Resolved: the secondary market_ below,
+   including why the wall recorded here for two days was the wrong wall.
 6. **`ArcEscrow.buyerOf` is called by nothing, not even a test.** It is the one check that
    would have caught the invented-address problem `0004` fixed by hand. **Closed
    2026-09-04:** it has callers, and direct test coverage.
@@ -1291,7 +1292,74 @@ settled trade. Northwind was deliberately left alone: its live counters are legi
 the seed because MF-2051 really matured, and copying the seed over would have deleted a real
 settlement.
 
-### Declined: the secondary market, and the wall it hits
+### Resolved: the secondary market, and why the wall was the wrong wall
+
+**Built 2026-09-06.** `sold -> listed` is in the live path. The section below is the
+2026-09-04 decision to decline it, kept because **the reasoning that stopped it was wrong in
+a way worth being able to find again** — and wrong in this file's own favourite shape: a
+mechanism nobody had called, accumulating a confident description of behaviour nobody had
+checked.
+
+**The claim was that a relist needs the venue authorised as an ERC-1400 operator, and that no
+wallet this build issues can sign that grant.** The second half is true of Privy signers and
+irrelevant. The first half is false, and the deployed diamond says so — probed against
+MF-2072 (`0x102a2d37…`) rather than reasoned about:
+
+| probed                            | result                                      |
+| --------------------------------- | ------------------------------------------- |
+| `isOperatorForPartition`          | **exists** — returns a clean `false`        |
+| `authorizeOperatorByPartition`    | **exists** — real custom error `0x796c1f0d` |
+| `operatorCreateHoldByPartition`   | absent — `0x5416eb98` FunctionNotFound      |
+| `controllerCreateHoldByPartition` | absent — `0x5416eb98`                       |
+| `operatorTransferByPartition`     | absent — `0x5416eb98`                       |
+
+So the operator surface is **half present**, which is worse than absent: authorising the venue
+as an operator succeeds and then has nothing to spend the authority on. It is exactly the
+README-role-hash trap — a grant that works and confers nothing.
+
+**The design that works needs no grant at all: the holder places the hold on their own
+tokens**, naming the venue as `escrow` and the new buyer as `to`, and settlement executes it
+exactly as it does a first sale. Signing needed no new mechanism either — `invoice-registry.ts`
+and `mandate-book.ts` already sign Hedera contract calls with `privateKeyToAccount` over the
+JSON-RPC relay, and that path is key-agnostic by construction.
+
+What it cost, and what to know:
+
+- **`trades.seller_id` is a hard FK into `sellers`, and a reselling holder is a buyer.**
+  Migration `0009` adds `reseller_buyer_id` (FK into `buyers`) and `superseded_at`. `seller_id`
+  keeps naming the originator, because that stays true and issuance, the confirmation link and
+  the seller-scoped book all read it for exactly that. `parties.ts` holds the fallback once —
+  `sellingPartyOf` — for the reason `units.ts` exists: a rule only one caller can find is one
+  the next caller gets wrong.
+- **`debtorExposure` double-counted, and the invoice status could not fix it.** Two settled
+  trades against one `sold` invoice both matched, so the previous holder's mandate kept
+  carrying a concentration it no longer had while the new holder carried their own — one
+  receivable, two buyers, both charged. `superseded_at` is the filter, and
+  `supersedePosition` sets it in the SAME transaction that frees the capital: superseded but
+  not released strands a mandate's money, released but not superseded charges it twice.
+- **Freeing is rail-dependent, exactly as maturity is.** Arc-vault paper was paid for with
+  escrowed USDC that has already left, so the commitment retires with the allocation; x402
+  paper was paid in the buyer's own HBAR, so only the allocation returns.
+- **Delisting a resale returns the invoice to `sold`, not `confirmed`.** The holder still
+  holds it, and `confirmed` would say the receivable is unowned — which is what maturity reads
+  to decide who to pay. Both are declared edges, so this picks between two legal moves.
+- **The HCS commitment names the party that SOLD**, which on a resale is the holder. No field
+  added and no order changed, so every existing receipt still verifies: the field always meant
+  "who sold", it just could only ever be one thing before.
+- **`RESALE_SIGNER_ACCOUNT_ID` / `RESALE_SIGNER_PRIVATE_KEY` are custody and are named as
+  such.** The venue can only resell for a holder whose key it holds, and it refuses at
+  **listing** rather than at arm time — the alternative is an invoice that quotes, matches, and
+  then fails with `balanceOf` reporting "holds no units", which reads like a broken instrument
+  rather than a missing key. All-or-nothing, in the shape of the agent's Hedera pair.
+
+**Still not built: partial position sales**, cut-list item 4. And a holder the venue has no
+key for cannot relist, which is a real limit rather than a temporary one — it is the same
+self-custody wall, and honest to state.
+
+---
+
+**The 2026-09-04 decision follows, as written then.** It is wrong about the operator grant and
+right about everything above the asset leg, which is why it is kept rather than deleted.
 
 **Decided 2026-09-04.** `sold -> listed` stays unbuilt. The edge is in `invoice-machine.ts` and
 its comment is right that without it there is one market rather than two — but the reason it
@@ -1580,6 +1648,45 @@ are all untouched.
 
 MF-2081 (`0.0.10392519`) is the same invoice made again and left listed, so the demo still has
 something to sell.
+
+### Declined: wiring `MandateBook.tryMatch`
+
+**Considered and refused 2026-09-06.** The book evaluates every exposure and concentration
+test against zero recorded exposure, because `_debtorExposure` and `allocated` are written by
+`tryMatch` and nothing calls it. Wiring it looks like the obvious way to make those refusals
+mean something. It would make the book worse.
+
+`tryMatch` strikes a match through `_commitMatch`, and the only paths that decrement what it
+writes are `confirmSettlement` (needs a **claimed Hedera `DvpEscrow` delivery lock** — the
+escrow declined below), `cancelMatch` (needs `_isSettler`, or waiting out the immutable
+`settlementWindow`) and `confirmMaturity` (needs `Settled`, unreachable without the first).
+So every match struck would sit `Open` **forever**, permanently inflating on-chain exposure,
+and the book would drift out of step with the venue with no way back. `mandate-book.ts` says
+this in its own header and is right.
+
+It is also this file's recurring shape, stated at the `withdrawn` finding: _a guard that is
+load-bearing only because some other constraint happens to hold._ `_evaluate` refuses with
+`INVOICE_ALREADY_ALLOCATED` once `_matchOfInvoice[invoiceId]` is set — a branch that has never
+fired, because `previewMatch` is `view` and never sets that slot. Wiring `tryMatch` makes it
+reachable for the first time.
+
+**`previewMatch` alone is the correct design**, and the verdicts worth reading stay the ones
+measured against `InvoiceRegistry` rather than against a balance nothing updates:
+`RATING_BELOW_MANDATE`, `TENOR_EXCEEDS_MANDATE`, `INVOICE_UNKNOWN`, `INVOICE_NOT_CONFIRMED`.
+
+### The Arc tracks require an architecture diagram
+
+Read off the ETHOnline prize page 2026-09-06, and **not previously recorded here**. All three
+eligible Arc tracks — Best DeFi/Onchain Finance, Best Agentic Economy with Circle Agent Stack,
+and Launch on Arc Testnet & Push to Mainnet — carry the same qualification requirement:
+_"Functional MVP and diagram: Projects must demonstrate a working frontend and backend plus an
+architecture diagram."_
+
+`docs/architecture.md` is that diagram: four Mermaid figures, which GitHub renders natively, so
+a judge sees a picture rather than source. The page also confirms the rest of what this file
+already records — the Launch track is $3,500 with $2,500 first and $1,000 second and carries no
+Continuity-only badge, and _"deployed or deployment-ready on Arc mainnet by September 30"_ is
+the clause as written.
 
 ### Declined: the Hedera delivery escrow, and the wall it hits
 

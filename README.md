@@ -239,8 +239,8 @@ one book, and the price moves for a reason anyone can follow.
 
 That is not one market counted twice, and the argument is under _Exit_ below: a buyer bids tighter on
 paper they know they can exit, so the secondary leg is what makes the primary quote competitive.
-Partial position sales sharpen the distinction further, being something the primary leg structurally
-cannot do.
+Partial position sales would sharpen the distinction further, being something the primary leg
+structurally cannot do &mdash; those are not built, and _Exit_ says where the line falls.
 
 ## The product
 
@@ -323,10 +323,19 @@ The reason this is not decoration: buyers bid tighter on paper they know they ca
 secondary leg and every mandate widens, and the seller gets less on day zero. The two markets are not
 sequential features. One prices the other.
 
-Neither half of this is built. A sold invoice cannot be requoted &mdash; the venue answers _this
-invoice has already been sold, so it cannot be priced_ &mdash; and partial position sales are
-cut-list item 4, so an exit today is all or nothing. This section is the argument for why the
-secondary leg is worth building, not a description of a screen that exists.
+One half of this is built. A holder can relist seasoned paper into the same book, and it prices off
+the same standing bids on its shorter remaining tenor &mdash; `quote-engine.ts` never reads a seller,
+so the arithmetic needed no change at all. What made it buildable was finding that the asset leg is
+not what it looked like: `createHoldByPartition` acts on the caller's own tokens, so the resale's
+hold is signed by whoever holds the paper, and the venue is the escrow exactly as it is on a first
+sale. Authorising the venue as an ERC-1400 operator &mdash; the obvious approach, and the one this
+project had written down &mdash; would have succeeded and conferred nothing, because the deployed
+diamond has no operator-hold and no operator-transfer to spend that authority on.
+
+Partial position sales are the other half, and they are not built: they are cut-list item 4, so an
+exit today is all or nothing. And the relist carries an honest limit &mdash; the hold needs the
+holder's key, so the venue can only resell for a holder whose key it holds, and it refuses at the
+point of listing rather than failing later at `balanceOf`.
 
 ### Ratings are earned, not assigned
 
@@ -465,7 +474,7 @@ flowchart LR
         Esc["DvpEscrow<br/>0x32e3511A…"]
     end
 
-    Dead["<b>Deployed and verified, called by nothing</b><br/>MandateBook · AtsComplianceGate<br/>DvpEscrow on Hedera"]
+    Dead["<b>Deployed and verified, called by nothing</b><br/>DvpEscrow on Hedera"]
 
     Seller -->|"adds invoices, watches the price move"| Web
     Debtor -->|"confirms by link, no wallet"| Web
@@ -525,11 +534,20 @@ The one thread between them is a test in `@facture/agent` that reads `libraries/
 disk and fails if the on-chain refusal strings stop spelling what `@facture/shared` spells, because
 `tsc` cannot see a Solidity rename.
 
-The grey box is the other. `MandateBook`, `AtsComplianceGate` and the Hedera `DvpEscrow` are
-deployed, verified on Sourcify, and reached by nothing. There is no environment variable for any of
-their addresses, so the backend could not call them if it wanted to. The compliance check that does
-run reads the security's own `ControlList` and `Kyc` facets over the JSON-RPC relay, which is a
-different thing from the gate contract that shares its name.
+The grey box is the other, and it now holds one contract rather than three. `MandateBook` and
+`AtsComplianceGate` were wired on 2026-09-06: the book answers `previewMatch` on every armed trade,
+reading the rating and the confirmation out of `InvoiceRegistry` rather than from whoever wants the
+match to succeed, and the gate decides eligibility with the security's own facets supplying the
+sentence when it refuses. The gate turned out not to be dormant but broken — it probed three ATS
+selectors that do not exist, so it would have refused every buyer on every instrument — which is the
+more useful half of that story and is written up in `CLAUDE.md`.
+
+The Hedera `DvpEscrow` is what is left, and it stays unreached deliberately rather than by
+oversight. Its only designed reader is `MandateBook.confirmSettlement`, which wants a claimed
+delivery lock; this venue's asset leg is an ATS hold, where the units never leave the holder's
+ledger entry. Producing the escrow's proof instead would mean moving a regulated security into a
+contract that is on no instrument's allowlist. The reasoning is under _Declined: the Hedera delivery
+escrow_ in `CLAUDE.md`.
 
 ### A settlement, both rails
 
