@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { explorer } from '../chain.js';
 import { REGULATION_TYPE } from '../db/schema.js';
 import { getStore } from '../db/store.js';
+import { isResale, sellingPartyOf } from '../parties.js';
 import { notFound } from '../errors.js';
 import type { AppEnv } from '../middleware/context.js';
 import { getArcEscrow } from '../services/arc.js';
@@ -29,6 +30,20 @@ import { money } from '../wire.js';
 /** The exact shape the proof screen renders. Every field is independently verifiable. */
 export interface TradeProof {
   tradeId: string;
+  /**
+   * Whether this was a resale, and who sold it.
+   *
+   * The proof view is where "who traded with whom" is the whole point, and a resale is the
+   * one case where the invoice's originator is NOT the answer — the previous holder sold,
+   * and the payout is bound to their address on chain. Rendering the originator here would
+   * name a business that had already parted with the receivable, beside a cash leg paying
+   * somebody else, which is the kind of quiet contradiction this screen exists to prevent.
+   *
+   * `kind` travels with the id because the two live in different tables, the same way the
+   * HCS commitment and `wireTrade` resolve it.
+   */
+  resale: boolean;
+  sellingParty: { kind: 'originator'; sellerId: string } | { kind: 'holder'; buyerId: string };
   invoice: {
     id: string;
     invoiceNumber: string;
@@ -336,6 +351,8 @@ proofRoutes.get('/trades/:id/proof', async (c) => {
    */
   const proof: TradeProof = {
     tradeId: trade.id,
+    resale: isResale(trade),
+    sellingParty: sellingPartyOf(trade),
     invoice: {
       id: invoice.id,
       invoiceNumber: invoice.invoiceNumber,
