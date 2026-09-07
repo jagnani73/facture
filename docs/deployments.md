@@ -1136,3 +1136,43 @@ Made immediately afterwards to the same shape, and left alone.
 The customer's rating did not move when MF-2080 matured — 8 on time and 1 late still reads `B` —
 which is what keeps the two A-floor mandates, and their tighter 800 and 675 bps bids, out of the
 running. The escrowed mandate wins on merit at 850.
+
+## The first resale — MF-2072, 2026-09-07
+
+The secondary market, end to end on real paper. A receivable that had already been bought once was
+relisted by its holder, priced off the same standing bids, and sold to a different buyer.
+
+|               |                                                                             |
+| ------------- | --------------------------------------------------------------------------- |
+| invoice       | MF-2072, `5fb64009-2923-47a0-bb73-17374e871348`, $4,000 face                |
+| instrument    | `0.0.10363420` / `0x102a2d376e3a3c65f0cc748248bd3575179e5d32`               |
+| sold first at | **1850 bps over 40 days**, proceeds 391,890, to Harrow Point                |
+| relisted      | 2026-09-06, `sold -> listed`                                                |
+| resold at     | **1600 bps over 37 days**, proceeds **393,512**, to Kestrel Working Capital |
+| trade         | `df2baa17-1d6d-47ac-a48d-4229ec21757d`                                      |
+| asset leg     | `0.0.10311549@1788749518.906830394`, 400,000 units                          |
+| cash leg      | `0xf8d8452e2899334383227324daad272d44b28ec6f54e07bb60af2f2d61143e19`, Arc   |
+| paid to       | `0x1C755e95CB11E5D5aF498bb0EA595b56e1adb035` — Harrow Point, who sold       |
+| superseded    | `04b109ee…`, Harrow Point's original position                               |
+
+**The paper moved, which is the part no test could stand in for.** `balanceOf` on the instrument
+reads **Harrow Point 0** and **Kestrel 400,000**, against 400,000 and 0 before. That also settles
+whether the holder signed: `createHoldByPartition` acts on the caller's own tokens and the operator
+holds **zero** units of this instrument, so an operator-placed hold could not have moved anything.
+
+**Kestrel is a second real buyer, provisioned for this.** One ECDSA key serves both chains, as the
+seller's does. Its Hedera side was allowlisted and KYC'd on the instrument — `isInControlList` and
+`getKycStatusFor` both read `1` — and its Arc side deposited **0.01 USDC** into `MandateVault` from
+its **own wallet**, taking the vault 4.952918 -> 4.962918. The venue verified that rather than
+believing it: `depositedUsdcMinor` 10,000 against `requiredUsdcMinor` 10,000, and the mandate walked
+`draft -> funding -> active` on the strength of it.
+
+Nothing was arranged to make the new bid win. Five mandates refused on `RATING_BELOW_MANDATE` — the
+customer is UNRATED — and the deployed compliance gate `0x6d78847e…` refused Ashgrove Treasury with
+`CONTROL_LIST_BLOCKED`, which is `priceOne` dropping a barred bid and looking again. Kestrel won at
+1600 against Harrow Point's own 1850 because it is the tighter bid.
+
+**The payout is locked, not claimed, and that is correct.** `DvpEscrow` holds 3,935 USDC minor for
+Harrow Point's Arc address, claimable by them alone. Harrow Point's two addresses are different keys
+— `0xA25796…` on Hedera, `0x1c755e…` on Arc — so the venue can sign that account's hold and still
+cannot collect its money.
