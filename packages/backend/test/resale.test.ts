@@ -17,6 +17,7 @@ import { MARKET_NOW_ISO } from '../src/db/seed.js';
 import { currentHolderTrade, isResale, sellingPartyIdOf, sellingPartyOf } from '../src/parties.js';
 import type { TradeRow } from '../src/db/schema.js';
 import { asResaleSigner, call, createHarness, RESALE_SIGNER, type Harness } from './helpers.js';
+import { wireTrade } from '../src/wire.js';
 
 let h: Harness;
 
@@ -31,16 +32,48 @@ afterEach(() => {
   h.restore();
 });
 
-/** Just enough of a trade row for the party helpers, which read four fields between them. */
+/**
+ * A trade row for the helpers and for `wireTrade`.
+ *
+ * The money fields are here because the wire renderer needs them, not because the party
+ * helpers do — `money()` throws on an absent amount rather than rendering a zero, which is
+ * the behaviour that makes an incomplete fixture fail loudly instead of passing vacuously.
+ */
 const tradeLike = (over: Partial<TradeRow>): TradeRow =>
   ({
     id: 'trade-1',
+    invoiceId: 'invoice-1',
+    mandateId: 'mandate-1',
+    quoteId: 'quote-1',
     sellerId: 'seller-1',
     resellerBuyerId: null,
     buyerId: 'buyer-1',
     status: 'settled',
     supersededAt: null,
     settledAt: new Date('2026-09-01T00:00:00.000Z'),
+    createdAt: new Date('2026-09-01T00:00:00.000Z'),
+    faceValue: 400_000n,
+    proceedsMinor: 392_295n,
+    annualisedYieldBps: 1850,
+    tenorDays: 38,
+    unitsMinor: null,
+    holdId: null,
+    assetTxId: null,
+    assetConsensusAt: null,
+    cashRail: null,
+    cashScheme: null,
+    cashNetwork: null,
+    cashAsset: null,
+    cashTransaction: null,
+    cashPayer: null,
+    cashAmountMinor: null,
+    arcLockId: null,
+    arcSecret: null,
+    complianceDecision: null,
+    complianceCheckedAt: null,
+    hcsTopicId: null,
+    hcsSequenceNumber: null,
+    maturityScheduleId: null,
     ...over,
   }) as TradeRow;
 
@@ -229,5 +262,27 @@ describe('the resale offer', () => {
     const quote = await call(h.app, 'GET', `/v1/invoices/${id}/quote`);
     expect(quote.status).toBe(200);
     expect(quote.body.tenorDays).toBeGreaterThan(0);
+  });
+});
+
+describe('what the wire says about who sold', () => {
+  /*
+   * `wireTrade` published `sellerId` alone, which is the originator. On a resale that names
+   * a business that had already parted with the receivable — a false statement about a trade
+   * they were not in, on a public resource. The same defect the HCS commitment had.
+   */
+  it('names the originator and no resale on a first sale', () => {
+    const wire = wireTrade(tradeLike({}));
+    expect(wire.resale).toBe(false);
+    expect(wire.sellingParty).toEqual({ kind: 'originator', sellerId: 'seller-1' });
+    // Unchanged for every trade that already exists.
+    expect(wire.sellerId).toBe('seller-1');
+  });
+
+  it('names the holder that sold, and still carries the originator', () => {
+    const wire = wireTrade(tradeLike({ resellerBuyerId: 'buyer-9' }));
+    expect(wire.resale).toBe(true);
+    expect(wire.sellingParty).toEqual({ kind: 'holder', buyerId: 'buyer-9' });
+    expect(wire.sellerId).toBe('seller-1');
   });
 });

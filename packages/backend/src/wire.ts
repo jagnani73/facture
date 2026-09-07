@@ -29,6 +29,7 @@
 import type { Quote, RefusalReceipt, SettlementLegState } from '@facture/shared';
 import { z } from 'zod';
 import type { InvoiceRow, MandateRow, SellerRow, TradeRow } from './db/schema.js';
+import { isResale, sellingPartyOf } from './parties.js';
 
 /**
  * Inbound money: a positive integer in minor units, as a decimal string.
@@ -196,7 +197,27 @@ export const wireTrade = (row: TradeRow) => ({
   invoiceId: row.invoiceId,
   mandateId: row.mandateId,
   quoteId: row.quoteId,
+  /**
+   * The invoice's originator, which is NOT necessarily who sold in this trade.
+   *
+   * Kept under this name because it is what the field has always carried and something
+   * reading it for the originator would break silently otherwise. {@link sellingParty} is
+   * the one to read for "who sold".
+   */
   sellerId: row.sellerId,
+  /**
+   * Who actually sold, and whether this was a resale.
+   *
+   * On a first sale the party is the originator and `resale` is false, so nothing about an
+   * existing trade's shape changes. On a resale the party is the previous holder — a buyer —
+   * and publishing `sellerId` alone would name a business that had already parted with this
+   * receivable, which is a false statement about a trade they were not in.
+   *
+   * `kind` travels with the id because the two live in different tables, so an id on its own
+   * cannot say which one to ask. Exactly the split the HCS commitment resolves the same way.
+   */
+  sellingParty: sellingPartyOf(row),
+  resale: isResale(row),
   buyerId: row.buyerId,
   faceValue: money(row.faceValue),
   proceeds: money(row.proceedsMinor),
