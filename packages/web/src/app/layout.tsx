@@ -43,15 +43,22 @@ export const metadata: Metadata = {
     'An invoice is a zero-coupon bond that nobody ever priced. Facture prices every invoice off standing bids, the moment it appears.',
 };
 
+/**
+ * One colour, because the page no longer follows the OS by default. A reader who
+ * has opted into Night gets light chrome around a dark page, which is the smaller
+ * of the two mismatches: the other one would hit everyone on a dark desktop who
+ * never chose anything.
+ */
 export const viewport: Viewport = {
-  themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#f8f3ea' },
-    { media: '(prefers-color-scheme: dark)', color: '#13120f' },
-  ],
+  themeColor: '#f8f3ea',
 };
 
-/** Applied before first paint so a chosen theme never flashes the other one. */
-const THEME_BOOTSTRAP = `(function(){try{var t=localStorage.getItem('facture-theme');if(t==='light'||t==='dark'){document.documentElement.setAttribute('data-theme',t)}}catch(e){}})()`;
+/**
+ * Applied before first paint so a chosen theme never flashes the other one.
+ * Light is the default: anything other than a stored `system` gets the attribute
+ * outright, so an unreadable localStorage lands on Day rather than on the OS.
+ */
+const THEME_BOOTSTRAP = `(function(){var d=document.documentElement;var t=null;try{t=localStorage.getItem('facture-theme')}catch(e){}if(t==='system'){d.removeAttribute('data-theme')}else{d.setAttribute('data-theme',t==='dark'?'dark':'light')}})()`;
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
