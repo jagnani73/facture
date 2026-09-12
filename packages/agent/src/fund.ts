@@ -34,6 +34,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAddress, type Address } from 'viem';
 import { ARC_DEPLOYMENTS } from '@facture/shared';
+import { ARC_BLOCKCHAIN, ARC_USDC_ADDRESS } from './chain.js';
 import { loadEnv, secretsOf, type Env } from './env.js';
 import { createLogger, registerSecret, scrub, type Logger } from './logger.js';
 import { createVenueClient, type VenueClient } from './venue.js';
@@ -53,7 +54,6 @@ import {
   USDC_DECIMALS,
   type WalletClient,
 } from './wallet.js';
-import type { TokenBlockchain } from '@circle-fin/developer-controlled-wallets';
 
 /* ───────────────────────────────────────────────────────────────────────────────────── *
  * Arguments
@@ -389,9 +389,8 @@ async function main(): Promise<void> {
   const wallet = createWalletClient({
     apiKey: env.CIRCLE_API_KEY,
     entitySecret: env.CIRCLE_ENTITY_SECRET,
-    baseUrl: env.CIRCLE_BASE_URL,
-    blockchain: env.ARC_BLOCKCHAIN as TokenBlockchain,
-    usdcAddress: env.ARC_USDC_ADDRESS,
+    blockchain: ARC_BLOCKCHAIN,
+    usdcAddress: ARC_USDC_ADDRESS,
     logger,
   });
 
@@ -408,7 +407,7 @@ async function main(): Promise<void> {
     reader: createArcVaultReader({
       vaultAddress: ARC_DEPLOYMENTS.mandateVault,
       rpcUrl: env.ARC_RPC_URL,
-      usdcAddress: env.ARC_USDC_ADDRESS,
+      usdcAddress: ARC_USDC_ADDRESS,
     }),
   });
 

@@ -46,7 +46,14 @@ async function main(): Promise<void> {
     throw new Error('No wallet client. Check ARC_TESTNET_PRIVATE_KEY is set.');
   }
 
-  const usdc = requireAddress('ARC_USDC_ADDRESS');
+  /*
+   * USDC on Arc testnet. Fixed, not configured: it is a property of the chain this script
+   * deploys to, and `@facture/shared`'s `ARC_TESTNET.tokens.USDC.address` is the authority
+   * every runtime package reads. This package deliberately carries no dependency on shared
+   * — a workspace import here would put the Hardhat build behind another package's build —
+   * so the literal is repeated with the pointer rather than plumbed.
+   */
+  const usdc = getAddress('0x3600000000000000000000000000000000000000');
   const attester = requireAddress('FACTURE_ATTESTER');
   const owner = requireAddress('FACTURE_OWNER');
 

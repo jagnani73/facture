@@ -25,10 +25,10 @@
 import { createMarketMaker } from './agent.js';
 import { createCashLegSigner } from './cash.js';
 import { loadEnv, secretsOf } from './env.js';
+import { ARC_BLOCKCHAIN, ARC_USDC_ADDRESS, HEDERA_NETWORK } from './chain.js';
 import { createLogger, registerSecret, scrub } from './logger.js';
 import { createVenueClient } from './venue.js';
 import { createWalletClient } from './wallet.js';
-import type { TokenBlockchain } from '@circle-fin/developer-controlled-wallets';
 
 async function main(): Promise<void> {
   loadDotEnv();
@@ -55,9 +55,8 @@ async function main(): Promise<void> {
   const wallet = createWalletClient({
     apiKey: env.CIRCLE_API_KEY,
     entitySecret: env.CIRCLE_ENTITY_SECRET,
-    baseUrl: env.CIRCLE_BASE_URL,
-    blockchain: env.ARC_BLOCKCHAIN as TokenBlockchain,
-    usdcAddress: env.ARC_USDC_ADDRESS,
+    blockchain: ARC_BLOCKCHAIN,
+    usdcAddress: ARC_USDC_ADDRESS,
     logger,
   });
 
@@ -82,7 +81,7 @@ async function main(): Promise<void> {
       : createCashLegSigner({
           accountId: env.AGENT_HEDERA_ACCOUNT_ID,
           privateKey: env.AGENT_HEDERA_PRIVATE_KEY,
-          network: env.AGENT_HEDERA_NETWORK,
+          network: HEDERA_NETWORK,
           timeoutMs: env.FACTURE_API_TIMEOUT_MS,
         });
 
@@ -100,7 +99,7 @@ async function main(): Promise<void> {
 
   logger.info('market maker starting', {
     venue: env.FACTURE_API_URL,
-    blockchain: env.ARC_BLOCKCHAIN,
+    blockchain: ARC_BLOCKCHAIN,
     walletId: env.AGENT_WALLET_ID,
     sellers: env.AGENT_SELLER_IDS.length,
     mandates: env.AGENT_MANDATE_IDS?.length ?? 'all active',

@@ -16,11 +16,7 @@ import { createSqliteStore } from './db/sqlite-store.js';
 import { setStoreFactory } from './db/store.js';
 import { createLogger, rootLogger, setRootLogger } from './logger.js';
 import { initAtsAdapter } from './services/ats.js';
-import {
-  createAtsComplianceGate,
-  createOnChainComplianceGate,
-  setComplianceGate,
-} from './services/compliance.js';
+import { createOnChainComplianceGate, setComplianceGate } from './services/compliance.js';
 import { createMandateBook, setMandateBook } from './services/mandate-book.js';
 import { initArcEscrow } from './services/arc.js';
 import { initHcsPublisher } from './services/hcs.js';
@@ -38,6 +34,20 @@ import {
 import { createLoggingNotifier, setNotifier } from './services/notifier.js';
 import { initScheduleAdapter } from './services/schedule.js';
 import { DEFAULT_NETWORK, DEFAULT_SCHEME, initX402Client } from './services/x402.js';
+
+/**
+ * The interface to bind. All of them, which is the only useful answer inside a container
+ * and the only value this ever held as `HOST`. `PORT` stays configurable because hosting
+ * platforms inject it; none of them injects an interface.
+ */
+const LISTEN_HOST = '0.0.0.0';
+
+/**
+ * How long `GET /supported` is cached for. A facilitator's advertised schemes change when
+ * the facilitator is redeployed, not per deployment of this venue, so there is nothing here
+ * for an operator to decide.
+ */
+const SUPPORTED_TTL_SECONDS = 300;
 
 function loadConfigOrExit(): Config {
   try {
@@ -167,13 +177,19 @@ function boot(): void {
 
   initX402Client({
     facilitatorUrl: env.X402_FACILITATOR_URL,
-    supportedTtlSeconds: env.X402_SUPPORTED_TTL_SECONDS,
+    supportedTtlSeconds: SUPPORTED_TTL_SECONDS,
     scheme: DEFAULT_SCHEME,
     network: DEFAULT_NETWORK,
-    payTo: env.X402_PAY_TO,
+    /*
+     * The venue is paid where the venue signs. These were two variables holding one account
+     * id, and the only thing a divergence could express is a challenge naming an account
+     * that does not hold the paper being sold.
+     */
+    payTo: env.HEDERA_OPERATOR_ID,
     assetMode: env.X402_ASSET_MODE,
     htsAssetId: env.X402_HTS_ASSET_ID,
-    assetDecimals: env.X402_ASSET_DECIMALS,
+    // 8 for HBAR is a fact about the ledger, not a deployment choice. From shared.
+    assetDecimals: hedera.hbarDecimals,
     settlementScalePpm: env.X402_SETTLEMENT_SCALE_PPM,
     logger: log,
   });
@@ -190,7 +206,7 @@ function boot(): void {
     log.error('could not resume queued issuance', { err });
   });
 
-  const server = serve({ fetch: createApp().fetch, port: env.PORT, hostname: env.HOST }, (info) => {
+  const server = serve({ fetch: createApp().fetch, port: env.PORT, hostname: LISTEN_HOST }, (info) => {
     log.info('listening', {
       port: info.port,
       arcChainId: chain.arc.chainId,

@@ -31,8 +31,14 @@ export const envSchema = z
   .object({
     // Server
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    /*
+     * `PORT` stays a variable and `HOST` does not, which looks inconsistent and is not.
+     * Every platform that would host this injects `PORT` into the environment and expects
+     * the process to honour it; none of them injects an interface to bind. Binding is
+     * `LISTEN_HOST` in `index.ts` — all interfaces, which is the only useful answer inside
+     * a container and the only value this ever held.
+     */
     PORT: z.coerce.number().int().positive().max(65535).default(8787),
-    HOST: z.string().min(1).default('0.0.0.0'),
     LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
     /** This API's own origin, used for resource identifiers a machine reads. */
     PUBLIC_BASE_URL: z.url().default('http://localhost:8787'),
@@ -51,7 +57,6 @@ export const envSchema = z
      */
     PUBLIC_APP_BASE_URL: z.url().default('http://localhost:3000'),
     CONFIRMATION_TOKEN_SECRET: z.string().min(32, 'must be at least 32 characters of entropy'),
-    CONFIRMATION_TOKEN_TTL_HOURS: z.coerce.number().int().positive().default(168),
 
     // Hedera
     HEDERA_OPERATOR_ID: ACCOUNT_ID,
@@ -95,14 +100,6 @@ export const envSchema = z
           'the resale signer must be ECDSA.',
       })
       .optional(),
-    /**
-     * Reg S by default, which is the decision recorded in CLAUDE.md and what the live bond
-     * carries. Reg S is the only declaration that both permits international investors and
-     * carries no resale hold, and both are load-bearing: a holder relisting on day thirty
-     * contradicts a six-month hold, and the cross-chain argument depends on buyers who are
-     * not all American. All three require accreditation, so 506(c) buys nothing here.
-     */
-    ATS_REGULATION_TYPE: z.enum(['reg-d-506b', 'reg-d-506c', 'reg-s']).default('reg-s'),
     ISSUANCE_GAS_LIMIT: z.coerce.number().int().positive().default(10_000_000),
     ISSUANCE_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(4_000),
     ISSUANCE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(6),
@@ -167,10 +164,6 @@ export const envSchema = z
     X402_FACILITATOR_URL: z.url().default('https://api.testnet.blocky402.com'),
     X402_ASSET_MODE: z.enum(['hbar', 'hts']).default('hbar'),
     X402_HTS_ASSET_ID: ACCOUNT_ID.optional(),
-    X402_PAY_TO: ACCOUNT_ID,
-    X402_SUPPORTED_TTL_SECONDS: z.coerce.number().int().positive().default(300),
-    /** Smallest-unit exponent of the settlement asset. HBAR is 8; USDC on Hedera is 6. */
-    X402_ASSET_DECIMALS: z.coerce.number().int().min(0).max(18).default(8),
     /**
      * Parts-per-million scale on the settled amount. `1_000_000` settles the full amount.
      * Defaults to `1` — one millionth — because a testnet balance cannot cover a six-figure

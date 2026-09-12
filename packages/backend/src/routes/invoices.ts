@@ -41,6 +41,33 @@ import {
   mintConfirmationToken,
 } from '../services/confirmation.js';
 import { getIssuanceQueue, issuanceJobFor } from '../services/issuance.js';
+
+/**
+ * The SEC regulation every instrument this venue issues declares.
+ *
+ * **Reg S, and not a knob.** It is the only declaration that both permits international
+ * investors and carries no resale hold, and both are load-bearing: a holder relisting on
+ * day thirty contradicts a six-month hold, and the cross-chain argument depends on buyers
+ * who are not all American. All three require accreditation, so 506(c) buys nothing.
+ *
+ * It was an env var with three positions and only ever held this one — every one of the 35
+ * invoices in the live book reads `reg-s`, and CLAUDE.md records the choice as settled and
+ * no longer reversible because three deployed instruments already carry it. A declaration
+ * is not something the venue can correct afterwards, which makes it the worst possible
+ * thing to leave a deployment able to change by accident.
+ *
+ * The three-way mapping onto the factory's enum pairs stays in the schema and is pinned by
+ * a test: what is fixed here is which one this venue declares, not the vocabulary.
+ */
+const REGULATION_TYPE = 'reg-s' as const;
+
+/**
+ * How long a debtor has to act on a confirmation link. A week.
+ *
+ * Product decision, not deployment config — the question it answers is how long a customer
+ * gets, which does not change because the venue moved host.
+ */
+const CONFIRMATION_TOKEN_TTL_HOURS = 168;
 import { getNotifier } from '../services/notifier.js';
 import { quoteEngine } from '../services/quote-engine.js';
 import { ratingService } from '../services/rating.js';
@@ -108,7 +135,6 @@ export const invoiceRoutes = new Hono<AppEnv>();
 invoiceRoutes.post('/', async (c) => {
   const body = await readJson(c, createInvoiceBody);
   const store = getStore();
-  const { env } = getConfig();
 
   const seller = await store.getSeller(body.sellerId);
   if (!seller) throw notFound(`Seller ${body.sellerId}`);
@@ -168,7 +194,7 @@ invoiceRoutes.post('/', async (c) => {
     status: 'draft',
     uniquenessHash: hash,
     isin,
-    regulationType: env.ATS_REGULATION_TYPE,
+    regulationType: REGULATION_TYPE,
     issuanceState: 'queued',
   });
 
@@ -338,7 +364,7 @@ invoiceRoutes.post('/:id/confirmation-request', async (c) => {
 
   const minted = mintConfirmationToken(
     env.CONFIRMATION_TOKEN_SECRET,
-    env.CONFIRMATION_TOKEN_TTL_HOURS,
+    CONFIRMATION_TOKEN_TTL_HOURS,
   );
 
   // Only the SHA-256 is stored, and re-requesting supersedes the previous link in the same

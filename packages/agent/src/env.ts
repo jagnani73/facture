@@ -34,19 +34,8 @@ const baseEnvSchema = z.object({
   CIRCLE_ENTITY_SECRET: z
     .string()
     .regex(/^[0-9a-fA-F]{64}$/, 'must be 32 bytes of hex — 64 hex characters, no 0x prefix'),
-  CIRCLE_BASE_URL: z.string().url().optional(),
 
   // ── Arc ───────────────────────────────────────────────────────────────────────────
-  /** Circle's identifier for the chain. Testnet only: Arc mainnet lands after submissions close. */
-  ARC_BLOCKCHAIN: z.string().min(1).default('ARC-TESTNET'),
-  /**
-   * USDC's ERC-20 address. 6 decimals on that interface; Arc's native gas accounting uses
-   * 18 over the same balance, and the two must never meet in one calculation.
-   */
-  ARC_USDC_ADDRESS: z
-    .string()
-    .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 20-byte EVM address')
-    .default(ARC_TESTNET.tokens.USDC.address),
   /** Arc JSON-RPC. Defaults to the shared chain config; override only for a private node. */
   ARC_RPC_URL: z.string().url().default(ARC_TESTNET.rpcUrl),
 
@@ -112,8 +101,6 @@ const baseEnvSchema = z.object({
     .regex(/^\d+\.\d+\.\d+$/, 'must be a Hedera account id like 0.0.1234, not an EVM address')
     .optional(),
   AGENT_HEDERA_PRIVATE_KEY: z.string().min(1, 'must not be empty when set').optional(),
-  /** CAIP-2, with a colon. The facilitator matches this string exactly; a hyphen matches nothing. */
-  AGENT_HEDERA_NETWORK: z.enum(['hedera:testnet', 'hedera:mainnet']).default('hedera:testnet'),
 
   // ── The loop ──────────────────────────────────────────────────────────────────────
   AGENT_POLL_INTERVAL_MS: z.coerce.number().int().min(1_000).default(15_000),

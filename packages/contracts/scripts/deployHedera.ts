@@ -115,7 +115,12 @@ async function main(): Promise<void> {
   const existingDeliveryEscrow = optionalAddress('FACTURE_DELIVERY_ESCROW');
   const existingMandateBook = optionalAddress('FACTURE_MANDATE_BOOK');
   const cashLegVault = requireAddress('FACTURE_MANDATE_VAULT');
-  const cashLegChainId = BigInt(process.env.FACTURE_CASH_LEG_CHAIN_ID ?? '5042002');
+  /*
+   * Arc testnet's chain id, which the book records immutably as where the cash leg settles.
+   * A property of the chain rather than of this deployment — `ARC_TESTNET.chainId` in
+   * `@facture/shared` is the authority, repeated here for the reason given in `deployArc.ts`.
+   */
+  const cashLegChainId = 5042002n;
   const settlementWindow = BigInt(process.env.FACTURE_SETTLEMENT_WINDOW ?? '259200');
 
   console.log(`chain      ${await publicClient.getChainId()}`);
