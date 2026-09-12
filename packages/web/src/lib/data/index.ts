@@ -29,6 +29,7 @@ import {
   isHalfSettled,
   splitDetail,
 } from '@/lib/api/problem';
+import { formatDate } from '@/lib/format';
 import { SETTLED_FROM_ESCROW_SENTENCE, SETTLEMENT_STATE_SENTENCE } from '@/lib/settlement';
 import { apiConfirmation, apiMarket, apiProof } from './api-source';
 import { fixtureConfirmation, fixtureMarket, fixtureProof } from './fixture-source';
@@ -204,9 +205,19 @@ export async function requestConfirmation(invoiceId: string): Promise<Outcome> {
     return {
       ok: true,
       value: undefined,
+      /*
+       * The expiry is included because without it this sentence reported a state rather
+       * than an event, and a reader who had just pressed a button could not tell whether
+       * the press had done anything. It is still not a claim of delivery: the venue minted
+       * a token and will accept it until it lapses, which is all that actually happened.
+       *
+       * `formatDate` rather than `formatDateProse`: the TTL is a week, so the expiry can
+       * fall in the next year, and the prose helper drops the year by design. A deadline
+       * someone is meant to act on is not a place to infer one.
+       */
       note:
         requested.link === null
-          ? `The question is open for ${requested.sentTo}.`
+          ? `The question is open for ${requested.sentTo}, and the link stays valid until ${formatDate(requested.expiresAt)}.`
           : `Send this to ${requested.sentTo}: ${requested.link}`,
     };
   } catch (error) {

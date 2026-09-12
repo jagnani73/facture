@@ -580,11 +580,38 @@ function AwaitingCustomer({
             </Link>
           ) : null}
         </div>
-        {state.message ? (
-          <p className={`mt-3 text-xs ${state.failed ? 'text-warn' : 'text-muted'}`}>
-            {state.message}
-          </p>
-        ) : null}
+        {/*
+         * A visible state change rather than a whisper.
+         *
+         * This rendered at `text-xs text-muted` beneath the buttons, and in production the
+         * "Preview what they see" link is deliberately withheld — the venue will not hand a
+         * seller the token that confirms their own invoice. So pressing the button changed
+         * nothing a person could see, and the honest answer it did return read as a failure.
+         * The copy still never claims a delivery, because nothing here sends mail.
+         */}
+        {/*
+         * Mounted unconditionally and empty until there is something to say. A live region
+         * inserted at the same moment it gains content is not announced by most assistive
+         * technology, which would leave a screen-reader user with exactly the problem this
+         * block was added to fix: a button that appears to do nothing.
+         *
+         * A failure is `alert` rather than `status` — polite would queue the one message
+         * the seller needs to act on behind whatever else is speaking.
+         */}
+        <div
+          role={state.failed ? 'alert' : 'status'}
+          className={
+            state.message === null
+              ? undefined
+              : `mt-4 rounded-sm border px-4 py-3 text-sm ${
+                  state.failed
+                    ? 'border-neg/40 bg-neg-wash text-ink'
+                    : 'border-accent/40 bg-accent-wash text-ink'
+                }`
+          }
+        >
+          {state.message}
+        </div>
       </div>
     </Card>
   );
