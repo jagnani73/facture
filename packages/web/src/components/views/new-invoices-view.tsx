@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import type { Debtor, Invoice, Rating } from '@/lib/domain';
 import { bestQuote, uniquenessHash } from '@/lib/domain';
@@ -90,7 +90,10 @@ function AddInvoices({ market }: { market: Market }) {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <SingleEntry market={market} onAdd={(draft) => setStaged((list) => [...list, draft])} />
-        <PasteEntry onAdd={(drafts) => setStaged((list) => [...list, ...drafts])} />
+        <PasteEntry
+          customers={market.debtors.map((debtor) => debtor.name)}
+          onAdd={(drafts) => setStaged((list) => [...list, ...drafts])}
+        />
       </div>
 
       <StagedList drafts={staged} onClear={() => setStaged([])} />
@@ -213,14 +216,105 @@ function SingleEntry({ market, onAdd }: { market: Market; onAdd: (draft: Draft) 
 
 /* -------------------------------------------------------------------------- */
 
-const SAMPLE = `Halden Aerospace, MF-2053, 40000, 2026-11-14, accounts@haldenaero.com
-Lumen Grid Utilities, MF-2054, 61250, 2026-10-02, ap@lumengrid.com
-Sable Interiors, MF-2055, 4800, 2026-09-28, hello@sableinteriors.co`;
+/**
+ * The example, when the seller has no customers yet to build one from.
+ *
+ * Also what renders on the server. Everything below picks at random, and a random value chosen
+ * while rendering is a different value on the server than in the browser, which React reports as a
+ * hydration mismatch. So the fixed one is the first paint and the random one arrives on mount.
+ */
+const FALLBACK_CUSTOMERS = [
+  'Halden Aerospace',
+  'Lumen Grid Utilities',
+  'Sable Interiors',
+  'Calder & Roe',
+  'Petra Foods Group',
+  'Northwind Logistics',
+] as const;
 
-function PasteEntry({ onAdd }: { onAdd: (drafts: Draft[]) => void }) {
+const STATIC_EXAMPLE = `Halden Aerospace, MF-2053, 40000, 2026-11-14, ap@haldenaerospace.example
+Lumen Grid Utilities, MF-2054, 61250, 2026-10-02, ap@lumengridutilities.example
+Sable Interiors, MF-2055, 4800, 2026-09-28, ap@sableinteriors.example`;
+
+/**
+ * `Halden Aerospace` becomes `ap@haldenaerospace.example`.
+ *
+ * `.example` is reserved by RFC 2606 and can never be a real domain, which matters more here than
+ * it looks: the venue emails a confirmation link to whatever address an invoice carries, and an
+ * example a seller pastes without editing should reach nobody rather than a stranger who happens
+ * to own the domain somebody guessed.
+ */
+function exampleEmail(customer: string): string {
+  const slug = customer.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return `ap@${slug === '' ? 'customer' : slug}.example`;
+}
+
+/** A due date three weeks to four months out, which is the tenor this market actually prices. */
+function exampleDueDate(): string {
+  const days = 21 + Math.floor(Math.random() * 100);
+  return new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Three plausible lines, built from the seller's own customers where there are any.
+ *
+ * Drawing on the real book is the point rather than a flourish. An example naming people this
+ * seller actually invoices is one they can recognise and correct, and the reference and the amount
+ * are the two fields they would have had to change anyway. The email is the one invented value,
+ * and it was invented before this too.
+ */
+function buildExample(customers: readonly string[]): string {
+  const pool = customers.length > 0 ? customers : FALLBACK_CUSTOMERS;
+  const chosen: string[] = [];
+  // Sampling without replacement where the pool allows it: three lines against one customer reads
+  // as a mistake rather than an example.
+  for (const candidate of [...pool].sort(() => Math.random() - 0.5)) {
+    if (chosen.length === 3) break;
+    chosen.push(candidate);
+  }
+
+  const firstReference = 2050 + Math.floor(Math.random() * 900);
+
+  return chosen
+    .map((customer, index) => {
+      const reference = `MF-${firstReference + index}`;
+      // Round thousands, because that is what an invoice looks like and a random-looking figure
+      // invites the reader to wonder whether it means something.
+      const amount = (5 + Math.floor(Math.random() * 120)) * 500;
+      return `${customer}, ${reference}, ${amount}, ${exampleDueDate()}, ${exampleEmail(customer)}`;
+    })
+    .join('\n');
+}
+
+function PasteEntry({
+  customers,
+  onAdd,
+}: {
+  customers: readonly string[];
+  onAdd: (drafts: Draft[]) => void;
+}) {
   const [text, setText] = useState('');
   const parsed = useMemo(() => parseCsv(text), [text]);
   const good = parsed.filter((row) => row.problem === undefined);
+
+  /*
+   * One example per visit, shown as the placeholder and inserted by the button.
+   *
+   * Deliberately the same value in both places: the button turns the ghost text the reader is
+   * already looking at into real text. Re-rolling on the click would replace what they just
+   * decided to accept, which is the one behaviour that would make the button feel broken.
+   *
+   * Chosen in an effect rather than during render, and `STATIC_EXAMPLE` covers the server. This
+   * page prerenders, so a `Math.random()` in a `useState` initialiser would produce one example in
+   * the prerendered HTML and a different one at hydration.
+   */
+  const key = customers.join('|');
+  const [example, setExample] = useState<string | null>(null);
+  useEffect(() => {
+    setExample(buildExample(key === '' ? [] : key.split('|')));
+  }, [key]);
+
+  const shown = example ?? STATIC_EXAMPLE;
 
   return (
     <Card>
@@ -233,12 +327,12 @@ function PasteEntry({ onAdd }: { onAdd: (drafts: Draft[]) => void }) {
           rows={7}
           value={text}
           onChange={(event) => setText(event.target.value)}
-          placeholder={SAMPLE}
+          placeholder={shown}
           aria-label="Paste invoices"
         />
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="quiet" size="sm" type="button" onClick={() => setText(SAMPLE)}>
+          <Button variant="quiet" size="sm" type="button" onClick={() => setText(shown)}>
             Use an example
           </Button>
           {parsed.length > 0 ? (
