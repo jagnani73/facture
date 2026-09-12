@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    name: lint, typecheck, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Two builds have to precede the checks. Every workspace import of
+      # @facture/shared resolves through its dist/, which is gitignored, so a
+      # fresh checkout has nothing to resolve; and the contracts typecheck
+      # reads the types Hardhat generates from the compiled artifacts, which
+      # is why it passes locally and fails on a clean tree without this.
+      - run: pnpm --filter @facture/shared build
+      - run: pnpm --filter @facture/contracts build
+
+      - run: pnpm lint
+      - run: pnpm typecheck
+
+      # One step per package so a red run names the suite without being opened.
+      - run: pnpm --filter @facture/shared test
+      - run: pnpm --filter @facture/backend test
+      - run: pnpm --filter @facture/agent test
+      - run: pnpm --filter @facture/web test
+      - run: pnpm --filter @facture/contracts test

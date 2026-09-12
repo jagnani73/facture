@@ -9,6 +9,7 @@
   "scripts": {
     "lint": "eslint .",
     "typecheck": "pnpm -r --parallel typecheck",
+    "test": "pnpm -r test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "demo:reset": "node scripts/demo-reset.mjs",
