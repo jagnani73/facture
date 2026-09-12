@@ -2,7 +2,7 @@ import Link from 'next/link';
 
 import type { MandateEscrow, MandateRecord } from '@/lib/api/contract';
 import type { Mandate } from '@/lib/domain';
-import { unallocated } from '@/lib/domain';
+import { ARC_DEPLOYMENTS, explorerAddressUrl, unallocated } from '@/lib/domain';
 import { formatMoney, formatMoneyCompact, formatRate, formatUsdc } from '@/lib/format';
 import type { MandateMeta } from '@/lib/fixtures';
 import type { Position } from '@/lib/pricing';
@@ -70,26 +70,45 @@ export function EscrowBadge({ escrow }: { escrow: MandateEscrow | undefined }) {
    * formatter reported a vault holding 5 USDC as "Backed by $50,000.00", which is the
    * venue's own claim about the mandate read back as though it were the chain's.
    */
+  const title = backed
+    ? `Backed by ${formatUsdc(escrow.depositedUsdcMinor ?? 0n)} held in the Arc vault against ${formatUsdc(escrow.requiredUsdcMinor)} required. Anyone can read that balance on chain; it is not our word for it.`
+    : escrow.depositedUsdcMinor === null
+      ? 'The Arc vault could not be read just now, so this bid is unconfirmed rather than unbacked.'
+      : `The Arc vault holds ${formatUsdc(escrow.depositedUsdcMinor)} against this bid, which needs ${formatUsdc(escrow.requiredUsdcMinor)}.`;
+
+  const chip = [
+    'label-micro inline-flex h-5 items-center rounded-xs border px-1.5',
+    backed ? 'border-pos/45 bg-pos-wash text-pos' : 'border-rule-strong bg-sunken text-muted',
+  ].join(' ');
+
+  /*
+   * Only `backed` is worth a link out. The tooltip has always claimed anyone can read that
+   * balance on chain rather than taking our word for it, and until now there was nowhere to
+   * go and read it — a claim about checkability with nothing to check is the shape this
+   * codebase keeps catching itself in.
+   *
+   * The other two states stay inert deliberately. Sending a reader to the vault to confirm
+   * an absence proves nothing: the balance they would find is the whole vault's, across every
+   * mandate, and it cannot say which part of it is not this bid's.
+   */
+  if (!backed) {
+    return (
+      <span title={title} className={chip}>
+        {escrow.depositedUsdcMinor === null ? 'Unconfirmed' : 'Not escrowed'}
+      </span>
+    );
+  }
+
   return (
-    <span
-      title={
-        backed
-          ? `Backed by ${formatUsdc(escrow.depositedUsdcMinor ?? 0n)} held in the Arc vault against ${formatUsdc(escrow.requiredUsdcMinor)} required. Anyone can read that balance on chain; it is not our word for it.`
-          : escrow.depositedUsdcMinor === null
-            ? 'The Arc vault could not be read just now, so this bid is unconfirmed rather than unbacked.'
-            : `The Arc vault holds ${formatUsdc(escrow.depositedUsdcMinor)} against this bid, which needs ${formatUsdc(escrow.requiredUsdcMinor)}.`
-      }
-      className={[
-        'label-micro inline-flex h-5 items-center rounded-xs border px-1.5',
-        backed ? 'border-pos/45 bg-pos-wash text-pos' : 'border-rule-strong bg-sunken text-muted',
-      ].join(' ')}
+    <a
+      href={explorerAddressUrl('arc-testnet', ARC_DEPLOYMENTS.mandateVault)}
+      target="_blank"
+      rel="noreferrer"
+      title={title}
+      className={`${chip} underline decoration-dotted underline-offset-2`}
     >
-      {backed
-        ? 'Escrowed on Arc'
-        : escrow.depositedUsdcMinor === null
-          ? 'Unconfirmed'
-          : 'Not escrowed'}
-    </span>
+      Escrowed on Arc
+    </a>
   );
 }
 

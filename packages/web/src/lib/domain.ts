@@ -113,6 +113,9 @@ export {
   isRegulationKey,
   explorerTxUrl,
   explorerAddressUrl,
+  // Deployed addresses, pinned once in shared so a redeploy cannot leave a screen linking
+  // at the previous contract. The mandates screen builds the vault's ArcScan link from this.
+  ARC_DEPLOYMENTS,
   // parties — the EIP-712 vocabulary, which has exactly one authority for the reason its
   // module header gives: Solidity verifies it, this package signs it, the backend relays it.
   PARTY_ROLES,
