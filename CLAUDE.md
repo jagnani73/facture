@@ -1750,6 +1750,88 @@ No `hardhat-verify` plugin: a new dependency here brings an unapproved build scr
 breaks `pnpm -r`, and Sourcify's v2 API takes the standard JSON `artifacts/build-info` already
 holds.
 
+### Resolved: 82 environment variables, of which 63 were decisions
+
+Every variable in every `.env`, audited 2026-09-12. Asking the usual question first — what
+reads this outside its own schema — found almost nothing: **only two variables had no reader
+at all**, and the eight whose only readers were `env.ts` and `index.ts` each traced to a real
+consumer. The sweeps recorded above had already reached the env layer. Four other defects had
+not been looked for, and the first of them could produce a wrong answer rather than noise.
+
+**Five contracts each carried two env names across two packages.** `FACTURE_MANDATE_BOOK` in
+`packages/contracts/.env` and `HEDERA_MANDATE_BOOK_ADDRESS` in `packages/backend/.env`, and
+so on for the vault, the gate and both registries. They held identical values and **nothing
+checked that they did** — a redeploy updates the contracts side and the backend's copy is a
+manual paste. The failure is not a crash: the venue keeps running and reads the *previous*
+deployment, which here means the superseded `AtsComplianceGate` that refused every buyer on
+every instrument. **A stale address reads as a compliance bug rather than a configuration
+one**, which is the most expensive kind of wrong answer this codebase can give.
+
+- **`chains/deployments.ts` pins them**, beside the chain constants already pinned for
+  exactly this reason — `chains/index.ts` has said since it was written that nothing outside
+  that directory should carry a chain id or a token address as a literal. A deployed contract
+  is the same kind of fact. The backend and the agent read the pin.
+- **`packages/contracts` keeps its `FACTURE_*` variables, and that is not a half-finished
+  collapse.** They mean something different: *"reuse this one instead of deploying a new
+  one"*, an input to a deploy-time decision where **unset means deploy fresh** — which
+  `deployHedera.ts` documents as the way to point a fresh book at an existing registry. A pin
+  cannot express that. What is gone is the runtime copy, which is the one that could go stale
+  without anyone looking.
+- The package also gets no dependency on `@facture/shared`, deliberately: a workspace import
+  would put the Hardhat build behind another package's build. Two literals are repeated there
+  with a pointer at the authority instead.
+
+**Twelve knobs were not decisions.** `HOST` went because every platform that would host this
+injects `PORT` and none injects an interface to bind. `PORT` stays for that same reason, so
+the asymmetry between the two is deliberate. `X402_PAY_TO` was a second copy
+of `HEDERA_OPERATOR_ID`: the venue is paid where the venue signs, and the only thing a
+divergence could express is a challenge naming an account that does not hold the paper being
+sold. `X402_ASSET_DECIMALS` is 8 because HBAR is 8, which is a fact about the ledger.
+`CONFIRMATION_TOKEN_TTL_HOURS`, `X402_SUPPORTED_TTL_SECONDS`, `CIRCLE_BASE_URL`,
+`ARC_BLOCKCHAIN` and `AGENT_HEDERA_NETWORK` had one reachable position each.
+
+**`ATS_REGULATION_TYPE` is the one worth knowing about.** It offered three positions and all
+35 invoices in the live book read `reg-s`; the choice is recorded above as settled and no
+longer reversible, because deployed instruments carry it. **A declaration cannot be corrected
+afterwards, which makes it the worst thing to leave a deployment able to change by accident.**
+The three-way mapping onto the factory's enum pairs stays in the schema and stays pinned by a
+test — what is fixed is which one this venue declares, not the vocabulary.
+
+**`X402_ASSET_MODE` is gone, and it deleted a working branch.** `hts` was a position no client
+here could occupy: an HTS asset needs a receiver-side association nothing in this build
+performs, and the agent reads the challenge off the facilitator's `payment-required` header
+and refuses a non-HBAR one by name **before** signing. A venue configured into `hts` would
+have quoted challenges nobody could pay. `X402_HTS_ASSET_ID` went with it, and so did the
+cross-field rule guarding the half-configured pair — the state it protected against can no
+longer be expressed. **The agent keeps its own check**: it is a client of x402 rather than of
+one venue, so what a payer is asked for is not this repo's to assume.
+
+**Twenty-two lines in the local `.env` files restated their own default**, three of them
+looking like overrides and not being — `ISSUANCE_GAS_LIMIT=10000000` against a default written
+`10_000_000`, and `ARC_MAX_FEE_PER_GAS_GWEI=20` against `arc.minMaxFeePerGasGwei`. Only
+`LOG_LEVEL=debug` and `AGENT_ONCE=true` were real. Those files are gitignored, so this is the
+one part of the audit no commit records.
+
+**What was deliberately kept**, because each looked prunable and is not: the four `ISSUANCE_*`
+knobs, which are what an operator turns when Hedera throttling bites and that risk is still
+open; `ARC_MAX_FEE_PER_GAS_GWEI`, an escape hatch with no fallback under it;
+`X402_SETTLEMENT_SCALE_PPM`, already refused a rename for the `DATABASE_URL` reason;
+`FACTURE_DELIVERY_ESCROW`, inert and preserving a cheap revival path; and
+`NEXT_PUBLIC_SELLER_ID`, which looks like two sources for one decision and is not —
+`identity.ts` states the order and names the fallback as the demo account.
+
+**`.env.secondbuyer` was not configuration and is now labelled as such.** Nothing read it; it
+holds Kestrel Working Capital's key, used by hand for the first resale because the Arc deposit
+pulls from `msg.sender` and the Hedera allowlist grant needs the buyer's own signature. It is
+now `.env.kestrel-key-custody`, kept rather than deleted: **it is the only copy of the key
+controlling 400,000 units of `0.0.10363420`**, and moving it into `RESALE_SIGNER_PRIVATE_KEY`
+would make the venue custodian of a second buyer's position, which is a decision and not a
+convenience.
+
+Verified by booting the venue on the fourteen-line `.env` and pricing the live book, not by
+typechecking: MF-2081 quotes 850 bps with nothing barred, and `canReceive` at the pinned gate
+answers `true` for the buyer that quote names.
+
 ## Cut list
 
 Ordered by what leaves the product most intact, not by which track is cheapest to lose. A prize is

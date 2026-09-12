@@ -132,9 +132,9 @@ which command:
 - **`AGENT_DRY_RUN` defaults to `true`.** The agent reads, prices and reports; it arms nothing.
   Turning it off is what makes the mandate cap load-bearing. It governs `start`, not `fund`.
 - **`AGENT_MAX_SLIPPAGE_BPS` defaults to `0`** — the price it arms at is the price it was quoted.
-- **`ARC_MANDATE_VAULT_ADDRESS` is unset by default**, and unset disables `fund` rather than
-  relaxing it. Set it to the same address the venue holds; two addresses for one contract is a
-  deposit into a vault nobody reads.
+- **The vault address is not configurable**, and that is what stops `fund` depositing
+  somewhere the venue never reads. Both processes take it from `@facture/shared`, so they
+  cannot name different deployments.
 - **`AGENT_HEDERA_ACCOUNT_ID` and `AGENT_HEDERA_PRIVATE_KEY` are optional and all-or-nothing.**
   Unset disables the x402 rail rather than relaxing it. Half a pair behaves exactly like no rail
   while looking like a working one in a `.env`, so it is refused by name. With both set and

@@ -12,10 +12,14 @@ for the cash.
 > demo book and must not be run against a populated one.
 >
 > The seams that reach a chain still fail loudly rather than simulating — `ATS_FACTORY_ID`
-> unset disables issuance instead of faking it, and `ARC_MANDATE_VAULT_ADDRESS` unset
-> disables the Arc settlement rail rather than pretending capital is escrowed. That is the
-> rule the whole service is built on, and it is why an unconfigured deployment is obviously
+> unset disables issuance instead of faking it, and `RESALE_SIGNER_PRIVATE_KEY` unset
+> disables resale rather than pretending the venue holds a key it does not. That is the rule
+> the whole service is built on, and it is why an unconfigured deployment is obviously
 > unconfigured.
+>
+> Deployed contract addresses are not part of that rule and are not environment variables.
+> They are pinned in `@facture/shared`, because two files holding one address cannot fail
+> loudly — they disagree in silence.
 
 ## Running it
 
@@ -222,9 +226,10 @@ Two traps, both already hit by the reference PoC:
   hardcoded. Hardcoding works until the facilitator rotates the payer, then fails as an
   opaque signature mismatch.
 
-Settlement is in **HBAR** (`asset: 0.0.0`) by default. Every HTS token — USDC on Hedera
-included — needs explicit association by the receiver before it can be received, on both
-sides, so HTS sits behind `X402_ASSET_MODE=hts`.
+Settlement is in **HBAR** (`asset: 0.0.0`), and there is no setting that changes it. Every
+HTS token — USDC on Hedera included — needs explicit association by the receiver before it
+can be received, on both sides, and nothing here performs that step. The agent refuses a
+non-HBAR challenge before signing, so an HTS mode was a position no client could occupy.
 
 ### How a rating is earned
 
