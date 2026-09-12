@@ -15,10 +15,12 @@
  *     for the chosen (scheme, network) pair and cached. Hardcoding it works until the
  *     facilitator rotates the payer and then fails as an opaque signature mismatch.
  *
- * Default asset is HBAR (`0.0.0`). Every HTS token — USDC on Hedera included — requires
- * explicit association by the receiver before it can be received, on both the payer and
- * the receiver side, which is a manual step that broke the reference PoC. HTS therefore
- * sits behind `X402_ASSET_MODE=hts` rather than being the default.
+ * The asset is HBAR (`0.0.0`), and that is fixed rather than configured. Every HTS token —
+ * USDC on Hedera included — requires explicit association by the receiver before it can be
+ * received, on both the payer and the receiver side, which is a manual step that broke the
+ * reference PoC and that nothing in this build performs. The agent refuses a non-HBAR
+ * challenge by name before signing, so an HTS mode was a position no client here could
+ * occupy: a venue configured into it would quote challenges nobody could pay.
  */
 
 import { upstreamUnavailable } from '../errors.js';
@@ -121,8 +123,6 @@ export interface X402ClientOptions {
   network: string;
   scheme: string;
   payTo: string;
-  assetMode: 'hbar' | 'hts';
-  htsAssetId: string | undefined;
   /** Smallest-unit exponent of the settlement asset. HBAR is 8 (tinybars). */
   assetDecimals: number;
   /**
@@ -171,13 +171,9 @@ export class X402Client {
     this.#timeoutMs = opts.timeoutMs ?? 10_000;
   }
 
-  /** The asset this deployment settles in. HBAR unless HTS is explicitly enabled. */
+  /** The asset this venue settles in. HBAR, always — see the header. */
   get asset(): string {
-    if (this.#opts.assetMode === 'hbar') return HBAR_ASSET;
-    if (!this.#opts.htsAssetId) {
-      throw new Error('X402_ASSET_MODE=hts requires X402_HTS_ASSET_ID.');
-    }
-    return this.#opts.htsAssetId;
+    return HBAR_ASSET;
   }
 
   /**

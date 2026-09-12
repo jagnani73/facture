@@ -32,11 +32,15 @@
  *
  * ## HBAR only, and that is checked rather than assumed
  *
- * The venue settles in HBAR (`0.0.0`, tinybars, 8dp) unless `X402_ASSET_MODE=hts` is set on
- * it. An HTS asset would owe this payer an association step that does not exist here, and
- * an unassociated receiver fails at consensus with `TOKEN_NOT_ASSOCIATED_TO_ACCOUNT` —
- * after the venue has armed the asset leg. So a non-HBAR challenge is refused before
- * anything is signed, by name.
+ * The venue settles in HBAR (`0.0.0`, tinybars, 8dp), and no longer carries a mode that
+ * would make it do otherwise. An HTS asset would owe this payer an association step that
+ * does not exist here, and an unassociated receiver fails at consensus with
+ * `TOKEN_NOT_ASSOCIATED_TO_ACCOUNT` — after the venue has armed the asset leg.
+ *
+ * **The check below stays even so.** The challenge is read off the facilitator's
+ * `payment-required` header, not off Facture's response shape, so what a payer is asked for
+ * is not this repo's to assume — this agent is a client of x402 rather than of one venue.
+ * A non-HBAR challenge is refused before anything is signed, by name.
  */
 
 import { PrivateKey } from '@hiero-ledger/sdk';

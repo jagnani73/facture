@@ -115,7 +115,6 @@ function boot(): void {
     network: hedera.network,
     // Unset disables the maturity payout rail rather than simulating one.
     collectionAccountId: env.MATURITY_COLLECTION_ACCOUNT_ID,
-    assetMode: env.X402_ASSET_MODE,
     logger: log,
   });
 
@@ -186,8 +185,6 @@ function boot(): void {
      * that does not hold the paper being sold.
      */
     payTo: env.HEDERA_OPERATOR_ID,
-    assetMode: env.X402_ASSET_MODE,
-    htsAssetId: env.X402_HTS_ASSET_ID,
     // 8 for HBAR is a fact about the ledger, not a deployment choice. From shared.
     assetDecimals: hedera.hbarDecimals,
     settlementScalePpm: env.X402_SETTLEMENT_SCALE_PPM,
@@ -212,7 +209,6 @@ function boot(): void {
       arcChainId: chain.arc.chainId,
       hederaNetwork: chain.hedera.network,
       facilitator: env.X402_FACILITATOR_URL,
-      settlementAsset: env.X402_ASSET_MODE,
     });
   });
 

@@ -162,8 +162,6 @@ export const envSchema = z
 
     // x402 / Blocky402
     X402_FACILITATOR_URL: z.url().default('https://api.testnet.blocky402.com'),
-    X402_ASSET_MODE: z.enum(['hbar', 'hts']).default('hbar'),
-    X402_HTS_ASSET_ID: ACCOUNT_ID.optional(),
     /**
      * Parts-per-million scale on the settled amount. `1_000_000` settles the full amount.
      * Defaults to `1` — one millionth — because a testnet balance cannot cover a six-figure
@@ -196,14 +194,6 @@ export const envSchema = z
       }),
   })
   .superRefine((env, ctx) => {
-    if (env.X402_ASSET_MODE === 'hts' && env.X402_HTS_ASSET_ID === undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['X402_HTS_ASSET_ID'],
-        message: 'is required when X402_ASSET_MODE=hts',
-      });
-    }
-
     /*
      * Half a configuration must behave like none, and be refused by name.
      *

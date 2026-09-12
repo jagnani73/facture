@@ -138,7 +138,6 @@ export interface ScheduleAdapterConfig {
   /** Unset disables the rail. Must not be the operator — see the note at the top. */
   collectionAccountId: string | undefined;
   /** `hbar` or `hts`; only `hbar` is carried today. */
-  assetMode: 'hbar' | 'hts';
   logger?: Logger;
 }
 
@@ -250,13 +249,6 @@ export function createScheduleAdapter(config: ScheduleAdapterConfig): ScheduleAd
   if (collectionAccountId === config.operatorId) {
     log.error('collection account is the operator; the rail is disabled', {
       collectionAccountId,
-    });
-    return createDisabledScheduleAdapter();
-  }
-
-  if (config.assetMode !== 'hbar') {
-    log.error('only an HBAR payout is carried; the rail is disabled', {
-      assetMode: config.assetMode,
     });
     return createDisabledScheduleAdapter();
   }

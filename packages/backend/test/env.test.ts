@@ -6,7 +6,6 @@ const valid: Record<string, string> = {
   HEDERA_OPERATOR_ID: '0.0.12345',
   HEDERA_OPERATOR_KEY: '3030020100300706052b8104000a04220420' + 'a'.repeat(64),
   ARC_SETTLEMENT_PRIVATE_KEY: `0x${'b'.repeat(64)}`,
-  X402_PAY_TO: '0.0.54321',
   DATABASE_URL: './data/facture.db',
 };
 
@@ -15,7 +14,6 @@ describe('parseEnv', () => {
     const env = parseEnv(valid);
     expect(env.PORT).toBe(8787);
     expect(env.NODE_ENV).toBe('development');
-    expect(env.X402_ASSET_MODE).toBe('hbar');
     expect(env.X402_FACILITATOR_URL).toBe('https://api.testnet.blocky402.com');
     expect(env.ARC_MAX_FEE_PER_GAS_GWEI).toBe(20);
   });
@@ -42,7 +40,14 @@ describe('parseEnv', () => {
     expect(() => parseEnv({ ...valid, ARC_MAX_FEE_PER_GAS_GWEI: '10' })).toThrow(/underpriced/);
   });
 
-  it('requires an HTS asset id when settling in HTS', () => {
-    expect(() => parseEnv({ ...valid, X402_ASSET_MODE: 'hts' })).toThrow(/X402_HTS_ASSET_ID/);
+  /*
+   * The settlement asset used to be a two-variable pair with a cross-field rule, and this
+   * test guarded the half-configured state. Both are gone: HBAR is fixed in `services/x402.ts`,
+   * because an HTS asset needs a receiver-side association nothing in this build performs and
+   * the only client here refuses a non-HBAR challenge before signing. What replaces the rule
+   * is that the state it guarded cannot be expressed.
+   */
+  it('ignores an unknown variable rather than failing on it', () => {
+    expect(() => parseEnv({ ...valid, X402_ASSET_MODE: 'hts' })).not.toThrow();
   });
 });

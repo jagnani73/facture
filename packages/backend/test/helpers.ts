@@ -553,12 +553,10 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     scheme: DEFAULT_SCHEME,
     network: DEFAULT_NETWORK,
     payTo: '0.0.5512',
-    assetMode: 'hbar',
     assetDecimals: 8,
     // Full amount in tests: the demo scale exists for testnet balances, and a test that
     // asserts on a scaled number would be asserting on the scale, not the settlement.
     settlementScalePpm: 1_000_000,
-    htsAssetId: undefined,
   });
 
   const seeded =
