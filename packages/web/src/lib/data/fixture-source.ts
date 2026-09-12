@@ -38,6 +38,9 @@ function priceEverything(asOf: Date): Map<string, InvoicePricing> {
       matches: result.matches.map((match) => ({ mandate: match.mandate, quote: match.quote })),
       matchCount: result.matches.length,
       candidatesConsidered: result.matches.length + result.refusals.length,
+      // Null rather than false. The demo book's securities were never deployed, but nothing
+      // here asked a chain either, and "not asked" is what this field means.
+      instrumentReadable: null,
       refusals: result.refusals,
       pricedAt: result.asOf,
     });

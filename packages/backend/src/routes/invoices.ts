@@ -322,6 +322,16 @@ invoiceRoutes.get('/:id', async (c) => {
     refusals: live.refusals.map(wireRefusalReceipt),
     mandatesConsidered: live.candidatesConsidered,
     mandatesMatching: live.matchesAvailable,
+    /**
+     * Whether the instrument answered when the compliance gate read it, as three states:
+     * `true` it did, `false` it was asked and returned nothing, `null` nobody asked.
+     *
+     * Published because a screen cannot otherwise tell a real instrument from a seeded row
+     * that names one, and the difference decides whether offering an explorer link sends a
+     * reader to a contract or to a 404. It costs no extra read: `priceOne` already made
+     * this call to decide whether the winning bid may hold the paper.
+     */
+    instrumentReadable: live.instrumentReadable,
     tenorDays: live.tenorDays,
     pricedAt: live.pricedAt,
   });

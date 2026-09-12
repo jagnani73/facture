@@ -56,6 +56,21 @@ export interface LiveQuote {
   /** How many would actually take this paper — the "three mandates would take this" line. */
   matchesAvailable: number;
   /**
+   * Whether this invoice's instrument answered when it was read: `true` yes, `false` asked
+   * and got nothing, `null` never asked.
+   *
+   * **`priceBook` always reports `null`, and that is the point.** The book screen prices a
+   * whole seller's book in one pass with no chain reads, and asking per row is the N+1 this
+   * engine exists to avoid. Only `priceOne` can answer it, because only `priceOne` already
+   * pays for the read it takes.
+   *
+   * What reads this is the invoice screen, deciding whether to offer a link to the
+   * instrument on HashScan. A seeded row points at a security that was never deployed, and
+   * linking one sends a reader to a page that does not exist — which is a worse claim than
+   * making none.
+   */
+  instrumentReadable: boolean | null;
+  /**
    * Bids dropped because the instrument itself will not let that buyer hold it.
    *
    * Not counted as refusals. A refusal is a bid declining paper on its own terms — rating,
@@ -105,7 +120,22 @@ export interface QuoteEngineDeps {
   canHold?(input: {
     invoice: Invoice;
     mandate: Mandate;
-  }): Promise<{ allowed: boolean; reason: string | null }>;
+  }): Promise<{
+    allowed: boolean;
+    reason: string | null;
+    /**
+     * Whether the instrument itself could be read: `true` read fine, `false` asked and got
+     * nothing back, `null` never asked.
+     *
+     * Three states because two would collapse "there is no instrument yet" into "this
+     * instrument is unreachable", and a screen deciding whether to offer an explorer link
+     * has to tell those apart. Reported separately from `allowed` because an unreadable
+     * instrument still answers `allowed: true` here by design — pricing must not move on an
+     * indeterminate answer, which is the rule the comment in the default implementation
+     * protects.
+     */
+    readable: boolean | null;
+  }>;
 }
 
 export interface MandateCriteria {
@@ -169,10 +199,10 @@ export const defaultQuoteEngineDeps: QuoteEngineDeps = {
    */
   async canHold({ invoice, mandate }) {
     const instrument = invoice.instrumentAddress;
-    if (instrument === undefined) return { allowed: true, reason: null };
+    if (instrument === undefined) return { allowed: true, reason: null, readable: null };
 
     const buyer = await getStore().getBuyer(mandate.buyerId);
-    if (!buyer?.hederaAccountId) return { allowed: true, reason: null };
+    if (!buyer?.hederaAccountId) return { allowed: true, reason: null, readable: null };
 
     const decision = await getComplianceGate().check({
       instrumentAddress: instrument,
@@ -189,8 +219,22 @@ export const defaultQuoteEngineDeps: QuoteEngineDeps = {
      * tightest bids on every invoice and quietly widen the whole curve. Arming still refuses,
      * so nothing settles against an instrument nobody can read; it just does not reprice.
      */
-    if (!decision.determinate) return { allowed: true, reason: null };
-    return { allowed: decision.decision === 'allowed', reason: decision.reason };
+    /*
+     * `instrumentRead` rather than `determinate`. They answer different questions and come
+     * apart in both directions: a gate that could not be reached is indeterminate without
+     * that being a statement about the instrument, and the permissive gate is determinate
+     * having read nothing at all. Deriving readability from `determinate` reported a real
+     * deployed bond as unreadable on a relay blip, and would have reported a contract
+     * nobody looked at as readable.
+     */
+    if (!decision.determinate) {
+      return { allowed: true, reason: null, readable: decision.instrumentRead };
+    }
+    return {
+      allowed: decision.decision === 'allowed',
+      reason: decision.reason,
+      readable: decision.instrumentRead,
+    };
   },
 };
 
@@ -253,6 +297,12 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
        */
       let pool = mandates;
       let excludedByCompliance = 0;
+      /*
+       * Stays `null` when no pass ever reached the gate — no quote to screen, no gate
+       * configured, no instrument yet. "Nobody asked" is not "the answer was no", and the
+       * screen that reads this renders the two differently.
+       */
+      let instrumentReadable: boolean | null = null;
       let result = bestQuote(invoice, pool, debtor, { asOf });
 
       for (let pass = 0; pass < MAX_COMPLIANCE_FALLTHROUGH; pass += 1) {
@@ -260,6 +310,16 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
         if (result.quote === null || winner === null || deps.canHold === undefined) break;
 
         const verdict = await deps.canHold({ invoice, mandate: winner });
+        /*
+         * Sticky on `true`, because this loop can read the same instrument up to three
+         * times and the question is whether it EVER answered. Last-write-wins let a
+         * transient failure on pass two erase a definitive read from pass one, reporting a
+         * contract that had just answered as unreadable.
+         */
+        if (verdict.readable === true) instrumentReadable = true;
+        else if (verdict.readable === false && instrumentReadable === null) {
+          instrumentReadable = false;
+        }
         if (verdict.allowed) break;
 
         rootLogger.info('bid cannot hold this instrument, looking again', {
@@ -281,6 +341,7 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
         tenorDays: result.tenorDays,
         candidatesConsidered: mandates.length,
         matchesAvailable: matchCount(result),
+        instrumentReadable,
         excludedByCompliance,
         pricedAt: result.asOf,
       };
@@ -371,6 +432,8 @@ export function createQuoteEngine(deps: QuoteEngineDeps = defaultQuoteEngineDeps
            * indicative; `priceOne` is the one a seller acts on, and that one is checked.
            */
           excludedByCompliance: 0,
+          /* Null for the same reason, and never `false`: nothing here asked the instrument. */
+          instrumentReadable: null,
           rating: debtor.rating,
           tenorDays: result.tenorDays,
           candidatesConsidered: mandates.length,

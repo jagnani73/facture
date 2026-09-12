@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { useState } from 'react';
 
 import type { Invoice } from '@/lib/domain';
-import { isQuotable, priceInvoice, settledCount } from '@/lib/domain';
+import { explorerAddressUrl, isQuotable, priceInvoice, settledCount } from '@/lib/domain';
 import {
   formatDate,
   formatDateTime,
@@ -98,6 +98,30 @@ function InvoiceDetail({
   // The wobble is the demo book's stand-in for a curve that moves. Against a live venue
   // the number on screen is the venue's and nothing here perturbs it.
   const tick = useMarketTick(quotable && isDemoBook());
+  /*
+   * A link to the instrument, offered only when the venue actually read it.
+   *
+   * `instrumentReadable` is three-state and only `true` earns a link. The book carries
+   * seeded rows naming securities that were never deployed — the ones whose probes come
+   * back as empty calldata — and sending a reader to a HashScan page for a contract that
+   * does not exist is a worse claim than making none at all.
+   *
+   * `null` is the ordinary answer rather than a fault, and the condition is narrower than
+   * "opened on its own": the venue only answers this where it already paid for the read,
+   * which is when `priceOne` had a winning bid to screen. So the row needs a live quote AND
+   * a match, and two ordinary cases miss it — an invoice no mandate will take, and a `sold`
+   * or `matured` one, which `apiMarket` never re-quotes because a settled invoice is not
+   * for sale.
+   *
+   * That second case is the awkward one, since a settled invoice's bond is the one most
+   * certainly deployed. It is left rather than fixed because the alternative is quoting
+   * paper that is not for sale purely to earn a link, and the proof view already carries
+   * the same security's explorer link for exactly those invoices.
+   */
+  const instrumentHref =
+    pricing.instrumentReadable === true && invoice.instrumentAddress !== undefined
+      ? explorerAddressUrl('hedera-testnet', invoice.instrumentAddress)
+      : null;
   const days = pricing.tenorDays;
   const baseRate = pricing.quote?.annualisedYieldBps ?? null;
   const liveRate = baseRate === null ? null : Math.max(1, baseRate + driftBps(invoice.id, tick));
@@ -419,6 +443,23 @@ function InvoiceDetail({
               <Row term="Due" value={formatDate(invoice.dueAt)} />
               <Row term="Face value" value={formatMoney(invoice.faceValue)} />
               <Row term="Seller" value={market.seller.name} />
+              {instrumentHref === null ? null : (
+                <Row
+                  term="Instrument"
+                  value={
+                    <a
+                      href={instrumentHref}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-accent underline underline-offset-2"
+                    >
+                      {`${invoice.instrumentAddress?.slice(0, 8) ?? ''}…${
+                        invoice.instrumentAddress?.slice(-6) ?? ''
+                      }`}
+                    </a>
+                  }
+                />
+              )}
             </div>
           </Card>
 

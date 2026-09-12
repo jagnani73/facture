@@ -70,6 +70,15 @@ export interface InvoicePricing {
   matches: readonly MandateMatch[];
   matchCount: number;
   candidatesConsidered: number;
+  /**
+   * Whether the venue could read this invoice's instrument on chain while pricing it.
+   *
+   * `null` means nobody asked, which is the common case: the book screen prices a whole
+   * seller's book in one pass with no chain reads at all, so only an invoice opened on its
+   * own can answer this. A screen may offer a link to the instrument on `true` and on
+   * nothing else — the book carries seeded rows naming securities that were never deployed.
+   */
+  instrumentReadable: boolean | null;
   /** A refusal is a first-class output. Never an omission and never an error. */
   refusals: readonly RefusalReceipt[];
   pricedAt: string;
@@ -84,6 +93,7 @@ export const NO_PRICING = (invoiceId: string, asOf: string): InvoicePricing => (
   matches: [],
   matchCount: 0,
   candidatesConsidered: 0,
+  instrumentReadable: null,
   refusals: [],
   pricedAt: asOf,
 });

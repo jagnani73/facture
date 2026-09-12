@@ -285,6 +285,9 @@ export function createAllowingGate(): ComplianceGate {
         // The instrument answered. A fake that left this unset would read as "could not be
         // asked", and pricing deliberately does not drop a bid on an unknown.
         determinate: true,
+        // And it answered by being read, which is the separate question an explorer link
+        // turns on. Determinate gates that read nothing exist; this is not one.
+        instrumentRead: true,
         checkedAt: '2026-09-01T09:32:00.000Z',
         checks: [
           { name: 'Control list', detail: 'Permitted to hold this security.', passed: true },
@@ -303,8 +306,9 @@ export function createRefusingGate(reason: string): ComplianceGate {
       return Promise.resolve({
         decision: 'refused',
         // Refused because the instrument said no, not because it could not be read — those
-        // are different facts and only the first one may move a price.
+        // are different facts and only the first one may move a price. Read either way.
         determinate: true,
+        instrumentRead: true,
         checkedAt: '2026-09-01T09:32:00.000Z',
         checks: [{ name: 'KYC status', detail: reason, passed: false }],
         reason,

@@ -97,6 +97,7 @@ function toPricing(invoiceId: string, live: LiveQuoteResponse): InvoicePricing {
     matches: [],
     matchCount: live.mandatesMatching,
     candidatesConsidered: live.mandatesConsidered,
+    instrumentReadable: live.instrumentReadable,
     refusals: live.refusals,
     pricedAt: live.pricedAt,
   };
@@ -219,6 +220,9 @@ export async function apiMarket(signal?: AbortSignal): Promise<Market> {
         // The book route answers how many matched, never how many were screened. Claiming
         // the two are equal would understate the curve on any row that was refused.
         candidatesConsidered: 0,
+        // The book prices in one pass with no chain reads, so nothing here asked. Never
+        // `false`: that would claim every row's instrument is unreachable.
+        instrumentReadable: null,
         refusals: [],
         pricedAt: asOf.toISOString(),
       },

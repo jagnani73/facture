@@ -67,6 +67,12 @@ quoteRoutes.get('/invoices/:id/quote', async (c) => {
     /** "three mandates would take this" comes from here. */
     mandatesMatching: live.matchesAvailable,
     /**
+     * Whether the instrument answered when it was read: `true`, `false` asked and silent,
+     * `null` never asked. Same field and same three states as `GET /v1/invoices/:id`, so a
+     * client reading either endpoint decides about an explorer link the same way.
+     */
+    instrumentReadable: live.instrumentReadable,
+    /**
      * Bids the instrument itself will not let their buyer hold.
      *
      * On the wire because the alternative is a seller reading "no bid" when the truth is

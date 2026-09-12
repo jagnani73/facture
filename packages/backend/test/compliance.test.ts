@@ -40,6 +40,9 @@ function facetsSaying(decision: 'allowed' | 'refused', unreadable = false): Comp
     check: (): Promise<ComplianceDecision> =>
       Promise.resolve({
         decision,
+        // These stand in for direct facet reads, so the instrument was read unless the
+        // caller is simulating a probe that threw.
+        instrumentRead: !unreadable,
         checkedAt: new Date().toISOString(),
         checks: [
           {
@@ -188,5 +191,18 @@ describe('createPermissiveComplianceGate', () => {
 
     expect(decision.decision).toBe('allowed');
     expect(decision.checks[0]?.detail).toContain('Not enforced on this deployment');
+  });
+
+  /*
+   * The pair that makes `determinate` the wrong thing to infer readability from. This gate
+   * is fully determinate and reads no chain at all, so anything deriving "the instrument
+   * answered" from `determinate` concludes yes about a contract nobody looked at — and a
+   * screen offering an explorer link on that basis publishes a link to nothing.
+   */
+  it('is determinate having read no instrument, and says so', async () => {
+    const decision = await createPermissiveComplianceGate().check(query);
+
+    expect(decision.determinate).toBe(true);
+    expect(decision.instrumentRead).toBe(false);
   });
 });

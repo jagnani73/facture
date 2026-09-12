@@ -59,6 +59,22 @@ export interface ComplianceDecision {
    * mirror-node blip silently widen every price on the book.
    */
   readonly determinate: boolean;
+  /**
+   * True when this decision rests on a read of the **instrument's own state**.
+   *
+   * Deliberately not the same question as `determinate`, which asks whether the answer can
+   * be acted on. The two come apart in both directions, and a caller that reads one for the
+   * other gets a confident wrong answer:
+   *
+   * - `createPermissiveComplianceGate` is fully determinate and touches no chain at all. Its
+   *   own check text says the buyer "was not checked against a control list".
+   * - An on-chain gate that cannot be reached is indeterminate without that being a
+   *   statement about the instrument, which was never asked.
+   *
+   * What this supports is the cheaper class of question — does this contract exist, is it
+   * worth offering a link to it — where being wrong costs a dead link rather than a trade.
+   */
+  readonly instrumentRead: boolean;
 }
 
 export interface ComplianceQuery {
@@ -161,7 +177,17 @@ export function decodeReasonCode(raw: `0x${string}`): string {
   return text === '' ? 'NONE' : text;
 }
 
-const decide = (checks: readonly ComplianceCheck[], checkedAt: string): ComplianceDecision => {
+/**
+ * `instrumentRead` is a required argument rather than something inferred from the checks,
+ * because it cannot be inferred: a gate that read nothing produces checks indistinguishable
+ * in shape from one that read everything. Every caller states its own answer, and adding a
+ * gate that forgets to is a type error rather than a silently optimistic `true`.
+ */
+const decide = (
+  checks: readonly ComplianceCheck[],
+  checkedAt: string,
+  instrumentRead: boolean,
+): ComplianceDecision => {
   const failed = checks.find((c) => !c.passed);
   return {
     decision: failed ? 'refused' : 'allowed',
@@ -170,6 +196,7 @@ const decide = (checks: readonly ComplianceCheck[], checkedAt: string): Complian
     reason: failed ? failed.detail : null,
     // Determinate only when nothing had to be guessed at. See the field's own note.
     determinate: !checks.some((c) => c.unreadable === true),
+    instrumentRead,
   };
 };
 
@@ -259,7 +286,16 @@ export function createAtsComplianceGate(options: { logger?: Logger } = {}): Comp
         ),
       ]);
 
-      return decide([controlList, kyc, paused], checkedAt);
+      /*
+       * At least one probe came back with data, so something answered at that address.
+       * All three throwing is how a security that was never deployed presents: viem
+       * reports empty calldata per selector rather than one error for the address.
+       */
+      return decide(
+        [controlList, kyc, paused],
+        checkedAt,
+        [controlList, kyc, paused].some((c) => c.unreadable !== true),
+      );
     },
   };
 }
@@ -357,6 +393,9 @@ export function createOnChainComplianceGate(options: {
             },
           ],
           checkedAt,
+          // The gate never answered, so the instrument behind it was never asked. This is
+          // not evidence either way about whether that contract exists.
+          false,
         );
       }
 
@@ -373,6 +412,9 @@ export function createOnChainComplianceGate(options: {
             },
           ],
           checkedAt,
+          // `canReceive` reads the instrument's own control list, KYC grants and pause
+          // state, so an answer from it is an answer from the instrument.
+          true,
         );
       }
 
@@ -401,7 +443,9 @@ export function createOnChainComplianceGate(options: {
         ...(facetsPermit || !detailed.determinate ? { unreadable: true } : {}),
       };
 
-      return decide([header, ...detailed.checks], checkedAt);
+      // The facets were asked directly for the sentence, so they are the authority on
+      // whether the instrument itself answered.
+      return decide([header, ...detailed.checks], checkedAt, detailed.instrumentRead);
     },
   };
 }
@@ -428,6 +472,9 @@ export function createPermissiveComplianceGate(): ComplianceGate {
             },
           ],
           new Date().toISOString(),
+          // Nothing was read. This gate is determinate and touches no chain, which is
+          // exactly the pair that makes `determinate` the wrong thing to infer this from.
+          false,
         ),
       );
     },

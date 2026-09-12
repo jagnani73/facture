@@ -303,6 +303,34 @@ describe('readInvoiceDetail', () => {
   it('reads an invoice that was not nested under a key', () => {
     expect(readInvoiceDetail(INVOICE).invoice.id).toBe(INVOICE.id);
   });
+
+  /*
+   * The screen offers a link to the instrument on HashScan off this field, and the book is
+   * full of seeded rows naming securities that were never deployed. An absent answer must
+   * therefore stay absent: read as `false` it would hide every real instrument, and read as
+   * `true` it would publish links to contracts that do not exist.
+   */
+  it('keeps an unanswered instrument reading as null rather than false', () => {
+    const base = {
+      invoice: INVOICE,
+      tenorDays: 92,
+      quote: QUOTE,
+      mandatesMatching: 3,
+      refusals: [],
+      pricedAt: '2026-09-02T10:00:00.000Z',
+    };
+
+    expect(readInvoiceDetail(base).pricing.instrumentReadable).toBeNull();
+    expect(
+      readInvoiceDetail({ ...base, instrumentReadable: null }).pricing.instrumentReadable,
+    ).toBeNull();
+    expect(
+      readInvoiceDetail({ ...base, instrumentReadable: true }).pricing.instrumentReadable,
+    ).toBe(true);
+    expect(
+      readInvoiceDetail({ ...base, instrumentReadable: false }).pricing.instrumentReadable,
+    ).toBe(false);
+  });
 });
 
 /* -------------------------------------------------------------------------- */

@@ -35,15 +35,106 @@ function engineRefusing(barred: (input: { invoice: Invoice; mandate: Mandate }) 
     ...defaultQuoteEngineDeps,
     canHold: (input) => {
       asked.push(input.mandate.id);
+      /*
+       * `readable: true` on both branches: this fake stands in for an instrument that
+       * answered, and refusing a buyer is an answer. The unreadable case is the one where
+       * the gate got nothing back at all, and it is exercised separately.
+       */
       return Promise.resolve(
         barred(input)
-          ? { allowed: false, reason: `${input.mandate.id} may not hold this security.` }
-          : { allowed: true, reason: null },
+          ? {
+              allowed: false,
+              reason: `${input.mandate.id} may not hold this security.`,
+              readable: true,
+            }
+          : { allowed: true, reason: null, readable: true },
       );
     },
   });
   return { engine, asked };
 }
+
+describe('reporting whether the instrument could be read', () => {
+  /*
+   * Three states, and the third is the one worth pinning. A screen decides whether to offer
+   * a link to the instrument off this field, and the book is full of seeded rows naming
+   * securities that were never deployed — so folding "nobody asked" into "no" would hide
+   * every real instrument, and folding it into "yes" would publish links to contracts that
+   * do not exist.
+   */
+  it('says true when the gate answered', async () => {
+    const { engine } = engineRefusing(() => false);
+    const live = await engine.priceOne(h.seeded.invoiceIds['INV-2046'] ?? '', marketNow());
+
+    expect(live.quote).not.toBeNull();
+    expect(live.instrumentReadable).toBe(true);
+  });
+
+  it('says false when the instrument was asked and returned nothing', async () => {
+    const engine = createQuoteEngine({
+      ...defaultQuoteEngineDeps,
+      canHold: () => Promise.resolve({ allowed: true, reason: null, readable: false }),
+    });
+    const live = await engine.priceOne(h.seeded.invoiceIds['INV-2046'] ?? '', marketNow());
+
+    /*
+     * Still quoted. An unreadable instrument must not move a price — that is the rule the
+     * whole `determinate` distinction exists for — so this reports the unreadability beside
+     * a price rather than instead of one.
+     */
+    expect(live.quote).not.toBeNull();
+    expect(live.instrumentReadable).toBe(false);
+  });
+
+  it('says null when no gate is configured, rather than false', async () => {
+    // `canHold` is optional on the deps, and absent means "do not ask" — a deployment with
+    // no gate prices exactly as it did before this field existed.
+    const { canHold: _noGate, ...withoutGate } = defaultQuoteEngineDeps;
+    const engine = createQuoteEngine(withoutGate);
+    const live = await engine.priceOne(h.seeded.invoiceIds['INV-2046'] ?? '', marketNow());
+
+    expect(live.quote).not.toBeNull();
+    expect(live.instrumentReadable).toBeNull();
+  });
+
+  it('keeps an instrument that answered once, even if a later pass cannot reach it', async () => {
+    /*
+     * The loop reads the same instrument up to three times. A definitive read on pass one
+     * followed by a relay timeout on pass two was reporting the whole invoice as unreadable
+     * — a contract that had demonstrably just answered. The question is whether it EVER
+     * answered, so the `true` sticks.
+     */
+    const invoiceId = h.seeded.invoiceIds['INV-2041'] ?? '';
+    let call = 0;
+    const engine = createQuoteEngine({
+      ...defaultQuoteEngineDeps,
+      canHold: () => {
+        call += 1;
+        return Promise.resolve(
+          call === 1
+            ? { allowed: false, reason: 'barred by the control list', readable: true }
+            : { allowed: true, reason: null, readable: false },
+        );
+      },
+    });
+
+    const live = await engine.priceOne(invoiceId, marketNow());
+
+    expect(call).toBeGreaterThan(1);
+    expect(live.instrumentReadable).toBe(true);
+  });
+
+  it('says null for every row of a priced book, because nothing there asks a chain', async () => {
+    const ids = [h.seeded.invoiceIds['INV-2046'] ?? '', h.seeded.invoiceIds['INV-2041'] ?? ''];
+    const { engine } = engineRefusing(() => false);
+    const book = await engine.priceBook(ids, marketNow());
+
+    expect(book).toHaveLength(2);
+    // The N+1 this method exists to avoid. If this ever answers, pricing started paying for
+    // one on-chain read per row of the seller's book.
+    for (const row of book) expect(row.instrumentReadable).toBeNull();
+  });
+});
 
 describe('pricing against an instrument that bars a buyer', () => {
   it('quotes the best bid when nothing is barred', async () => {

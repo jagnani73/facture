@@ -749,6 +749,15 @@ export interface LiveQuoteResponse {
   quoteId: string | null;
   mandatesConsidered: number;
   mandatesMatching: number;
+  /**
+   * Whether the venue could read this invoice's instrument on chain when it priced it.
+   *
+   * Three states, and the third is doing the work: `null` means nobody asked, which happens
+   * whenever there was no quote to screen or no gate configured. A screen offering a link to
+   * the instrument may only do so on `true` — the book carries seeded rows naming securities
+   * that were never deployed, and linking one sends a reader to a page that does not exist.
+   */
+  instrumentReadable: boolean | null;
   refusals: RefusalReceipt[];
   pricedAt: string;
 }
@@ -773,6 +782,10 @@ export function readLiveQuote(raw: unknown, path = 'quote'): LiveQuoteResponse {
       `${path}.mandatesConsidered`,
     ),
     mandatesMatching: readNumber(field(body, 'mandatesMatching') ?? 0, `${path}.mandatesMatching`),
+    instrumentReadable: readOptionalBoolean(
+      field(body, 'instrumentReadable'),
+      `${path}.instrumentReadable`,
+    ),
     refusals:
       refusals === undefined
         ? []
@@ -857,6 +870,10 @@ export function readInvoiceDetail(raw: unknown, path = 'invoice'): InvoiceDetail
       mandatesMatching: readNumber(
         field(body, 'mandatesMatching') ?? 0,
         `${path}.mandatesMatching`,
+      ),
+      instrumentReadable: readOptionalBoolean(
+        field(body, 'instrumentReadable'),
+        `${path}.instrumentReadable`,
       ),
       refusals:
         refusals === undefined
