@@ -38,10 +38,13 @@
  *
  * ## Signing in is also where the wallet gets scoped
  *
- * The wallet Privy makes has exactly one job in this product — claiming a payout out of
- * `DvpEscrow`, which the venue cannot do on a seller's behalf — and sign-in is the only
- * moment the venue holds that wallet's identity. So it is where the policy naming that one
- * call is attached. It cannot fail a sign-in; see {@link scopeWallet}.
+ * The wallet Privy makes has two jobs in this product — claiming a payout out of
+ * `DvpEscrow`, which the venue cannot do on a seller's behalf, and signing the EIP-712
+ * profile the venue relays to `PartyRegistry` — and sign-in is the only moment the venue
+ * holds that wallet's identity. So it is where the policy naming those two is attached.
+ * Naming them is what permits them: Privy denies any method no rule allowed, so an unscoped
+ * wallet is permissive and a *wrongly* scoped one can do neither. It cannot fail a sign-in;
+ * see {@link scopeWallet}.
  *
  * ## The two address fields are not the same kind of thing
  *
@@ -54,40 +57,24 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { getStore } from '../db/store.js';
+import { getStore, normaliseEmail } from '../db/store.js';
 import { conflict, notFound, unauthorized } from '../errors.js';
 import type { Logger } from '../logger.js';
 import type { AppEnv } from '../middleware/context.js';
-import { attachClaimPolicy } from '../services/privy-policy.js';
+import { attachWalletPolicy } from '../services/privy-policy.js';
 import { getPrivyVerifier, provisionalName } from '../services/privy.js';
 import { readParams } from '../validate.js';
 import { wireSeller } from '../wire.js';
+import { bearerToken } from './bearer.js';
 
 const uuidParam = z.object({ id: z.uuid() });
-
-/**
- * The identity token, out of the Authorization header.
- *
- * Rejected here rather than passed to Privy when it is missing or malformed, so "you sent no
- * credential" and "your credential did not verify" stay different answers.
- */
-function bearerToken(header: string | undefined): string {
-  const raw = header?.trim() ?? '';
-  const match = /^Bearer\s+(\S+)$/i.exec(raw);
-  if (!match?.[1]) {
-    throw unauthorized(
-      'Signing in needs a Privy identity token, presented as `Authorization: Bearer <token>`.',
-    );
-  }
-  return match[1];
-}
 
 export const sellerRoutes = new Hono<AppEnv>();
 
 /**
  * Scope the wallet this sign-in arrived with, and never let it cost the sign-in.
  *
- * `attachClaimPolicy` swallows its own failures for the reason `publishRefusals` does: an
+ * `attachWalletPolicy` swallows its own failures for the reason `publishRefusals` does: an
  * unavailable Privy policy API — or an account whose plan has no policy engine — costs the
  * control, not the account. It runs on a returning seller as well as a new one, because the
  * wallet that needs scoping is whichever one is signing in now, and a policy attached to a
@@ -102,7 +89,7 @@ async function scopeWallet(
   c: { get: (key: 'log') => Logger },
   verified: { walletId: string | null; walletAddress: string | null },
 ): Promise<void> {
-  await attachClaimPolicy(
+  await attachWalletPolicy(
     { walletId: verified.walletId, walletAddress: verified.walletAddress },
     c.get('log'),
   );
@@ -122,7 +109,7 @@ sellerRoutes.post('/', async (c) => {
    * already. This is the assertion that stops any future verifier — a different provider, a
    * fake in a test that has drifted — from being able to insert one at all.
    */
-  const email = verified.email.trim().toLowerCase();
+  const email = normaliseEmail(verified.email);
   if (email === '') {
     throw unauthorized(
       'That sign-in verified but carried no email address, and a seller is identified by ' +

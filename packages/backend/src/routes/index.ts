@@ -6,6 +6,9 @@
  *   seller   /v1/invoices/:id/list     offer it into the book; /delist takes it back off
  *   debtor   /v1/confirm/:token        public, token-authenticated, no wallet, no signup
  *   seller   /v1/invoices/:id/quote    the price that is already there
+ *   buyer    /v1/buyers                sign in by email, record the wallet made from it
+ *   both     /v1/parties/me            relay the profile this address signed for itself
+ *   both     /v1/parties/:address      what an address says it is, read off Hedera
  *   buyer    /v1/mandates              post, fund, list, withdraw, exposure
  *   both     /v1/trades                execute, list, get
  *   both     /v1/trades/:id/proof      the audit view, one click from any trade
@@ -15,8 +18,10 @@
 
 import { Hono } from 'hono';
 import type { AppEnv } from '../middleware/context.js';
+import { buyerRoutes } from './buyers.js';
 import { confirmationRoutes, invoiceRoutes } from './invoices.js';
 import { mandateRoutes } from './mandates.js';
+import { partyRoutes } from './parties.js';
 import { proofRoutes } from './proof.js';
 import { quoteRoutes } from './quotes.js';
 import { sellerRoutes } from './sellers.js';
@@ -27,7 +32,9 @@ export const v1Routes = new Hono<AppEnv>();
 v1Routes.route('/sellers', sellerRoutes);
 v1Routes.route('/invoices', invoiceRoutes);
 v1Routes.route('/confirm', confirmationRoutes);
+v1Routes.route('/buyers', buyerRoutes);
 v1Routes.route('/mandates', mandateRoutes);
+v1Routes.route('/parties', partyRoutes);
 v1Routes.route('/trades', tradeRoutes);
 
 // Mounted at the root of /v1 because their paths are nested under another actor's

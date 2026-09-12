@@ -28,7 +28,7 @@
 
 import type { Quote, RefusalReceipt, SettlementLegState } from '@facture/shared';
 import { z } from 'zod';
-import type { InvoiceRow, MandateRow, SellerRow, TradeRow } from './db/schema.js';
+import type { BuyerRow, InvoiceRow, MandateRow, SellerRow, TradeRow } from './db/schema.js';
 import { isResale, sellingPartyOf } from './parties.js';
 
 /**
@@ -116,6 +116,32 @@ const isoOrNull = (value: Date | null): string | null => value?.toISOString() ??
  * empty cell.
  */
 export const wireSeller = (row: SellerRow) => ({
+  id: row.id,
+  name: row.name,
+  email: row.email,
+  hederaAccountId: row.hederaAccountId,
+  arcAddress: row.arcAddress,
+  createdAt: row.createdAt.toISOString(),
+});
+
+/**
+ * A buyer as their own screens read them.
+ *
+ * Both wallet fields carry the same two meanings they carry on a seller, and for the same
+ * reasons — see {@link wireSeller}. What differs is which way the money runs. A buyer's
+ * `arcAddress` is the address `MandateVault.deposit` pulls capital FROM, and the one
+ * `ArcEscrow.buyerOf` binds a mandate to; a seller's is where a payout is claimed TO.
+ *
+ * **`agentPolicy` is deliberately not published.** The column marks an agent-operated desk,
+ * and CLAUDE.md is unambiguous that an agent must never be disguised as a human — so the
+ * fact belongs on a screen, prominently, rather than in this object. It is left off because
+ * nothing renders it yet, and *a field the API publishes and the screen discards is exactly
+ * how `escrowVerified` came to tell every buyer their capital was escrowed when nothing had
+ * checked it.* When a screen is built that reads it, that is the moment to answer it here —
+ * and at that point the right shape is the one the screen needs, which is not necessarily
+ * the column.
+ */
+export const wireBuyer = (row: BuyerRow) => ({
   id: row.id,
   name: row.name,
   email: row.email,

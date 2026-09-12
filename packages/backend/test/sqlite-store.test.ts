@@ -539,3 +539,135 @@ describe('the migration and the demo book applied to a file', () => {
     expect(overlap).toHaveLength(0);
   });
 });
+
+/**
+ * Party identity and wallet recording, against the real engine.
+ *
+ * `test/store.test.ts` asserts the contract — normalised lookup, fill-not-overwrite,
+ * `not_found` on a row that is not there — and this asserts the two things that are true only
+ * because SQLite is underneath, each of which fails silently if it is got wrong:
+ *
+ * - **`buyers_email_key` is a real unique index.** An unenforced `CREATE UNIQUE INDEX` in a
+ *   migration that never ran looks exactly like an enforced one from the route's side, and
+ *   the symptom would be a desk with two rows, its capital on one and its sign-in landing on
+ *   the other. The route's idempotency read is what normally prevents that; this is the
+ *   constraint underneath it, which is what holds when two sign-ins race.
+ * - **A partial `UPDATE … SET` touches only the columns it names.** Drizzle builds the SET
+ *   clause from the object's own keys, so an omitted key is absent from the SQL rather than
+ *   present as NULL — the same distinction `MemoryStore` implements by spreading
+ *   conditionally, and the one that decides whether filling an Arc address wipes a Hedera
+ *   account id.
+ */
+describe('party identity, in SQL', () => {
+  it('enforces one row per buyer email at the index, not just in the route', async () => {
+    await store.insertBuyer({ name: 'Ardent', email: 'desk@ardent.test' });
+
+    const code = await driverCodeOf(
+      store.insertBuyer({ name: 'Ardent Again', email: 'desk@ardent.test' }),
+    );
+    expect(code).toBe('SQLITE_CONSTRAINT_UNIQUE');
+  });
+
+  it('enforces the same on sellers', async () => {
+    await store.insertSeller({ name: 'Meridian', email: 'ap@meridian.test' });
+
+    const code = await driverCodeOf(
+      store.insertSeller({ name: 'Meridian Again', email: 'ap@meridian.test' }),
+    );
+    expect(code).toBe('SQLITE_CONSTRAINT_UNIQUE');
+  });
+
+  /**
+   * The write is normalised, not just the query — and this pair is written from the awkward
+   * direction on purpose.
+   *
+   * These cases used to insert an already-lowercase address and look it up shouting. That passes
+   * under either implementation, because normalising the query alone is enough for it, and it is
+   * how the divergence between `MemoryStore` and this store survived: `MemoryStore` lowercased
+   * **both** sides of its comparison and SQLite lowercased only the query, so a row stored with a
+   * capital letter was findable in one store and invisible in the other. Insert mixed, look up
+   * lowercase, and the two stop agreeing.
+   *
+   * Under SQLite the stakes are higher than a missed lookup. `eq` is a byte comparison against a
+   * column carrying `buyers_email_key`, so an unnormalised write puts `Desk@Ardent.Test` past the
+   * unique index that `desk@ardent.test` also fits behind: two rows for one desk, its capital
+   * posted against one and its next sign-in landing on the other — the failure `routes/buyers.ts`
+   * names as the worst thing that can happen to a funder's identity.
+   */
+  it('finds a buyer stored with capitals by its lowercase address', async () => {
+    const created = await store.insertBuyer({ name: 'Ardent', email: 'Desk@Ardent.Test' });
+
+    expect(created.email).toBe('desk@ardent.test');
+    expect((await store.getBuyerByEmail('desk@ardent.test'))?.id).toBe(created.id);
+    expect((await store.getBuyerByEmail(' DESK@Ardent.Test '))?.id).toBe(created.id);
+    expect(await store.getBuyerByEmail('nobody@ardent.test')).toBeNull();
+  });
+
+  it('finds a seller stored with capitals by its lowercase address', async () => {
+    const created = await store.insertSeller({ name: 'Meridian', email: '  AP@Meridian.Test ' });
+
+    expect(created.email).toBe('ap@meridian.test');
+    expect((await store.getSellerByEmail('ap@meridian.test'))?.id).toBe(created.id);
+    expect((await store.getSellerByEmail(' AP@Meridian.Test '))?.id).toBe(created.id);
+  });
+
+  /**
+   * And the index sees the same address under both spellings.
+   *
+   * The two tests above would pass with normalisation done in the route instead of the store. This
+   * one would not: it inserts twice through the store with the casing differing, so it fails unless
+   * the value reaching the column is normalised. That is the difference between one desk and two.
+   */
+  it('counts one desk however the second sign-in was capitalised', async () => {
+    await store.insertBuyer({ name: 'Ardent', email: 'desk@ardent.test' });
+
+    const code = await driverCodeOf(
+      store.insertBuyer({ name: 'Ardent Again', email: 'Desk@Ardent.Test' }),
+    );
+    expect(code).toBe('SQLITE_CONSTRAINT_UNIQUE');
+  });
+});
+
+describe('recording a wallet, in SQL', () => {
+  it('sets only the column the caller named', async () => {
+    const created = await store.insertBuyer({
+      name: 'Ardent',
+      email: 'desk@ardent.test',
+      hederaAccountId: '0.0.9001',
+    });
+
+    const after = await store.updateBuyerWallet(created.id, { arcAddress: '0xabc' });
+
+    expect(after.arcAddress).toBe('0xabc');
+    expect(after.hederaAccountId).toBe('0.0.9001');
+  });
+
+  it('writes an explicit null when the caller names the column', async () => {
+    const created = await store.insertBuyer({
+      name: 'Ardent',
+      email: 'desk@ardent.test',
+      hederaAccountId: '0.0.9001',
+    });
+
+    const after = await store.updateBuyerWallet(created.id, { hederaAccountId: null });
+
+    expect(after.hederaAccountId).toBeNull();
+  });
+
+  /*
+   * `UPDATE` against no rows affects nothing and raises nothing, so the `returning()` clause
+   * comes back empty rather than failing. Without this check the route would report a wallet
+   * recorded against a buyer that does not exist.
+   */
+  it('refuses a buyer id that matches no row', async () => {
+    await expect(
+      store.updateBuyerWallet(seedId('no-such-buyer'), { arcAddress: '0xabc' }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('refuses a seller id that matches no row, the same way', async () => {
+    await expect(
+      store.updateSellerWallet(seedId('no-such-seller'), { arcAddress: '0xabc' }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+});

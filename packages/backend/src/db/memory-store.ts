@@ -68,6 +68,7 @@ import type {
   WithdrawInput,
   WithdrawResult,
 } from './store.js';
+import { normaliseEmail } from './store.js';
 
 /**
  * Exposure counts capital that is committed and has not come back yet. A trade whose
@@ -144,11 +145,22 @@ export class MemoryStore implements Store {
     return clone(this.#putDebtor(row));
   }
 
+  /*
+   * Every party write funnels through these three, and all three normalise `email`.
+   *
+   * This store used to normalise the *comparison* instead — both sides of it, in each lookup —
+   * which found a mixed-case row that `SqliteStore` could not, and which no parity test could see
+   * because every fixture inserted an address that was already lowercase. Comparing a normalised
+   * row against a normalised query is a lookup rule; a unique index is a rule about what is in the
+   * column, and only the write can satisfy that. So the normalisation moved to the write here, and
+   * the lookups below compare exactly as SQLite's `eq` does. See `normaliseEmail` in `store.ts`.
+   */
+
   #putSeller(row: NewSellerRow): SellerRow {
     const full: SellerRow = {
       id: row.id ?? this.#newId(),
       name: row.name,
-      email: row.email,
+      email: normaliseEmail(row.email),
       hederaAccountId: row.hederaAccountId ?? null,
       arcAddress: row.arcAddress ?? null,
       createdAt: row.createdAt ?? this.#now(),
@@ -161,7 +173,7 @@ export class MemoryStore implements Store {
     const full: BuyerRow = {
       id: row.id ?? this.#newId(),
       name: row.name,
-      email: row.email,
+      email: normaliseEmail(row.email),
       hederaAccountId: row.hederaAccountId ?? null,
       arcAddress: row.arcAddress ?? null,
       agentPolicy: row.agentPolicy ?? null,
@@ -175,7 +187,7 @@ export class MemoryStore implements Store {
     const full: DebtorRow = {
       id: row.id ?? this.#newId(),
       name: row.name,
-      email: row.email,
+      email: normaliseEmail(row.email),
       taxId: row.taxId ?? null,
       rating: row.rating ?? 'UNRATED',
       settledOnTime: row.settledOnTime ?? 0,
@@ -195,9 +207,12 @@ export class MemoryStore implements Store {
   }
 
   async getSellerByEmail(email: string): Promise<SellerRow | null> {
-    const wanted = email.trim().toLowerCase();
+    // The row side is NOT normalised here, deliberately. `#putSeller` already did it, and
+    // re-normalising would let this store answer for a spelling the SQLite column could never
+    // hold — which is exactly the divergence between the two implementations this fixed.
+    const wanted = normaliseEmail(email);
     for (const row of this.sellers.values()) {
-      if (row.email.trim().toLowerCase() === wanted) return clone(row);
+      if (row.email === wanted) return clone(row);
     }
     return null;
   }
@@ -221,10 +236,58 @@ export class MemoryStore implements Store {
     return this.buyers.get(id) ?? null;
   }
 
+  async getBuyerByEmail(email: string): Promise<BuyerRow | null> {
+    // Row side unnormalised, as in `getSellerByEmail` and for the same reason.
+    const wanted = normaliseEmail(email);
+    for (const row of this.buyers.values()) {
+      if (row.email === wanted) return clone(row);
+    }
+    return null;
+  }
+
+  async updateBuyerWallet(
+    id: string,
+    wallet: { hederaAccountId?: string | null; arcAddress?: string | null },
+  ): Promise<BuyerRow> {
+    const row = this.buyers.get(id);
+    if (!row) throw notFound(`Buyer ${id}`);
+    /*
+     * An absent key is left alone and a `null` one is written. The two are different
+     * instructions — "this sign-in said nothing about a Hedera account" against "clear it" —
+     * and spreading `wallet` wholesale would collapse them, wiping a recorded address every
+     * time the other field was the one being filled.
+     */
+    const next: BuyerRow = {
+      ...row,
+      ...(wallet.hederaAccountId !== undefined ? { hederaAccountId: wallet.hederaAccountId } : {}),
+      ...(wallet.arcAddress !== undefined ? { arcAddress: wallet.arcAddress } : {}),
+    };
+    this.buyers.set(id, next);
+    return clone(next);
+  }
+
+  async updateSellerName(id: string, name: string): Promise<SellerRow> {
+    const row = this.sellers.get(id);
+    if (!row) throw notFound(`Seller ${id}`);
+    const next: SellerRow = { ...row, name };
+    this.sellers.set(id, next);
+    return clone(next);
+  }
+
+  async updateBuyerName(id: string, name: string): Promise<BuyerRow> {
+    const row = this.buyers.get(id);
+    if (!row) throw notFound(`Buyer ${id}`);
+    const next: BuyerRow = { ...row, name };
+    this.buyers.set(id, next);
+    return clone(next);
+  }
+
   async upsertDebtor(input: UpsertDebtorInput): Promise<DebtorRow> {
-    const email = input.email.trim().toLowerCase();
+    // Matches `debtors.email` as SQLite's `onConflictDoUpdate` target compares it: byte for
+    // byte against a column `#putDebtor` has already normalised.
+    const email = normaliseEmail(input.email);
     for (const row of this.debtors.values()) {
-      if (row.email.toLowerCase() === email) return clone(row);
+      if (row.email === email) return clone(row);
     }
     return clone(
       this.#putDebtor({

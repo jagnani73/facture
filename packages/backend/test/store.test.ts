@@ -257,3 +257,153 @@ describe('indexer cursors', () => {
     expect(await store.getCursor('nowhere')).toBeNull();
   });
 });
+
+/**
+ * Party lookup and wallet recording, which both onboarding routes stand on.
+ *
+ * Two actors, one contract. `POST /v1/sellers` and `POST /v1/buyers` are idempotent on a
+ * verified email and refuse to rebind a recorded address, and neither property lives in the
+ * route — the route asks the store for a row by email and then asks it to fill a field. So
+ * the guarantees are asserted here, on the seam, against **both** parties: a seller-only
+ * assertion would let the buyer half drift, which is exactly how one fact maintained in two
+ * places goes wrong in this codebase.
+ */
+describe('party lookup by email', () => {
+  it('finds a seller however the address was capitalised or spaced', async () => {
+    const created = await store.insertSeller({ name: 'Ardent', email: 'desk@ardent.example' });
+
+    expect((await store.getSellerByEmail('  DESK@Ardent.Example '))?.id).toBe(created.id);
+    expect(await store.getSellerByEmail('someone@ardent.example')).toBeNull();
+  });
+
+  it('finds a buyer however the address was capitalised or spaced', async () => {
+    const created = await store.insertBuyer({ name: 'Ardent', email: 'desk@ardent.example' });
+
+    expect((await store.getBuyerByEmail('  DESK@Ardent.Example '))?.id).toBe(created.id);
+    expect(await store.getBuyerByEmail('someone@ardent.example')).toBeNull();
+  });
+
+  /* The two tables are separate identities, so one email can be both sides of the market. */
+  it('does not let a seller row answer a buyer lookup', async () => {
+    await store.insertSeller({ name: 'Ardent', email: 'desk@ardent.example' });
+
+    expect(await store.getBuyerByEmail('desk@ardent.example')).toBeNull();
+  });
+
+  /**
+   * The normalisation happens on the WRITE, and this is the pair that can tell.
+   *
+   * The two cases above insert an address that is already lowercase, so they pass whether a store
+   * normalises the query, the row, both or only the write. That is how the two implementations
+   * came to disagree unnoticed: `MemoryStore` lowercased both sides of its comparison and
+   * `SqliteStore` lowercased only the query, and neither touched the value going in. A row written
+   * `Desk@Ardent.Example` was therefore findable in one store and invisible in the other.
+   *
+   * Asserting the STORED spelling rather than only the lookup is what makes this a test of the
+   * write. Under SQLite the stored value is what `sellers_email_key` and `buyers_email_key`
+   * compare, so a store that only normalised queries would let one business arrive twice — and the
+   * index, which is the backstop when two sign-ins race, cannot enforce a rule the values were not
+   * written under.
+   */
+  it('stores a seller address lowercased, whatever the caller typed', async () => {
+    const created = await store.insertSeller({ name: 'Ardent', email: '  Desk@Ardent.Example ' });
+
+    expect(created.email).toBe('desk@ardent.example');
+    expect((await store.getSellerByEmail('desk@ardent.example'))?.id).toBe(created.id);
+    expect((await store.getSellerByEmail('DESK@ARDENT.EXAMPLE'))?.id).toBe(created.id);
+  });
+
+  it('stores a buyer address lowercased, whatever the caller typed', async () => {
+    const created = await store.insertBuyer({ name: 'Ardent', email: '  Desk@Ardent.Example ' });
+
+    expect(created.email).toBe('desk@ardent.example');
+    expect((await store.getBuyerByEmail('desk@ardent.example'))?.id).toBe(created.id);
+    expect((await store.getBuyerByEmail('DESK@ARDENT.EXAMPLE'))?.id).toBe(created.id);
+  });
+
+  /**
+   * A customer is the third party keyed on an address, and `insertDebtor` had the same gap.
+   *
+   * `upsertDebtor` normalises and always did, so a debtor inserted with capitals is one whose
+   * rating accumulator a later upsert walks straight past — and that accumulator is what the whole
+   * curve prices off. Included here rather than left to the two identity tables because a rule
+   * maintained for two of three tables is the split this repo keeps paying for.
+   */
+  it('stores a customer address lowercased too, so an upsert finds it again', async () => {
+    const created = await store.insertDebtor({ name: 'Northwind', email: 'AP@Northwind.Example' });
+
+    expect(created.email).toBe('ap@northwind.example');
+    const upserted = await store.upsertDebtor({
+      name: 'Northwind Ltd',
+      email: 'ap@northwind.example',
+    });
+    expect(upserted.id).toBe(created.id);
+  });
+});
+
+describe('recording a wallet', () => {
+  it('fills a buyer address and leaves the other field alone', async () => {
+    const created = await store.insertBuyer({ name: 'Ardent', email: 'desk@ardent.example' });
+    expect(created.arcAddress).toBeNull();
+
+    const filled = await store.updateBuyerWallet(created.id, { arcAddress: '0xabc' });
+
+    expect(filled.arcAddress).toBe('0xabc');
+    expect(filled.hederaAccountId).toBeNull();
+  });
+
+  /*
+   * An absent key and a `null` one are different instructions — "this sign-in said nothing
+   * about a Hedera account" against "clear it" — and collapsing them would wipe a recorded
+   * address every time the other field was the one being filled.
+   */
+  it('skips a key the caller did not supply rather than nulling it', async () => {
+    const created = await store.insertBuyer({
+      name: 'Ardent',
+      email: 'desk@ardent.example',
+      hederaAccountId: '0.0.9001',
+    });
+
+    const after = await store.updateBuyerWallet(created.id, { arcAddress: '0xabc' });
+
+    expect(after.hederaAccountId).toBe('0.0.9001');
+  });
+
+  it('writes an explicit null, which is not the same as omitting the key', async () => {
+    const created = await store.insertBuyer({
+      name: 'Ardent',
+      email: 'desk@ardent.example',
+      hederaAccountId: '0.0.9001',
+    });
+
+    const after = await store.updateBuyerWallet(created.id, { hederaAccountId: null });
+
+    expect(after.hederaAccountId).toBeNull();
+  });
+
+  it('refuses a buyer that does not exist rather than inserting one', async () => {
+    await expect(
+      store.updateBuyerWallet(seedId('no-such-buyer'), { arcAddress: '0xabc' }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('refuses a seller that does not exist, the same way', async () => {
+    await expect(
+      store.updateSellerWallet(seedId('no-such-seller'), { arcAddress: '0xabc' }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  /*
+   * The in-memory store hands back copies. Without that a caller mutating a returned row
+   * would edit the table, and every test in this file that reads a row after a write would
+   * pass for the wrong reason.
+   */
+  it('hands back a copy rather than the stored row', async () => {
+    const created = await store.insertBuyer({ name: 'Ardent', email: 'desk@ardent.example' });
+    const returned = await store.updateBuyerWallet(created.id, { arcAddress: '0xabc' });
+
+    returned.arcAddress = '0xdeadbeef';
+
+    expect((await store.getBuyer(created.id))?.arcAddress).toBe('0xabc');
+  });
+});

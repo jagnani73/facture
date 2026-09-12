@@ -104,6 +104,7 @@ import type {
   WithdrawInput,
   WithdrawResult,
 } from './store.js';
+import { normaliseEmail } from './store.js';
 
 /**
  * SQLite reports a violated unique index and a violated primary key under two different
@@ -177,8 +178,20 @@ export class SqliteStore implements Store {
 
   // --- parties ------------------------------------------------------------------
 
+  /*
+   * The three inserts normalise `email` before the value reaches the column, and the lookups
+   * normalise before the comparison. Both halves are required and the write half is the one that
+   * matters: `sellers_email_key` and `buyers_email_key` compare stored bytes, so an unnormalised
+   * write slips a second row for one business past the index that was supposed to be the backstop.
+   * See `normaliseEmail` in `store.ts` for the full reasoning, including why `MemoryStore` and this
+   * store disagreed about it for as long as they did.
+   */
+
   async insertSeller(row: NewSellerRow): Promise<SellerRow> {
-    const [inserted] = await this.#db.insert(sellers).values(row).returning();
+    const [inserted] = await this.#db
+      .insert(sellers)
+      .values({ ...row, email: normaliseEmail(row.email) })
+      .returning();
     if (!inserted) throw new Error('insertSeller returned no row');
     return inserted;
   }
@@ -187,7 +200,7 @@ export class SqliteStore implements Store {
     const [row] = await this.#db
       .select()
       .from(sellers)
-      .where(eq(sellers.email, email.trim().toLowerCase()))
+      .where(eq(sellers.email, normaliseEmail(email)))
       .limit(1);
     return row ?? null;
   }
@@ -202,13 +215,22 @@ export class SqliteStore implements Store {
   }
 
   async insertBuyer(row: NewBuyerRow): Promise<BuyerRow> {
-    const [inserted] = await this.#db.insert(buyers).values(row).returning();
+    const [inserted] = await this.#db
+      .insert(buyers)
+      .values({ ...row, email: normaliseEmail(row.email) })
+      .returning();
     if (!inserted) throw new Error('insertBuyer returned no row');
     return inserted;
   }
 
   async insertDebtor(row: NewDebtorRow): Promise<DebtorRow> {
-    const [inserted] = await this.#db.insert(debtors).values(row).returning();
+    // `upsertDebtor` has always normalised; this path had not, which is the same defect one
+    // table over. `debtors.email` is the conflict target the upsert keys on, so a capitalised
+    // insert here is a customer whose rating accumulator a later upsert cannot find.
+    const [inserted] = await this.#db
+      .insert(debtors)
+      .values({ ...row, email: normaliseEmail(row.email) })
+      .returning();
     if (!inserted) throw new Error('insertDebtor returned no row');
     return inserted;
   }
@@ -223,8 +245,42 @@ export class SqliteStore implements Store {
     return row ?? null;
   }
 
+  async getBuyerByEmail(email: string): Promise<BuyerRow | null> {
+    const [row] = await this.#db
+      .select()
+      .from(buyers)
+      .where(eq(buyers.email, normaliseEmail(email)))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async updateBuyerWallet(
+    id: string,
+    wallet: { hederaAccountId?: string | null; arcAddress?: string | null },
+  ): Promise<BuyerRow> {
+    const [row] = await this.#db.update(buyers).set(wallet).where(eq(buyers.id, id)).returning();
+    if (!row) throw notFound(`Buyer ${id}`);
+    return row;
+  }
+
+  async updateSellerName(id: string, name: string): Promise<SellerRow> {
+    const [row] = await this.#db
+      .update(sellers)
+      .set({ name })
+      .where(eq(sellers.id, id))
+      .returning();
+    if (!row) throw notFound(`Seller ${id}`);
+    return row;
+  }
+
+  async updateBuyerName(id: string, name: string): Promise<BuyerRow> {
+    const [row] = await this.#db.update(buyers).set({ name }).where(eq(buyers.id, id)).returning();
+    if (!row) throw notFound(`Buyer ${id}`);
+    return row;
+  }
+
   async upsertDebtor(input: UpsertDebtorInput): Promise<DebtorRow> {
-    const email = input.email.trim().toLowerCase();
+    const email = normaliseEmail(input.email);
     const [row] = await this.#db
       .insert(debtors)
       .values({ name: input.name, email, taxId: input.taxId ?? null })

@@ -64,8 +64,8 @@ import {
   type VerifiedSeller,
 } from '../src/services/privy.js';
 import {
-  claimPolicySpec,
   createDisabledPrivyPolicyClient,
+  sellerWalletPolicySpec,
   setPrivyPolicyClient,
   type PolicyAttachment,
   type PrivyPolicyClient,
@@ -429,8 +429,16 @@ export function recordingPolicyClient(
     enabled: true,
     policyId,
     attached,
-    createClaimPolicy: (escrowAddress) =>
-      Promise.resolve({ policyId, body: claimPolicySpec(escrowAddress) }),
+    createWalletPolicy: (escrowAddress, partyRegistryAddress) =>
+      Promise.resolve({
+        policyId,
+        body: sellerWalletPolicySpec(escrowAddress, partyRegistryAddress),
+      }),
+    updateWalletPolicy: (escrowAddress, partyRegistryAddress) =>
+      Promise.resolve({
+        policyId,
+        body: sellerWalletPolicySpec(escrowAddress, partyRegistryAddress),
+      }),
     attach: (input) => {
       attached.push(input);
       if (options.throws !== undefined) return Promise.reject(new Error(options.throws));

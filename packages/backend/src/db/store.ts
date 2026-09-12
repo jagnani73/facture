@@ -45,6 +45,38 @@ import type {
   TradeRow,
 } from './schema.js';
 
+/**
+ * The one spelling of an email address this venue stores, indexes and compares.
+ *
+ * Email is identity on both sides of this market. `sellers_email_key` and `buyers_email_key` are
+ * unique indexes, and every sign-in is a lookup by address that has to land on the business that
+ * already exists rather than mint a second one beside it. So the address has to have exactly one
+ * spelling by the time it reaches the column — **normalising the query is not enough**, because a
+ * unique index compares the bytes that were stored.
+ *
+ * Both failures follow from that, and only one of them is a missed lookup:
+ *
+ * - A row written as `Desk@Ardent.Test` is not found by `desk@ardent.test`, because `eq` is a byte
+ *   comparison against what is actually in the column.
+ * - Worse, that row goes **past** the unique index that `desk@ardent.test` also fits behind. Two
+ *   rows for one desk: capital posted against one, the next sign-in landing on the other, and
+ *   nothing anywhere reporting a problem. `routes/buyers.ts` names that as the worst outcome its
+ *   idempotency exists to prevent, and the index underneath it is what holds when two sign-ins
+ *   race — an index cannot enforce a rule the values were not written under.
+ *
+ * The rule lives here, once, for the reason `units.ts` exists: a rule only one caller can find is
+ * one the next caller gets wrong. It already had: `MemoryStore` lowercased **both** sides of its
+ * comparison while `SqliteStore` lowercased only the query, and neither normalised the write — so
+ * a mixed-case row was findable in one store and invisible in the other, and the parity suite
+ * could not see it because every fixture inserted an address that was already lowercase.
+ *
+ * RFC 5321 does leave the local part case-sensitive, so this is a deliberate narrowing rather than
+ * a tidy-up. No provider a business here uses treats `Desk@` and `desk@` as two mailboxes, and
+ * honouring the letter of the spec would mean one company arriving twice — which is a real harm
+ * traded against a distinction nobody makes.
+ */
+export const normaliseEmail = (email: string): string => email.trim().toLowerCase();
+
 export type InvoiceStatusValue = InvoiceRow['status'];
 export type RatingValue = DebtorRow['rating'];
 export type MandateStatusValue = MandateRow['status'];
@@ -193,12 +225,22 @@ export type DebtorExposureMap = ReadonlyMap<string, Readonly<Record<string, Mino
 export interface Store {
   // --- parties ------------------------------------------------------------------
   /*
-   * `insertBuyer` still has no route behind it — a funder is onboarded by hand and stated
-   * as such. Sellers now have one: `POST /v1/sellers`, which is how a wallet made from an
-   * email address gets recorded against the business it belongs to. These exist so
-   * `seed.ts` can fill either implementation from one script, and so a party can be created
-   * with its accumulator intact rather than only through `upsertDebtor`, which deliberately
-   * refuses to touch a rating.
+   * Both sides of the market are onboarded through a route now: `POST /v1/sellers` and
+   * `POST /v1/buyers`, each of which records the wallet made from a verified email address
+   * against the business it belongs to. `insertBuyer` used to be the exception — a funder
+   * arrived by hand, and the comment here said so — which meant the two halves of the same
+   * product claim were true of one actor and not the other.
+   *
+   * These still exist as store methods rather than as route-private helpers so `seed.ts` can
+   * fill either implementation from one script, and so a party can be created with its
+   * accumulator intact rather than only through `upsertDebtor`, which deliberately refuses
+   * to touch a rating.
+   *
+   * **All three normalise `email` through {@link normaliseEmail} before the row is stored**, and
+   * the returned row carries the normalised spelling rather than what the caller passed. That
+   * belongs here rather than in the routes because the routes are not the only writers — `seed.ts`
+   * is one, and a party created by a script that happened to capitalise an address would sit
+   * behind the unique index under a spelling no sign-in could ever produce.
    */
   insertSeller(row: NewSellerRow): Promise<SellerRow>;
   insertBuyer(row: NewBuyerRow): Promise<BuyerRow>;
@@ -207,8 +249,12 @@ export interface Store {
   /**
    * By email, which is the seller's identity rather than a convenience lookup: the column
    * carries a unique index, and signing in with an email address is the only way a seller
-   * is identified at all. Normalised the way `upsertDebtor` normalises — trimmed and
-   * lowercased — so `Ada@example.com` and `ada@example.com` cannot become two businesses.
+   * is identified at all.
+   *
+   * Both ends go through {@link normaliseEmail} — `insertSeller` before the row reaches the
+   * column, and this query before the comparison — so `Ada@example.com` and `ada@example.com`
+   * cannot become two businesses. Normalising here alone would only have hidden the write
+   * side of that; see {@link normaliseEmail}.
    */
   getSellerByEmail(email: string): Promise<SellerRow | null>;
   /**
@@ -223,6 +269,49 @@ export interface Store {
     wallet: { hederaAccountId?: string | null; arcAddress?: string | null },
   ): Promise<SellerRow>;
   getBuyer(id: string): Promise<BuyerRow | null>;
+  /**
+   * The buyer's equivalent of {@link getSellerByEmail}, and normalised identically.
+   *
+   * `buyers.email` carries its own unique index (`buyers_email_key`), so the same rule
+   * applies for the same reason: a funding desk signing in from a second device must reach
+   * the mandates it already posted rather than an empty book beside them. Normalised on the
+   * way in by `insertBuyer` and on the way out here, so `Desk@Harrowpoint.example` and
+   * `desk@harrowpoint.example` cannot become two desks with the same capital claimed twice.
+   */
+  getBuyerByEmail(email: string): Promise<BuyerRow | null>;
+  /**
+   * Record the wallet addresses for a buyer that had none.
+   *
+   * Not an overwrite, exactly as `updateSellerWallet` is not. The asymmetry worth naming is
+   * what the address is FOR on each side: a seller's is where money is sent, a buyer's is
+   * where money is drawn from — `MandateVault.deposit` pulls from `msg.sender`, and
+   * `ArcEscrow.buyerOf` binds a mandate to one address permanently. So a silently rebound
+   * buyer address is a mandate whose capital was posted by an address the venue no longer
+   * has on file, which reads as an unfunded mandate rather than as a rebind.
+   */
+  updateBuyerWallet(
+    id: string,
+    wallet: { hederaAccountId?: string | null; arcAddress?: string | null },
+  ): Promise<BuyerRow>;
+  /**
+   * Rename a party to what they signed for themselves.
+   *
+   * The pair that closes the provisional-name gap. `provisionalName` turns an email domain into a
+   * label — `ada@meridian-fabrication.example` becomes "Meridian Fabrication" — because Privy
+   * cannot know what a business is called and the venue requires something. That was tolerable
+   * only while no screen rendered it, and it is a guess either way.
+   *
+   * These are how a guess is replaced by a statement. `POST /v1/parties/me` calls one or both after
+   * relaying an EIP-712 profile the party's own key signed, so the name stored here is the name on
+   * `PartyRegistry` and a counterparty can read it without asking us.
+   *
+   * **Unlike the wallet setters, these ARE overwrites, and that asymmetry is the point.** An
+   * address is where money goes and a silent rebind misdirects it; a name is a label, its authority
+   * is the signature behind it, and a business that changes what it is called must be able to say
+   * so. Nothing downstream keys on it — every route is scoped by UUID.
+   */
+  updateSellerName(id: string, name: string): Promise<SellerRow>;
+  updateBuyerName(id: string, name: string): Promise<BuyerRow>;
   /** Ratings are per debtor, so an existing email is reused rather than duplicated. */
   upsertDebtor(input: UpsertDebtorInput): Promise<DebtorRow>;
   getDebtor(id: string): Promise<DebtorRow | null>;

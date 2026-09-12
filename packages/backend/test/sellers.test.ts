@@ -214,8 +214,9 @@ describe('POST /v1/sellers — the credential', () => {
 /**
  * The Privy control, from the route's side.
  *
- * The policy is what makes the seller's key a key that can only collect — see
- * `test/privy-policy.test.ts` for what it says. What matters here is the other half:
+ * The policy is what makes the seller's key a key that can only collect a payout and sign a
+ * profile — see `test/privy-policy.test.ts` for what it says. What matters here is the other
+ * half:
  * scoping a wallet is a call to a third party, and a third party being unavailable must
  * not stop a business opening a book. That is the same rule `publishRefusals` follows, and
  * it is easy to lose, because the natural way to write the call is a bare `await`.

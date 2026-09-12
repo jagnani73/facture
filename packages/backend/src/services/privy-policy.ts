@@ -1,35 +1,57 @@
 /**
- * The one Privy control this venue actually needs: the seller's wallet may claim, and
- * nothing else.
+ * The Privy control on a seller's wallet: two named permissions, and nothing else.
  *
  * `services/privy.ts` turns an identity token into a verified seller, and that is
  * onboarding — it proves who signed in and records where they expect to be paid. It is not
  * a *control*: an email and an address constrain nothing about what the key can later be
  * asked to sign. This module is the constraint.
  *
- * ## What the seller's key is for, and why that is a small enough surface to name
+ * ## What the seller's key is for, and why that surface is still small enough to name
  *
  * A seller signs nothing to sell. The venue holds the paper, places the hold, and settles
- * both legs — CLAUDE.md draws that boundary and it has not moved. The single exception is
- * collection: an Arc-rail sale opens a `DvpEscrow` lock, and `claim` checks
- * `msg.sender == beneficiary`, so the venue cannot collect for a seller even while holding
- * the public preimage. The key Privy made at sign-in is the only one that can.
+ * both legs — CLAUDE.md draws that boundary and it has not moved. Two things fall outside
+ * it, and together they are the whole of what this policy allows:
  *
- * So the whole legitimate surface of that key is **one function, on one contract, on one
- * chain**. A policy that says exactly that is not a decoration bolted on for a prize
- * requirement; it is the honest description of a wallet that does one thing. The web app
- * confirms the shape from the other end: `privy-provider.tsx` declares Arc and only Arc,
- * and `claim-payout.tsx` is the only place any Privy signer is invoked at all.
+ *  1. **Collecting.** An Arc-rail sale opens a `DvpEscrow` lock, and `claim` checks
+ *     `msg.sender == beneficiary`, so the venue cannot collect for a seller even while
+ *     holding the public preimage. The key Privy made at sign-in is the only one that can.
+ *     One function, on one contract, on Arc.
+ *  2. **Saying who they are.** `PartyRegistry` on Hedera stores what each address says
+ *     about itself, and it stores only what that address's own key signed. A party holds no
+ *     HBAR and needs none: they sign an EIP-712 `ProfileUpdate`, the venue relays it and
+ *     pays the gas. One typed-data domain, on one contract, on Hedera.
  *
- * ## Deny is the default, which is the reason to be careful rather than to be broad
+ * **The second permission is a signature, never a transaction, and the contract is what
+ * makes it safe to grant.** `PartyRegistry` writes whichever address the signature recovers
+ * to, so a key holding this permission can only ever author its *own* record — not the
+ * venue's, which merely relays, and not a stranger's. There is therefore nothing to scope
+ * about the message contents; what is worth scoping is *which registry on which chain*, and
+ * that is precisely what the EIP-712 domain carries.
  *
- * Privy evaluates rules and denies anything no rule allowed. That cuts the right way here —
- * an over-narrow rule cannot silently widen the key — but it cuts hard: a condition whose
- * encoding does not match what Privy decodes evaluates false, no rule allows the request,
- * and **the seller cannot collect their money**. A policy that matches nothing is worse
- * than no policy, which is why every condition below is one this repo can point at a
- * decoded field for, and why nothing here degrades quietly when the API refuses a
- * condition. A refused create is loud, at provisioning time, in the operator's hands.
+ * So the surface is two things, on two contracts, on two chains — and this header said "one
+ * function, on one contract, on one chain" until 2026-09-12. It is corrected rather than
+ * deleted, because a policy whose description is out of date is a policy nobody can tell the
+ * scope of, which is the same failure as no policy at all. Only the first of the two is a
+ * transaction, which is why the web app declares Arc and only Arc: a typed-data signature is
+ * produced locally against the domain's own `chainId` and is never broadcast, so signing for
+ * Hedera needs no Hedera chain declared to Privy.
+ *
+ * ## Deny is the default, so a rule is what makes an action possible at all
+ *
+ * Privy evaluates rules and denies anything no rule allowed — its own documentation is
+ * explicit that a policy "must include rules for all intended RPC methods and wallet
+ * actions; otherwise, usage will be denied". **The `eth_signTypedData_v4` rule is therefore
+ * not a loosening of the `eth_sendTransaction` one. Without it, a seller carrying this
+ * policy cannot sign a profile at all** — and that failure is silent at the wallet, with no
+ * revert and no transaction anywhere to read.
+ *
+ * The default cuts the right way — an over-narrow rule cannot silently widen the key — but
+ * it cuts hard: a condition whose encoding does not match what Privy decodes evaluates
+ * false, no rule allows the request, and **the seller cannot collect their money, or cannot
+ * say who they are**. A policy that matches nothing is worse than no policy, which is why
+ * every condition below is one this repo can point at a decoded field for, and why nothing
+ * here degrades quietly when the API refuses a condition. A refused create is loud, at
+ * provisioning time, in the operator's hands.
  *
  * ## Why REST rather than `walletApi.createPolicy`
  *
@@ -54,14 +76,22 @@
  * {@link CLAIM_POLICY_CHAIN_SCOPED} exists because the two sources above disagree and this
  * module cannot settle it without spending a real API call. The documentation says
  * `chain_id` is a condition field; the shipped validator says it is not. If the live API
- * still validates against the older schema, {@link createClaimPolicy} fails with Privy's own
- * 400 and the operator sees it. That is the outcome to want. The alternative — retrying
- * without the chain condition — would quietly publish a policy broader than the one this
- * file describes, and a control nobody can trust the scope of is not a control.
+ * still validates against the older schema, {@link PrivyPolicyClient.createWalletPolicy}
+ * fails with Privy's own 400 and the operator sees it. That is the outcome to want. The
+ * alternative — retrying without the chain condition — would quietly publish a policy
+ * broader than the one this file describes, and a control nobody can trust the scope of is
+ * not a control.
+ *
+ * That constant governs the `ethereum_transaction` field only, and deliberately does not
+ * reach the signing rule. `ethereum_typed_data_domain` is a different field source, with
+ * `chainId` and `verifyingContract` documented and given a worked example; nothing about the
+ * stale `ethereum_transaction` schema says anything about it, and folding the two under one
+ * flag would drop a condition that is not in doubt.
  */
 
 import { createHash } from 'node:crypto';
-import { arc } from '../chain.js';
+import { HEDERA_DEPLOYMENTS } from '@facture/shared';
+import { arc, hedera } from '../chain.js';
 import { badRequest } from '../errors.js';
 import type { Logger } from '../logger.js';
 import { rootLogger } from '../logger.js';
@@ -104,11 +134,24 @@ export const CLAIM_SELECTOR = '0x84cc9dfb';
  */
 export const CLAIM_POLICY_CHAIN_SCOPED = true;
 
-/** Privy caps a policy name at 50 characters. */
-export const CLAIM_POLICY_NAME = 'Facture seller payout claim';
+/**
+ * Privy caps a policy name at 50 characters.
+ *
+ * Named for the wallet rather than for the call, because it stopped being one call on
+ * 2026-09-12 and a policy called "payout claim" that also permits signing is a name that
+ * lies about its own scope.
+ */
+export const WALLET_POLICY_NAME = 'Facture seller wallet';
 
 export interface PolicyCondition {
-  field_source: 'ethereum_transaction' | 'ethereum_calldata';
+  /**
+   * Which decoded view of the request the condition reads.
+   *
+   * `ethereum_typed_data_domain` is the EIP-712 domain of an `eth_signTypedData_v4` request —
+   * `chainId` and `verifyingContract` — and it is the only source that means anything for a
+   * signature, there being no `to` and no calldata to decode.
+   */
+  field_source: 'ethereum_transaction' | 'ethereum_calldata' | 'ethereum_typed_data_domain';
   field: string;
   operator: 'eq' | 'in';
   value: string | string[];
@@ -117,7 +160,11 @@ export interface PolicyCondition {
 
 export interface PolicyRule {
   name: string;
-  method: 'eth_sendTransaction';
+  /**
+   * The RPC method this rule allows. Privy denies any method no rule names, so this union is
+   * the exhaustive list of what a seller's key can be asked to do at all.
+   */
+  method: 'eth_sendTransaction' | 'eth_signTypedData_v4';
   action: 'ALLOW' | 'DENY';
   conditions: PolicyCondition[];
 }
@@ -132,11 +179,14 @@ export interface PolicyBody {
 /**
  * The policy, as a value, so a test can read it without a network.
  *
- * The escrow address is a parameter rather than a literal because there is exactly one
- * authority on where a payout lands and it is the vault's own `paymentEscrow()` immutable —
- * `services/arc.ts` reads it and explains at length why a second copy in configuration could
- * only ever disagree. {@link provisionClaimPolicy} is what joins the two; nothing in this
- * module invents an address.
+ * Both addresses are parameters rather than literals, for the same reason and by the same
+ * rule: **nothing in this module invents an address.** The escrow has exactly one authority
+ * and it is the vault's own `paymentEscrow()` immutable — `services/arc.ts` reads it and
+ * explains at length why a second copy in configuration could only ever disagree. The party
+ * registry's authority is the pin in `@facture/shared`, which is where every other package
+ * reads it from. {@link provisionWalletPolicy} is what joins them to this spec.
+ *
+ * ## Rule one: claim a payout, on Arc
  *
  * Three conditions, and each is one Privy decodes from the request rather than one this
  * venue asserts:
@@ -155,9 +205,30 @@ export interface PolicyBody {
  * decoded field it has seen. A condition that might be compared as `'0'` against `'0x0'` is
  * a coin flip on whether the seller can be paid, bought for a guarantee the contract
  * already makes.
+ *
+ * ## Rule two: sign a profile, for the registry on Hedera
+ *
+ * Two conditions, both read out of the EIP-712 domain the wallet was handed:
+ *
+ *  - `chainId` — Hedera testnet, from the shared chain table, decimal as a string. The same
+ *    trap as the transaction rule's: `eip155:296` is CAIP-2 and belongs to a different field.
+ *  - `verifyingContract` — the party registry, **lowercased**. `partyRegistryDomain` in
+ *    `@facture/shared` lowercases the address it builds the domain from and its comment says
+ *    why: EIP-712 hex-decodes an address, so case cannot move the digest, but Privy compares
+ *    this one as a *string*. A checksummed domain against a lowercased rule — or the reverse
+ *    — is a seller who simply cannot sign, failing at the wallet with nothing to read.
+ *
+ * Deliberately **no** condition on the message itself. The registry writes whoever the
+ * signature recovers to, so a condition on `party` could only ever restate a guarantee the
+ * contract already enforces — and it would be a third encoding to get wrong, in a place
+ * where getting it wrong denies silently. The rule that buys nothing and can still match
+ * nothing is the worst trade available here.
  */
-export function claimPolicySpec(escrowAddress: string): PolicyBody {
-  const conditions: PolicyCondition[] = [
+export function sellerWalletPolicySpec(
+  escrowAddress: string,
+  partyRegistryAddress: string,
+): PolicyBody {
+  const claimConditions: PolicyCondition[] = [
     {
       field_source: 'ethereum_transaction',
       field: 'to',
@@ -167,7 +238,7 @@ export function claimPolicySpec(escrowAddress: string): PolicyBody {
   ];
 
   if (CLAIM_POLICY_CHAIN_SCOPED) {
-    conditions.push({
+    claimConditions.push({
       field_source: 'ethereum_transaction',
       field: 'chain_id',
       operator: 'eq',
@@ -176,7 +247,7 @@ export function claimPolicySpec(escrowAddress: string): PolicyBody {
     });
   }
 
-  conditions.push({
+  claimConditions.push({
     field_source: 'ethereum_calldata',
     field: 'function_name',
     operator: 'eq',
@@ -185,7 +256,7 @@ export function claimPolicySpec(escrowAddress: string): PolicyBody {
   });
 
   return {
-    name: CLAIM_POLICY_NAME,
+    name: WALLET_POLICY_NAME,
     version: '1.0',
     chain_type: 'ethereum',
     rules: [
@@ -193,7 +264,26 @@ export function claimPolicySpec(escrowAddress: string): PolicyBody {
         name: 'Claim a DvpEscrow payout lock',
         method: 'eth_sendTransaction',
         action: 'ALLOW',
-        conditions,
+        conditions: claimConditions,
+      },
+      {
+        name: 'Sign a PartyRegistry profile update',
+        method: 'eth_signTypedData_v4',
+        action: 'ALLOW',
+        conditions: [
+          {
+            field_source: 'ethereum_typed_data_domain',
+            field: 'chainId',
+            operator: 'eq',
+            value: String(hedera.chainId),
+          },
+          {
+            field_source: 'ethereum_typed_data_domain',
+            field: 'verifyingContract',
+            operator: 'eq',
+            value: partyRegistryAddress.toLowerCase(),
+          },
+        ],
       },
     ],
   };
@@ -217,8 +307,22 @@ export interface PrivyPolicyClient {
   readonly enabled: boolean;
   /** The policy every seller's wallet is scoped by, or null when disabled. */
   readonly policyId: string | null;
-  /** Creates the policy. An operator action — see {@link provisionClaimPolicy}. */
-  createClaimPolicy(escrowAddress: string): Promise<{ policyId: string; body: PolicyBody }>;
+  /** Creates the policy. An operator action — see {@link provisionWalletPolicy}. */
+  createWalletPolicy(
+    escrowAddress: string,
+    partyRegistryAddress: string,
+  ): Promise<{ policyId: string; body: PolicyBody }>;
+  /**
+   * Rewrites the pinned policy in place. The migration path — see {@link syncWalletPolicy}.
+   *
+   * Separate from {@link createWalletPolicy} rather than an upsert, because the two are
+   * different acts with different risks: one mints an object nothing is carrying yet, the
+   * other changes what every wallet already carrying this id is permitted to do.
+   */
+  updateWalletPolicy(
+    escrowAddress: string,
+    partyRegistryAddress: string,
+  ): Promise<{ policyId: string; body: PolicyBody }>;
   /** Puts {@link policyId} on a wallet, reading first so a returning seller writes nothing. */
   attach(input: {
     walletId: string | null;
@@ -256,16 +360,19 @@ export const POLICY_NOT_CONFIGURED =
  * published and then contradicted by what the code actually did.
  */
 export function createDisabledPrivyPolicyClient(): PrivyPolicyClient {
+  const noCredentials = (verb: string): Promise<never> =>
+    Promise.reject(
+      badRequest(
+        `${verb} the seller wallet policy needs Privy credentials. PRIVY_APP_ID and ` +
+          'PRIVY_APP_SECRET are not set, so wallet policies are disabled on this deployment.',
+      ),
+    );
+
   return {
     enabled: false,
     policyId: null,
-    createClaimPolicy: () =>
-      Promise.reject(
-        badRequest(
-          'Creating the claim policy needs Privy credentials. PRIVY_APP_ID and ' +
-            'PRIVY_APP_SECRET are not set, so wallet policies are disabled on this deployment.',
-        ),
-      ),
+    createWalletPolicy: () => noCredentials('Creating'),
+    updateWalletPolicy: () => noCredentials('Updating'),
     attach: () => Promise.resolve({ attached: false, reason: POLICY_NOT_CONFIGURED }),
   };
 }
@@ -277,10 +384,10 @@ export function createDisabledPrivyPolicyClient(): PrivyPolicyClient {
  * The policy has to exist before its id can be pinned, so a client that refused to do
  * anything without an id could never create the one it needs — the venue would be asking
  * the operator to produce a Privy policy by hand from a JSON body kept in this file, which
- * is exactly the second source of truth {@link claimPolicySpec} exists to avoid. So
- * `createClaimPolicy` needs credentials, `attach` needs credentials **and** an id, and
- * `enabled` describes the second: it is the answer to "is a seller's wallet scoped", not to
- * "can this process reach Privy".
+ * is exactly the second source of truth {@link sellerWalletPolicySpec} exists to avoid. So
+ * `createWalletPolicy` needs credentials, `attach` and `updateWalletPolicy` need credentials
+ * **and** an id, and `enabled` describes the second: it is the answer to "is a seller's
+ * wallet scoped", not to "can this process reach Privy".
  *
  * The dangerous half of the pair is an id with no credentials. It reads, in a `.env`,
  * exactly like a deployment with the control switched on, and it can never attach anything —
@@ -355,8 +462,8 @@ export function createPrivyPolicyClient(config: PrivyPolicyConfig): PrivyPolicyC
     enabled: policyId !== null,
     policyId,
 
-    async createClaimPolicy(escrowAddress) {
-      const body = claimPolicySpec(escrowAddress);
+    async createWalletPolicy(escrowAddress, partyRegistryAddress) {
+      const body = sellerWalletPolicySpec(escrowAddress, partyRegistryAddress);
       /*
        * A stable key, so a retry inside Privy's 24-hour window returns the policy the first
        * attempt made rather than minting a second one. It is derived from the body, so a
@@ -368,8 +475,53 @@ export function createPrivyPolicyClient(config: PrivyPolicyConfig): PrivyPolicyC
       if (typeof id !== 'string' || id === '') {
         throw new Error('Privy accepted the policy but returned no id.');
       }
-      log.info('claim policy created', { policyId: id, escrowAddress });
+      log.info('seller wallet policy created', {
+        policyId: id,
+        escrowAddress,
+        partyRegistryAddress,
+      });
       return { policyId: id, body };
+    },
+
+    async updateWalletPolicy(escrowAddress, partyRegistryAddress) {
+      if (policyId === null) {
+        throw badRequest(
+          'There is no pinned policy to update. PRIVY_WALLET_POLICY_ID is not set, so this ' +
+            'deployment has nothing to bring up to date — create one first.',
+        );
+      }
+
+      const body = sellerWalletPolicySpec(escrowAddress, partyRegistryAddress);
+      /*
+       * `name` and `rules` only — **not** the whole body, and this was learned from the live API
+       * rather than reasoned out.
+       *
+       * The first version sent the entire spec, on the reasoning that a subset would be a second,
+       * shorter description of the policy living beside the spec. Privy refused it outright:
+       *
+       *     400 [Input error] Unrecognized key(s) in object: 'version', 'chain_type'
+       *
+       * Those two are create-time facts about a policy — which schema it is written against, and
+       * which chain family it governs — and neither is a thing an update may change. So the update
+       * surface is genuinely narrower than the create surface, and pretending otherwise is a call
+       * that always fails. The subset is derived from the same spec object rather than assembled,
+       * so the drift the original comment worried about still cannot happen: there is one
+       * description, and this sends the mutable part of it.
+       *
+       * No idempotency key, and the asymmetry with create is the point: a POST mints a new object
+       * per call and needs one, while writing a known body to a known id is already idempotent by
+       * construction. Running this twice leaves exactly one policy saying exactly one thing.
+       */
+      await request('PATCH', `/v1/policies/${policyId}`, {
+        name: body.name,
+        rules: body.rules,
+      });
+      log.info('seller wallet policy updated', {
+        policyId,
+        escrowAddress,
+        partyRegistryAddress,
+      });
+      return { policyId, body };
     },
 
     async attach({ walletId, walletAddress }) {
@@ -499,7 +651,7 @@ export function getPrivyPolicyClient(): PrivyPolicyClient {
  * escrowed when nothing had checked; an unread field is a claim waiting to be made falsely.
  * When a screen needs this, the screen is what should ask for it.
  */
-export async function attachClaimPolicy(
+export async function attachWalletPolicy(
   input: { walletId: string | null; walletAddress: string | null },
   logger: Logger = rootLogger,
 ): Promise<PolicyAttachment> {
@@ -511,7 +663,7 @@ export async function attachClaimPolicy(
   try {
     const result = await policies.attach(input);
     if (result.attached) {
-      log.info('seller wallet scoped to the claim policy', {
+      log.info('seller wallet scoped to the wallet policy', {
         walletId: result.walletId,
         policyId: result.policyId,
         alreadyHeld: result.alreadyHeld,
@@ -528,7 +680,7 @@ export async function attachClaimPolicy(
 }
 
 /**
- * Create the policy, against the escrow the vault itself names.
+ * Create the policy, against the escrow the vault itself names and the registry shared pins.
  *
  * An operator action rather than something a sign-in triggers, and that is the whole of the
  * idempotency story: policy names carry no uniqueness constraint at Privy, so a venue that
@@ -536,14 +688,40 @@ export async function attachClaimPolicy(
  * tell which of them a wallet was carrying. One policy, created once, pinned in
  * `PRIVY_WALLET_POLICY_ID`.
  *
- * It needs the Arc vault, because the address it scopes to is the vault's own
- * `paymentEscrow()` immutable and there is nowhere else honest to read it from. Provision
- * with `PRIVY_APP_ID` and `PRIVY_APP_SECRET` set, put the id it
- * returns into `PRIVY_WALLET_POLICY_ID`, and restart.
+ * It needs the Arc vault, because the address the claim rule scopes to is the vault's own
+ * `paymentEscrow()` immutable and there is nowhere else honest to read it from. The party
+ * registry comes from `HEDERA_DEPLOYMENTS`, which is the pin every other package already
+ * reads — a literal here would be the two-names-for-one-contract defect the env audit closed.
+ * Provision with `PRIVY_APP_ID` and `PRIVY_APP_SECRET` set, put the id it returns into
+ * `PRIVY_WALLET_POLICY_ID`, and restart.
  */
-export async function provisionClaimPolicy(): Promise<{ policyId: string; body: PolicyBody }> {
+export async function provisionWalletPolicy(): Promise<{ policyId: string; body: PolicyBody }> {
   const escrowAddress = await getArcEscrow().escrowAddress();
-  return getPrivyPolicyClient().createClaimPolicy(escrowAddress);
+  return getPrivyPolicyClient().createWalletPolicy(escrowAddress, HEDERA_DEPLOYMENTS.partyRegistry);
+}
+
+/**
+ * Bring the pinned policy up to the spec above. The migration path, and it has to exist.
+ *
+ * A deployment pinned its `PRIVY_WALLET_POLICY_ID` from a body that had one rule, because
+ * that is all the body had until 2026-09-12. Privy denies what no rule allowed, so every
+ * wallet carrying that policy **cannot sign a profile** — not as a degraded experience but
+ * as a refusal at the wallet with nothing to read. Widening the spec in this file does
+ * nothing on its own: the policy object at Privy is what a wallet is evaluated against, and
+ * it does not change because a source file did.
+ *
+ * **Creating a fresh policy instead would be worse than doing nothing.** A new policy is a
+ * new id, so every wallet already provisioned goes on carrying the stale one, and the venue
+ * ends up with two policies and no way to say which a given seller is under — the exact
+ * state {@link provisionWalletPolicy}'s idempotency key exists to prevent. Nor is there an
+ * additive option: **Privy supports only one policy per wallet**, so a second policy cannot
+ * sit alongside the first and grant the missing rule. Rewriting the one that is pinned is
+ * the only move, and it reaches every wallet at once because the id never changes — which
+ * also means no re-attach and no second sign-in.
+ */
+export async function syncWalletPolicy(): Promise<{ policyId: string; body: PolicyBody }> {
+  const escrowAddress = await getArcEscrow().escrowAddress();
+  return getPrivyPolicyClient().updateWalletPolicy(escrowAddress, HEDERA_DEPLOYMENTS.partyRegistry);
 }
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));

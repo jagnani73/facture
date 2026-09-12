@@ -22,6 +22,7 @@ import { initArcEscrow } from './services/arc.js';
 import { initHcsPublisher } from './services/hcs.js';
 import { initIndexer } from './services/indexer.js';
 import { initInvoiceRegistry } from './services/invoice-registry.js';
+import { initPartyRegistry } from './services/party-registry.js';
 import { initUniquenessRegistry } from './services/uniqueness.js';
 import { initPrivyPolicyClient } from './services/privy-policy.js';
 import { initPrivyVerifier } from './services/privy.js';
@@ -164,6 +165,16 @@ function boot(): void {
     logger: log,
   });
 
+  /*
+   * The party registry. The operator key pays here and authors nothing: every record is written to
+   * whichever address the EIP-712 signature recovers to, so this key relays and cannot forge.
+   */
+  initPartyRegistry({
+    registryAddress: HEDERA_DEPLOYMENTS.partyRegistry,
+    operatorKey: env.HEDERA_OPERATOR_KEY,
+    logger: log,
+  });
+
   initIndexer(log);
 
   initIssuanceQueue({
@@ -203,14 +214,17 @@ function boot(): void {
     log.error('could not resume queued issuance', { err });
   });
 
-  const server = serve({ fetch: createApp().fetch, port: env.PORT, hostname: LISTEN_HOST }, (info) => {
-    log.info('listening', {
-      port: info.port,
-      arcChainId: chain.arc.chainId,
-      hederaNetwork: chain.hedera.network,
-      facilitator: env.X402_FACILITATOR_URL,
-    });
-  });
+  const server = serve(
+    { fetch: createApp().fetch, port: env.PORT, hostname: LISTEN_HOST },
+    (info) => {
+      log.info('listening', {
+        port: info.port,
+        arcChainId: chain.arc.chainId,
+        hederaNetwork: chain.hedera.network,
+        facilitator: env.X402_FACILITATOR_URL,
+      });
+    },
+  );
 
   const shutdown = (signal: string): void => {
     log.info('shutting down', { signal });

@@ -138,7 +138,9 @@ export const envSchema = z
      * It is an id rather than a body because Privy puts no uniqueness constraint on a
      * policy name, so a venue that created its policy on demand would mint a fresh one per
      * restart and be unable to say which one a wallet carried. The policy is created once by
-     * `provisionClaimPolicy()` and pinned here.
+     * `provisionWalletPolicy()` and pinned here; when the spec gains a rule, the pinned
+     * policy is rewritten in place by `syncWalletPolicy()` rather than replaced, because a
+     * new id would leave every wallet already provisioned carrying the old body.
      */
     PRIVY_WALLET_POLICY_ID: z.string().min(1).optional(),
     /**

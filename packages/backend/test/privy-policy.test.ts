@@ -5,67 +5,88 @@
  * asked to sign. This is the constraint, and what these tests guard is the one way it fails
  * silently: **a policy that looks right and matches nothing.** Privy denies by default, so a
  * rule whose conditions never match does not leave the wallet permissive — it stops the
- * seller collecting money that is already bound to their address on chain. Both directions
- * are bad and neither raises anything at the time it is configured.
+ * seller collecting money that is already bound to their address on chain, or signing the
+ * profile the venue is waiting to relay. Both directions are bad and neither raises anything
+ * at the time it is configured.
  *
- * So the assertions below are mostly about the body: that it names the escrow the vault
- * itself reports, the Arc chain id, and the one function this key exists to call — rather
- * than being an allow-all that would satisfy a checkbox and protect nobody.
+ * Deny-by-default has a second edge, and it is the reason the second rule exists at all: a
+ * method no rule names is a method the wallet **cannot use**. So `eth_signTypedData_v4` is
+ * asserted by name below. Its absence would not be a narrower policy, it would be a seller
+ * who cannot say who they are, failing at the wallet with no revert to read.
+ *
+ * So the assertions here are mostly about the body: that it names the escrow the vault itself
+ * reports, the registry shared pins, the two chains, and the one function this key exists to
+ * call — rather than being an allow-all that would satisfy a checkbox and protect nobody.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { HEDERA_DEPLOYMENTS } from '@facture/shared';
 import { parseEnv } from '../src/env.js';
 import { createLogger } from '../src/logger.js';
+import { setArcEscrow } from '../src/services/arc.js';
 import {
-  attachClaimPolicy,
+  attachWalletPolicy,
   CLAIM_ABI,
-  CLAIM_POLICY_NAME,
-  claimPolicySpec,
   createDisabledPrivyPolicyClient,
   createPrivyPolicyClient,
   POLICY_NOT_CONFIGURED,
+  provisionWalletPolicy,
+  sellerWalletPolicySpec,
   setPrivyPolicyClient,
+  syncWalletPolicy,
+  WALLET_POLICY_NAME,
   type PolicyBody,
+  type PolicyRule,
 } from '../src/services/privy-policy.js';
-import { arc } from '../src/chain.js';
-import { TEST_ENV } from './helpers.js';
+import { arc, hedera } from '../src/chain.js';
+import { fakeArcEscrow, recordingPolicyClient, TEST_ENV } from './helpers.js';
 
 const ESCROW = '0x7B1e1F0A5e8B2D4c9A3f6E0b8C2d1A4F5e6B7c8D';
+/** Checksummed on purpose: the lowercasing is what the signing rule turns on. */
+const REGISTRY = '0x1C9882714e1ae2555531E1a7eb4E83EBeCA8B2ca';
 const APP = { appId: 'app-id', appSecret: 'app-secret' };
 const silent = createLogger('error', { svc: 'test' });
 
-const ruleOf = (body: PolicyBody) => {
-  const rule = body.rules[0];
-  if (rule === undefined) throw new Error('the policy carries no rule at all');
+const spec = () => sellerWalletPolicySpec(ESCROW, REGISTRY);
+
+/**
+ * Selected by method, never by position.
+ *
+ * The body carries a rule per RPC method the key may use, and `rules[0]` would quietly
+ * become the wrong rule the next time one is added — which is the reading that would let a
+ * missing `eth_signTypedData_v4` rule pass every assertion below.
+ */
+const ruleOf = (body: PolicyBody, method: PolicyRule['method']) => {
+  const rule = body.rules.find((r) => r.method === method);
+  if (rule === undefined) throw new Error(`the policy carries no rule for ${method}`);
   return rule;
 };
 
-const conditionOn = (body: PolicyBody, field: string) =>
-  ruleOf(body).conditions.find((c) => c.field === field);
+const conditionOn = (body: PolicyBody, method: PolicyRule['method'], field: string) =>
+  ruleOf(body, method).conditions.find((c) => c.field === field);
 
-describe('the claim policy body', () => {
+describe('the seller wallet policy body', () => {
   it('names the escrow, the Arc chain and the claim function', () => {
-    const body = claimPolicySpec(ESCROW);
+    const body = spec();
 
     expect(body.version).toBe('1.0');
     expect(body.chain_type).toBe('ethereum');
-    expect(body.name).toBe(CLAIM_POLICY_NAME);
+    expect(body.name).toBe(WALLET_POLICY_NAME);
 
-    const rule = ruleOf(body);
-    expect(rule.method).toBe('eth_sendTransaction');
+    const rule = ruleOf(body, 'eth_sendTransaction');
     expect(rule.action).toBe('ALLOW');
 
-    expect(conditionOn(body, 'to')).toMatchObject({
+    expect(conditionOn(body, 'eth_sendTransaction', 'to')).toMatchObject({
       field_source: 'ethereum_transaction',
       operator: 'eq',
       value: ESCROW.toLowerCase(),
     });
-    expect(conditionOn(body, 'chain_id')).toMatchObject({
+    expect(conditionOn(body, 'eth_sendTransaction', 'chain_id')).toMatchObject({
       field_source: 'ethereum_transaction',
       operator: 'eq',
       value: String(arc.chainId),
     });
-    expect(conditionOn(body, 'function_name')).toMatchObject({
+    expect(conditionOn(body, 'eth_sendTransaction', 'function_name')).toMatchObject({
       field_source: 'ethereum_calldata',
       operator: 'eq',
       value: 'claim',
@@ -78,11 +99,95 @@ describe('the claim policy body', () => {
    * the policy — a control in name, and one that would pass a "is a policy attached" check.
    */
   it('is not an allow-all', () => {
-    const rule = ruleOf(claimPolicySpec(ESCROW));
+    const body = spec();
 
-    expect(rule.conditions.length).toBeGreaterThanOrEqual(3);
-    expect(rule.method).not.toBe('*');
-    expect(rule.conditions.every((c) => c.value !== '' && c.value.length > 0)).toBe(true);
+    for (const rule of body.rules) {
+      expect(rule.method).not.toBe('*');
+      expect(rule.conditions.length).toBeGreaterThanOrEqual(2);
+      expect(rule.conditions.every((c) => c.value !== '' && c.value.length > 0)).toBe(true);
+    }
+    expect(ruleOf(body, 'eth_sendTransaction').conditions).toHaveLength(3);
+  });
+
+  /*
+   * Two rules and no more. The count is asserted for the reason the ABI's length is: every
+   * additional rule is a widening of what this key may be asked to do, and the whole claim
+   * this module makes is that the surface is small enough to name.
+   */
+  it('carries exactly two rules, one per thing the key may do', () => {
+    expect(spec().rules.map((r) => r.method)).toEqual([
+      'eth_sendTransaction',
+      'eth_signTypedData_v4',
+    ]);
+  });
+
+  /*
+   * The deny-by-default hazard, stated as an assertion because it is invisible everywhere
+   * else. Privy's docs: a policy "must include rules for all intended RPC methods and wallet
+   * actions; otherwise, usage will be denied". So with no rule for this method, a seller
+   * carrying this policy cannot sign a `ProfileUpdate` at all — the wallet simply refuses,
+   * there is no transaction and no revert, and nothing on the venue's side can tell that
+   * apart from a party who has not got round to it.
+   */
+  it('allows eth_signTypedData_v4 by name, without which the wallet cannot sign at all', () => {
+    const rule = ruleOf(spec(), 'eth_signTypedData_v4');
+
+    expect(rule.method).toBe('eth_signTypedData_v4');
+    expect(rule.action).toBe('ALLOW');
+  });
+
+  it('scopes signing to the party registry on Hedera', () => {
+    const body = spec();
+
+    expect(conditionOn(body, 'eth_signTypedData_v4', 'chainId')).toMatchObject({
+      field_source: 'ethereum_typed_data_domain',
+      operator: 'eq',
+      value: String(hedera.chainId),
+    });
+    expect(conditionOn(body, 'eth_signTypedData_v4', 'verifyingContract')).toMatchObject({
+      field_source: 'ethereum_typed_data_domain',
+      operator: 'eq',
+      value: REGISTRY.toLowerCase(),
+    });
+  });
+
+  /*
+   * Decimal, as a string, from the shared chain table. `eip155:296` is the CAIP-2 spelling
+   * and belongs to a different field — a domain's `chainId` is a number, and Privy compares
+   * the decimal. Pinned as a literal so a change to the shared table cannot silently
+   * repoint the rule at another network, which would be a rule that matches nothing.
+   */
+  it('scopes to Hedera testnet as a decimal string, not CAIP-2', () => {
+    const value = conditionOn(spec(), 'eth_signTypedData_v4', 'chainId')?.value;
+
+    expect(value).toBe('296');
+    expect(value).not.toContain('eip155');
+  });
+
+  /*
+   * The same trap as the `to` condition, one field over, and `partyRegistryDomain` in
+   * `@facture/shared` lowercases the domain it builds for exactly this reason. EIP-712
+   * hex-decodes an address so case cannot move the digest — but Privy compares this value as
+   * a **string**, so a checksummed rule against a lowercased domain never fires and the
+   * seller cannot sign.
+   */
+  it('lowercases the verifying contract, because Privy compares it as a string', () => {
+    const value = conditionOn(spec(), 'eth_signTypedData_v4', 'verifyingContract')?.value;
+
+    expect(value).toBe(REGISTRY.toLowerCase());
+    expect(value).not.toBe(REGISTRY);
+  });
+
+  /*
+   * Asserted rather than left to the absence of a line. There is deliberately no condition
+   * on the message: `PartyRegistry` writes whoever the signature recovers to, so a condition
+   * on `party` could only restate a guarantee the contract already makes — while being a
+   * third encoding to get wrong in a place where getting it wrong denies silently.
+   */
+  it('puts no condition on the message contents', () => {
+    const sources = ruleOf(spec(), 'eth_signTypedData_v4').conditions.map((c) => c.field_source);
+
+    expect(sources).toEqual(['ethereum_typed_data_domain', 'ethereum_typed_data_domain']);
   });
 
   /*
@@ -93,7 +198,7 @@ describe('the claim policy body', () => {
    * naming the wrong chain is a rule that matches nothing, and the seller cannot be paid.
    */
   it('scopes to Arc testnet as a decimal string, not CAIP-2', () => {
-    const value = conditionOn(claimPolicySpec(ESCROW), 'chain_id')?.value;
+    const value = conditionOn(spec(), 'eth_sendTransaction', 'chain_id')?.value;
 
     expect(value).toBe('5042002');
     expect(value).not.toContain('eip155');
@@ -105,7 +210,7 @@ describe('the claim policy body', () => {
    * here is a widening of the control, which is why the count is asserted.
    */
   it('carries the claim ABI and nothing else', () => {
-    const abi = conditionOn(claimPolicySpec(ESCROW), 'function_name')?.abi;
+    const abi = conditionOn(spec(), 'eth_sendTransaction', 'function_name')?.abi;
 
     expect(abi).toBe(CLAIM_ABI);
     expect(CLAIM_ABI).toHaveLength(1);
@@ -119,8 +224,48 @@ describe('the claim policy body', () => {
    * is a rule that never fires.
    */
   it('lowercases the escrow address rather than trusting its casing', () => {
-    expect(conditionOn(claimPolicySpec(ESCROW), 'to')?.value).toBe(ESCROW.toLowerCase());
-    expect(conditionOn(claimPolicySpec(ESCROW), 'to')?.value).not.toBe(ESCROW);
+    expect(conditionOn(spec(), 'eth_sendTransaction', 'to')?.value).toBe(ESCROW.toLowerCase());
+    expect(conditionOn(spec(), 'eth_sendTransaction', 'to')?.value).not.toBe(ESCROW);
+  });
+});
+
+/**
+ * Where the two addresses come from.
+ *
+ * Nothing in `privy-policy.ts` invents an address: the escrow is read off the vault's own
+ * immutable and the registry is the pin in `@facture/shared`. That plumbing is the whole
+ * value of the sync path — a policy naming a superseded registry denies every signature just
+ * as thoroughly as no rule at all, and reads like a broken wallet rather than a stale pin.
+ */
+describe('the addresses the spec is built from', () => {
+  afterEach(() => {
+    setArcEscrow(undefined);
+    setPrivyPolicyClient(undefined);
+  });
+
+  const wired = () => {
+    setArcEscrow(fakeArcEscrow({ escrowAddress: () => Promise.resolve(ESCROW) }));
+    setPrivyPolicyClient(recordingPolicyClient());
+  };
+
+  it('provisions against the deployed registry rather than one written here', async () => {
+    wired();
+
+    const { body } = await provisionWalletPolicy();
+
+    expect(conditionOn(body, 'eth_signTypedData_v4', 'verifyingContract')?.value).toBe(
+      HEDERA_DEPLOYMENTS.partyRegistry.toLowerCase(),
+    );
+    expect(conditionOn(body, 'eth_sendTransaction', 'to')?.value).toBe(ESCROW.toLowerCase());
+  });
+
+  it('syncs against the same two, so a rewrite cannot drift from a create', async () => {
+    wired();
+
+    const provisioned = await provisionWalletPolicy();
+    const synced = await syncWalletPolicy();
+
+    expect(synced.body).toEqual(provisioned.body);
   });
 });
 
@@ -134,7 +279,8 @@ describe('configuration', () => {
 
     expect(client.enabled).toBe(false);
     expect(client.policyId).toBeNull();
-    await expect(client.createClaimPolicy(ESCROW)).rejects.toThrow('PRIVY_APP_ID');
+    await expect(client.createWalletPolicy(ESCROW, REGISTRY)).rejects.toThrow('PRIVY_APP_ID');
+    await expect(client.updateWalletPolicy(ESCROW, REGISTRY)).rejects.toThrow('PRIVY_APP_ID');
   });
 
   /*
@@ -190,7 +336,7 @@ describe('configuration', () => {
   it('reports not-configured rather than throwing when nothing is set', async () => {
     setPrivyPolicyClient(createDisabledPrivyPolicyClient());
 
-    const result = await attachClaimPolicy({ walletId: 'w1', walletAddress: null }, silent);
+    const result = await attachWalletPolicy({ walletId: 'w1', walletAddress: null }, silent);
 
     expect(result).toEqual({ attached: false, reason: POLICY_NOT_CONFIGURED });
     setPrivyPolicyClient(undefined);
@@ -336,10 +482,10 @@ describe('creating the policy', () => {
       logger: silent,
     });
 
-    const created = await client.createClaimPolicy(ESCROW);
+    const created = await client.createWalletPolicy(ESCROW, REGISTRY);
 
     expect(created.policyId).toBe('pol_abc');
-    expect(api.calls[0]?.body).toEqual(claimPolicySpec(ESCROW));
+    expect(api.calls[0]?.body).toEqual(spec());
   });
 
   /*
@@ -353,8 +499,8 @@ describe('creating the policy', () => {
     const build = (api: ReturnType<typeof stubPrivyApi>) =>
       createPrivyPolicyClient({ ...APP, policyId: undefined, fetch: api.fetch, logger: silent });
 
-    await build(one).createClaimPolicy(ESCROW);
-    await build(two).createClaimPolicy(ESCROW);
+    await build(one).createWalletPolicy(ESCROW, REGISTRY);
+    await build(two).createWalletPolicy(ESCROW, REGISTRY);
 
     const key = one.calls[0]?.headers.get('privy-idempotency-key');
     expect(key).toBeTruthy();
@@ -367,8 +513,8 @@ describe('creating the policy', () => {
     const build = (api: ReturnType<typeof stubPrivyApi>) =>
       createPrivyPolicyClient({ ...APP, policyId: undefined, fetch: api.fetch, logger: silent });
 
-    await build(one).createClaimPolicy(ESCROW);
-    await build(two).createClaimPolicy('0x1111111111111111111111111111111111111111');
+    await build(one).createWalletPolicy(ESCROW, REGISTRY);
+    await build(two).createWalletPolicy('0x1111111111111111111111111111111111111111', REGISTRY);
 
     expect(one.calls[0]?.headers.get('privy-idempotency-key')).not.toBe(
       two.calls[0]?.headers.get('privy-idempotency-key'),
@@ -392,11 +538,13 @@ describe('creating the policy', () => {
       logger: silent,
     });
 
-    await expect(client.createClaimPolicy(ESCROW)).rejects.toThrow('policy engine not enabled');
+    await expect(client.createWalletPolicy(ESCROW, REGISTRY)).rejects.toThrow(
+      'policy engine not enabled',
+    );
   });
 
   it('refuses a create that returned no id rather than inventing one', async () => {
-    const api = stubPrivyApi({ 'POST /v1/policies': { body: { name: CLAIM_POLICY_NAME } } });
+    const api = stubPrivyApi({ 'POST /v1/policies': { body: { name: WALLET_POLICY_NAME } } });
     const client = createPrivyPolicyClient({
       ...APP,
       policyId: undefined,
@@ -404,6 +552,94 @@ describe('creating the policy', () => {
       logger: silent,
     });
 
-    await expect(client.createClaimPolicy(ESCROW)).rejects.toThrow('returned no id');
+    await expect(client.createWalletPolicy(ESCROW, REGISTRY)).rejects.toThrow('returned no id');
+  });
+});
+
+/**
+ * The migration path, which exists because a live deployment's pinned policy was created
+ * from a body that had one rule.
+ *
+ * Privy supports **one policy per wallet**, so there is no additive option — a second policy
+ * cannot sit alongside the first and supply the missing rule. And creating a replacement
+ * would mint a new id while every wallet already provisioned went on carrying the stale one.
+ * Rewriting the pinned policy in place is the only move that reaches the wallets that exist.
+ */
+describe('bringing a pinned policy up to date', () => {
+  it('PATCHes the pinned policy with the current spec, keeping its id', async () => {
+    const api = stubPrivyApi({ 'PATCH /v1/policies/p1': { body: { id: 'p1' } } });
+    const client = createPrivyPolicyClient({
+      ...APP,
+      policyId: 'p1',
+      fetch: api.fetch,
+      logger: silent,
+    });
+
+    const synced = await client.updateWalletPolicy(ESCROW, REGISTRY);
+
+    expect(synced.policyId).toBe('p1');
+    expect(api.calls).toHaveLength(1);
+    expect(api.calls[0]?.method).toBe('PATCH');
+    expect(api.calls[0]?.path).toBe('/v1/policies/p1');
+    /*
+     * `name` and `rules` only. The first version of this call sent the whole spec and Privy
+     * refused it with `Unrecognized key(s) in object: 'version', 'chain_type'` — those are
+     * create-time facts about a policy, and an update may not restate them. Asserting the exact
+     * body is what stops somebody "tidying" the subset back into the full spec and reintroducing
+     * a call that always 400s.
+     */
+    expect(api.calls[0]?.body).toEqual({ name: spec().name, rules: spec().rules });
+    expect(api.calls[0]?.body).not.toHaveProperty('version');
+    expect(api.calls[0]?.body).not.toHaveProperty('chain_type');
+  });
+
+  /* The rule the whole migration is for has to survive the round trip, so it is read back. */
+  it('sends a body that carries the signing rule', async () => {
+    const api = stubPrivyApi({ 'PATCH /v1/policies/p1': { body: { id: 'p1' } } });
+    const client = createPrivyPolicyClient({
+      ...APP,
+      policyId: 'p1',
+      fetch: api.fetch,
+      logger: silent,
+    });
+
+    await client.updateWalletPolicy(ESCROW, REGISTRY);
+    const sent = api.calls[0]?.body as PolicyBody;
+
+    expect(sent.rules.map((r) => r.method)).toContain('eth_signTypedData_v4');
+  });
+
+  /*
+   * Nothing pinned is not a reason to create one. A sync that fell back to `POST` would mint
+   * a second policy under a fresh id, which is the state this call exists to avoid rather
+   * than a convenient recovery from it.
+   */
+  it('refuses when nothing is pinned, rather than creating a second policy', async () => {
+    const api = stubPrivyApi({ 'POST /v1/policies': { body: { id: 'pol_new' } } });
+    const client = createPrivyPolicyClient({
+      ...APP,
+      policyId: undefined,
+      fetch: api.fetch,
+      logger: silent,
+    });
+
+    await expect(client.updateWalletPolicy(ESCROW, REGISTRY)).rejects.toThrow(
+      'PRIVY_WALLET_POLICY_ID',
+    );
+    expect(api.calls).toHaveLength(0);
+  });
+
+  it('carries Privy own words when it refuses the rewrite', async () => {
+    const api = stubPrivyApi({
+      'PATCH /v1/policies/p1': { status: 404, body: { error: 'policy not found' } },
+    });
+    const client = createPrivyPolicyClient({
+      ...APP,
+      policyId: 'p1',
+      fetch: api.fetch,
+      logger: silent,
+    });
+
+    await expect(client.updateWalletPolicy(ESCROW, REGISTRY)).rejects.toThrow('policy not found');
   });
 });
