@@ -32,3 +32,4 @@ forge-cache/
 # Circle entity-secret recovery files: losing these is unrecoverable, committing them is worse
 .circle/
 *.dat
+.vercel
