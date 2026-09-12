@@ -18,6 +18,7 @@ The live venue, redeployed after the refusal-code rename in `78faa1a`.
 | `DvpEscrow` (delivery leg) | `0x35a8a43d2d840f02887cd0427e78f6b0205ded87` | 4,412  |
 | `UniquenessRegistry`       | `0x8eb9f00126bca50226e47b71a75f7b438e81d408` | 1,554  |
 | `AtsComplianceGate`        | `0x9a2c848ab62e715d2b49a4710f6451395978abbb` | 983    |
+| `PartyRegistry`            | `0x1C9882714e1ae2555531E1a7eb4E83EBeCA8B2ca` | 6,171  |
 
 Wiring verified by `eth_call` against the book itself:
 
@@ -1176,3 +1177,98 @@ customer is UNRATED — and the deployed compliance gate `0x6d78847e…` refused
 Harrow Point's Arc address, claimable by them alone. Harrow Point's two addresses are different keys
 — `0xA25796…` on Hedera, `0x1c755e…` on Arc — so the venue can sign that account's hold and still
 cannot collect its money.
+
+## The party registry — 2026-09-12
+
+`PartyRegistry` at **`0x1C9882714e1ae2555531E1a7eb4E83EBeCA8B2ca`**, Sourcify `exact_match`, so
+HashScan shows it verified. Deployed by reusing all five existing contracts and minting only this
+one, which is what `FACTURE_*` reuse in `packages/contracts/.env` is for.
+
+It is the eighth deployed contract and **the first one the venue does not author.** Everywhere else
+the operator key is the party of record: `MandateBook.postMandate` sets `buyer = msg.sender`
+permanently, so every standing bid on the public book belongs to Facture rather than to the funder
+whose capital backs it. Here the venue relays and pays, and the record is written to whichever
+address an EIP-712 signature recovers to.
+
+### A key holding nothing signed, and the operator paid
+
+The property the design rests on, read off the chain rather than argued for. A private key was
+generated for the test, funded with nothing, and used to sign a `ProfileUpdate`; the operator
+submitted it.
+
+| what                     | value                                                                |
+| ------------------------ | -------------------------------------------------------------------- |
+| relayer (paid)           | `0x2Da63Ac0F6AE2C3059091d8DF38b3175a237ee71`                         |
+| signer (owns the record) | `0xe52553bd1b0D869b9310E2Ff04a8F5DC58dcE324`, zero HBAR              |
+| transaction              | `0x6e4781dd17dec6b4e27960cafad36fe5498e404fb1fefdee8370558344beeac9` |
+| `gasUsed`                | 134,962                                                              |
+
+`profileOf(signer)` returns the record. `profileOf(relayer)` returns nothing. The relayer paid for a
+record it does not hold and could not have altered — changing one byte produces a signature that
+recovers to a different address, and the mismatch against `party` reverts before even that.
+
+The measured 134,962 is what `UPDATE_GAS` is sized against. The estimate it replaced was 600,000,
+arrived at by counting storage slots; the constant is 450,000 now, which covers the contract's
+64/128/128-byte string caps with headroom. Measured beats asserted, which is the correction
+`AtsComplianceGate`'s `PROBE_GAS` already went through.
+
+### The digests agree
+
+Checked before anything was relayed, because a wrong encoding here is not an error — it is a valid
+signature over the wrong message. The contract's own `hashUpdate` and viem's `hashTypedData`
+returned the same
+`0x6c2b4cb29d869cee7219c03be55cfe771e2c49b37e3bee663ee4df19015dc4c8`. That is the check `deployBond`
+never had: its tuple compiled, typechecked and produced calldata for a selector the diamond did not
+have, and every issuance this venue attempted failed on it.
+
+### The Privy policy had to change, and the docs were wrong about how
+
+A wallet policy denies any RPC method no rule names, so the pinned policy — one rule, `claim` on
+`DvpEscrow` — **denied `eth_signTypedData_v4` outright.** A seller carrying it could not sign a
+profile at all, and the refusal happened inside the wallet, so the venue saw nothing it could
+distinguish from a party who had not got round to it yet. The rule was added in place rather than
+as a second policy.
+
+That choice was first written up here as forced — "only one policy is supported per wallet" — which
+is what Privy's documentation says and is more than this repo has established. `attachWalletPolicy`
+writes `policy_ids: [...held, policyId]`, appending, and a test asserts a two-element array reaching
+the wire. Nothing here has observed which is true. Editing in place is safe either way, so the
+decision holds on that rather than on the claim.
+
+`pnpm --filter @facture/backend privy:policy sync` does that, and the live policy
+`ptcr8aqgtayakw2gnce5sgie` now carries both rules — `eth_sendTransaction` and
+`eth_signTypedData_v4`, the second scoped to `verifyingContract` `0x1c9882714e…` on chain `296`. The
+id is unchanged, so every wallet already carrying it is under the new rules without re-attaching.
+
+**The first attempt failed, and the failure is worth keeping.** The PATCH sent the whole policy body
+and Privy refused it:
+
+    400 [Input error] Unrecognized key(s) in object: 'version', 'chain_type'
+
+Those two are create-time facts about a policy and an update may not restate them, so the update
+surface is genuinely narrower than the create surface. It sends `name` and `rules` now. That was
+learned from the live API rather than reasoned out, which is the reason this module refuses to
+summarise Privy's errors and passes its own words through.
+
+### The source has drifted from the verified copy by one comment
+
+A storage comment in `PartyRegistry.sol` said the records mapping is at slot 0. It is at slot 2:
+OpenZeppelin's `EIP712` declares `_nameFallback` and `_versionFallback` first, and inherited
+storage is laid out before the contract's own. Anyone computing a mapping key for
+`eth_getStorageAt` off that comment would have read the wrong slot and found nothing, so it was
+corrected after deployment.
+
+**The repo's source therefore no longer produces the metadata hash embedded in the deployed
+bytecode.** Comments do not change opcodes, so the runtime code is identical and the existing
+Sourcify record — created at deploy time, and still reading `exact_match` — is untouched. A fresh
+verification from the current tree would come back as a partial `match` rather than `exact_match`,
+which is still verified and still shows the badge. Recorded here so the difference is a known one
+rather than something found later and mistaken for a redeploy.
+
+### The address is lowercased everywhere it is compared
+
+EIP-712 hex-decodes an address, so case cannot move the digest — confirmed against the deployed
+contract with a checksummed domain. What case does move is the policy: Privy compares
+`verifyingContract` out of the decoded domain as a **string**. A checksummed domain against a
+lowercased rule is a seller who cannot sign. So `partyRegistryDomain` lowercases, and the rule
+lowercases, and both say why.

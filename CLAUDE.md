@@ -620,10 +620,11 @@ by nothing, with no env var for any of their addresses, so the backend could not
 them if it wanted to. That was the largest gap between `packages/contracts` and the running
 product.
 
-**Six of seven are wired now.** `InvoiceRegistry` followed on 2026-09-03, and
-`AtsComplianceGate` and `MandateBook` on 2026-09-06 — see the two sections on them below. The
-Hedera `DvpEscrow` is the one that stays unreached, and that is a stated position rather than a
-gap; the reason is under _"Declined: the Hedera delivery escrow"_.
+**Seven of eight are wired now.** `InvoiceRegistry` followed on 2026-09-03,
+`AtsComplianceGate` and `MandateBook` on 2026-09-06 — see the two sections on them below — and
+`PartyRegistry` was deployed on 2026-09-12 with three readers on its first day, so it was never
+a sweep finding. The Hedera `DvpEscrow` is the one that stays unreached, and that is a stated
+position rather than a gap; the reason is under _"Declined: the Hedera delivery escrow"_.
 
 - **The venue's hash is what gets claimed, never `computeHash`.** The contract's helper would
   mint a second hash for the same receivable — one for the ISIN, another for the registry —
@@ -1439,7 +1440,14 @@ Its first run fixed the live blocker — the seller held **zero** USDC on Arc, a
 second mandate, which closes the `registerMandate` finding above: that function had no caller,
 so no mandate created through the API could ever be escrowed.
 
-### Corrected: Privy signs exactly one thing, and it is not the cash leg
+### Corrected: Privy signs two things, and neither is the cash leg
+
+**This section was headed "Privy signs exactly one thing" until 2026-09-12, when a second
+arrived: a party's own `ProfileUpdate` on `PartyRegistry`. The count has moved and the boundary
+has not.** Both are things a person signs about themselves or to collect money already bound to
+them — never a trade, and never the settlement path. The seller still signs nothing to sell.
+
+The x402 half below is unchanged and still true.
 
 **The "onboarding and only onboarding" boundary above was drawn for a reason that does not
 cover the Arc rail, and it has moved by exactly one transaction (2026-09-03).**
@@ -1674,6 +1682,175 @@ reachable for the first time.
 measured against `InvoiceRegistry` rather than against a balance nothing updates:
 `RATING_BELOW_MANDATE`, `TENOR_EXCEEDS_MANDATE`, `INVOICE_UNKNOWN`, `INVOICE_NOT_CONFIRMED`.
 
+### Resolved: a party says who they are, and signs it
+
+**Built 2026-09-12.** `PartyRegistry` — `0x1C9882714e1ae2555531E1a7eb4E83EBeCA8B2ca` on Hedera,
+Sourcify `exact_match` — records what each address says about itself. It is the eighth deployed
+contract and **the first the venue does not author**, which is the whole reason it exists.
+
+The gap it closes was in two layers and the on-chain half was worse. On screen, `/book` called every
+seller "Your business" and `/mandates` called every funder "Your desk" — two hardcoded literals in
+`api-source.ts`, above a comment saying no response carried a name and there was no session. Both
+halves of that had stopped being true and the literals outlived them, so the fixture book was the
+only place a company was ever named. Underneath, `/proof` published `sellerName`, `buyerName` and
+`debtorName` all `null`, and `MandateBook.postMandate` records `buyer = msg.sender` — the venue —
+on every standing bid. The market was anonymous to everyone including its own participants.
+
+- **A record can only be written by the key it describes.** The party signs an EIP-712
+  `ProfileUpdate`; anyone may relay it; the contract writes whoever the signature recovers to.
+  There is no owner, no permissioned writer, and no way for this venue to fill in a profile on
+  somebody's behalf. Altering one byte produces a signature recovering to a different address, so a
+  forgery writes a stranger's profile rather than the one it was aimed at.
+- **The party needs no gas, which is what makes it usable.** A wallet made from an email address
+  holds no HBAR on Hedera and no USDC on Arc. Proved rather than argued: a freshly generated key
+  holding **nothing** signed, the operator relayed, and the record landed under the signer's address
+  while the relayer's stayed empty. `gasUsed` 134,962, transaction `0x6e4781dd…`.
+- **The EIP-712 type has one authority**, `@facture/shared/registry/party.ts`, because three
+  implementations must agree on it — Solidity verifies, the browser signs, the backend relays. A
+  disagreement is not a type error anywhere; it is a valid signature over the wrong message. **Field
+  order is a promise**: reordering invalidates every signature in flight and every `recordHash`
+  emitted, and a test pins the ordering against the contract's own type string.
+- **Roles are a claim, never a permission.** `ROLE_SELLER | ROLE_BUYER` as a bitmask, and a party
+  may hold both because selling your own receivables and funding other people's is an ordinary
+  combination. Holding `buyer` authorises nothing — capital is still the Arc vault's, eligibility is
+  still each instrument's `ControlList` and `Kyc`. An undefined role bit is **refused** on chain
+  rather than masked off, and reported rather than dropped when read back.
+- **Only what a counterparty would check goes on chain** — roles, display name, legal name, country,
+  website, and a `metadataHash` committing to the rest. Email and anything personal stay in the
+  venue's own store. The same call the refusal topic already makes by publishing a digest instead of
+  the sentence: a public ledger is a poor place for a business's contact book.
+- **This closes the provisional-name gap recorded above.** `provisionalName` turns an email domain
+  into a label because a sign-in has nothing better to go on, and this file has carried
+  _"correcting it needs a route that can change it, which does not exist"_ for over a week. It
+  exists now, and the correction is stronger than a text field: the name the venue stores is the
+  name the party **signed**, and the same string is on a public chain.
+- **A chain that is down costs the public copy, not the profile.** `recordProfile` never throws, in
+  the shape `ensureMandateRegistered` established, and answers one of four states — `recorded`,
+  `refused`, `unavailable`, `not-configured`. A 200 from `POST /v1/parties/me` does **not** mean the
+  chain took it, and a screen reading the status code alone would tell somebody their profile is
+  public when only half of it is.
+- **`getPartyRegistry()` defaults to disabled rather than throwing**, which is `getMandateBook`'s
+  shape and not the one most services here use. `GET /v1/parties/:address` is public, and a boot
+  order that had not reached `initPartyRegistry` would turn a question anyone may ask into a 500
+  describing an internal wiring mistake.
+
+### The Privy policy denied signing, and nothing would have said so
+
+**Found before shipping, from the docs rather than from a failure.** Privy denies any RPC method no
+rule names — _"a policy must include rules for all intended RPC methods… otherwise usage will be
+denied"_ — and the pinned policy had exactly one rule, `claim` on `DvpEscrow`. So it **denied
+`eth_signTypedData_v4` outright**, and a seller carrying it could not sign a profile at all. The
+refusal happens inside the wallet, so there is no transaction to inspect and the venue cannot
+distinguish it from a party who has not got round to it yet.
+
+- **The rule was added in place** rather than as a second policy — `privy:policy sync` does it with
+  `PATCH /v1/policies/{id}`, same id, so every wallet already carrying it is under the new rules
+  without re-attaching. **The stated reason was wrong and the decision was still right.** Privy's
+  documentation says only one policy is supported per wallet, and this file asserted that as
+  settled; `attachWalletPolicy` writes `policy_ids: [...held, policyId]` and a test asserts a
+  two-element array reaching the wire, so the code assumes several are possible. The two have not
+  been reconciled and nothing here has observed which is true. Editing in place is the safe
+  behaviour under either, which is why the conclusion stands — but it rests on that, not on the
+  one-policy claim.
+- **The live policy `ptcr8aqgtayakw2gnce5sgie` now carries both rules**, the second scoped to
+  `verifyingContract` and `chainId` — one contract, one chain. The key went from one permission to
+  two, each naming one contract and one action; it did not become a general-purpose key. This is a
+  stronger answer to the Privy tracks' "at least one control" than the single rule was.
+- **The first PATCH failed and the failure is the useful part.** Sending the whole spec body was
+  refused with `Unrecognized key(s) in object: 'version', 'chain_type'`. Those are create-time facts
+  about a policy and an update may not restate them, so the update surface is genuinely narrower
+  than the create surface. Learned from the live API, not reasoned out — which is exactly why this
+  module passes Privy's own words through instead of summarising them.
+- **The verifying contract is lowercased on both sides.** EIP-712 hex-decodes an address so case
+  cannot move the digest, but Privy compares this value as a **string**. A checksummed domain
+  against a lowercased rule is a seller who cannot sign, failing at the wallet with nothing to
+  inspect. The same trap the `to` condition already documents, one field over.
+
+### The review of the party registry, and the hole it found
+
+**Five reviewers over the working tree, 2026-09-12, before any of it was committed.** Three
+converged on the same defect and it was a security hole in code written that morning. Recorded
+because the shape is one this file already tracks, and because two of the claims in the sections
+above were wrong when written.
+
+**The venue never verified the signature.** `PartyRegistry` was the only verifier, and
+`recordProfile` never throws — so `routes/parties.ts` computed a `recording` it did not branch on
+and ran the upserts regardless. A signed-in caller could present sixty-five bytes of nonsense with
+any name they liked, watch the chain revert, and get a 200 and a renamed business. The comment
+above the call claimed the ordering prevented exactly that, which it could not: **ordering a call
+whose failure is a return value buys nothing, and only a check or a branch does.** Every test used
+`'ab'.repeat(65)` against a fake that accepted anything, so the suite could not see it.
+
+- **`recoverProfileSigner` is the fix, and it is better than a branch.** The signer is recovered
+  locally with viem before anything is relayed, so authorisation stops depending on whether Hedera
+  is reachable — which is what lets the rows be written on `unavailable` — and a signature nobody
+  produced never costs the operator a transaction. A `refused` recording now returns early and
+  writes nothing.
+- **A refusal is a type.** `RegistryRefusal` replaced `detail.includes('refused that profile
+update')`, a substring match against user-facing prose thrown one function away. Rewording the
+  sentence would have reclassified every contract refusal as an outage with the suite still green,
+  and the test for it constructed that sentence by hand — both halves of one contract compared
+  against independent copies of a string. It also missed reverts surfaced at `writeContract` rather
+  than in the receipt, so a stale nonce was reported as "nothing was lost, try again".
+
+**`createPartyRegistry` was constructed by no test in the repo.** The real client holding the ABI,
+the gas, the receipt check and the profile decoder had zero coverage; everything ran against a
+hand-written fake, which cannot contradict an ABI it does not have. That single fact explains all
+three defects above. `test/party-registry-encoding.test.ts` now pins the `updateProfileFor`
+selector against an independent spelling of the Solidity tuple, and every `Profile` field by name —
+that struct ends in three consecutive strings and carries two adjacent `uint64`s, so transposing
+any neighbouring pair decodes cleanly and renders a lie. Both pins were mutation-checked.
+
+**Three of my own comments asserted checks that did not exist.** The EIP-712 table was described as
+"pinned against the contract's own type string" in three places; all three pins were hand-typed
+literals, so nothing anywhere compared the table clients actually sign from against the contract.
+`packages/shared/test/registry/party.test.ts` now reads `PartyRegistry.sol` off disk, the way
+`agent/test/reason-codes.test.ts` already did, and it was checked by renaming a field in the `.sol`
+and watching it fail. **A confident comment about a behaviour nobody has verified gets more
+confident with age rather than less**, which this file says about other people's code and had not
+yet had turned on its own.
+
+Also found and fixed: the length caps counted UTF-16 units while the contract counts bytes, so a
+thirty-character Japanese name passed the API and reverted on chain; the signature field was
+unbounded on a route that spends operator gas; `MemoryStore` and `SqliteStore` disagreed about
+email casing, which could have put two rows behind one unique index; and the storage comment in
+`PartyRegistry.sol` said slot 0 when OpenZeppelin's `EIP712` puts the mapping at slot 2.
+
+**On the web side this workstream had not left a gap, it had made an existing one worse.** A failed
+buyer sign-in was swallowed by an empty catch. While the screens still said "Your desk" that cost
+nothing; once real party names were resolved it rendered the seeded demo desk's **real company
+name, capital and exposure** as the viewer's own. It is a third state now — `resolving | resolved | unresolved` — and
+the masthead says so. Separately, `reload()` ran only on a successful save, so a relay that
+succeeded on chain and then failed over HTTP left the nonce consumed and every retry refused, under
+a message saying signing again would fix it.
+
+### Resolved: the buyer is a party this venue can onboard
+
+`POST /v1/buyers` exists, mirroring sellers: identity token only, idempotent on the verified email,
+a wallet address filled once and never rebound. `Store.getBuyerByEmail` and `updateBuyerWallet` were
+missing on both store implementations and are there now.
+
+- **`buyerId()` reads the session first**, so signing in changes `/mandates` as well as `/book`. It
+  was configuration-only before, which was the sharpest version of the identity problem: a viewer
+  was two different companies at once and could only change one of them.
+- **Sign-in calls both routes**, because both are idempotent on the same verified email and the
+  alternative is resolving a buyer id only after a profile is signed — rendering a stranger's
+  mandates until then. The cost is an empty desk for somebody who only ever sells. The buyer half
+  runs after the seller half and cannot fail the session.
+- **The buyers route does NOT attach the seller's claim policy**, and says so at length. That policy
+  scopes a wallet to `claim` on `DvpEscrow`, which checks `msg.sender == beneficiary` and is a
+  seller's call. Copying it would authorise the one call a buyer can never make and none it needs —
+  the README-role-hash trap, where a grant succeeds and confers nothing. A buyer-side policy is
+  separate work.
+
+### Still anonymous: the proof view
+
+`/proof` still publishes `sellerName`, `buyerName` and `debtorName` as `null` on the live path, so a
+settled trade's public receipt names no party. The registry that would answer it is deployed, wired
+and read by three screens — but the proof service has not been changed to ask. Written down here so it is
+not found by surprise later: it is the one place the anonymity finding above still stands, and what
+is missing is the call, not a decision about how to make it.
+
 ### The Arc tracks require an architecture diagram
 
 Read off the ETHOnline prize page 2026-09-06, and **not previously recorded here**. All three
@@ -1762,7 +1939,7 @@ not been looked for, and the first of them could produce a wrong answer rather t
 `packages/contracts/.env` and `HEDERA_MANDATE_BOOK_ADDRESS` in `packages/backend/.env`, and
 so on for the vault, the gate and both registries. They held identical values and **nothing
 checked that they did** — a redeploy updates the contracts side and the backend's copy is a
-manual paste. The failure is not a crash: the venue keeps running and reads the *previous*
+manual paste. The failure is not a crash: the venue keeps running and reads the _previous_
 deployment, which here means the superseded `AtsComplianceGate` that refused every buyer on
 every instrument. **A stale address reads as a compliance bug rather than a configuration
 one**, which is the most expensive kind of wrong answer this codebase can give.
@@ -1772,8 +1949,8 @@ one**, which is the most expensive kind of wrong answer this codebase can give.
   that directory should carry a chain id or a token address as a literal. A deployed contract
   is the same kind of fact. The backend and the agent read the pin.
 - **`packages/contracts` keeps its `FACTURE_*` variables, and that is not a half-finished
-  collapse.** They mean something different: *"reuse this one instead of deploying a new
-  one"*, an input to a deploy-time decision where **unset means deploy fresh** — which
+  collapse.** They mean something different: _"reuse this one instead of deploying a new
+  one"_, an input to a deploy-time decision where **unset means deploy fresh** — which
   `deployHedera.ts` documents as the way to point a fresh book at an existing registry. A pin
   cannot express that. What is gone is the runtime copy, which is the one that could go stale
   without anyone looking.
