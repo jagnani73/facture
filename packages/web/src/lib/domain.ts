@@ -50,6 +50,10 @@ export type {
   SettlementLegState,
   Trade,
   BestQuoteResult,
+  // A party's own description of itself, recovered from what they signed.
+  PartyRole,
+  PartyProfile,
+  ProfileUpdateMessage,
 } from '@facture/shared';
 
 export {
@@ -109,4 +113,17 @@ export {
   isRegulationKey,
   explorerTxUrl,
   explorerAddressUrl,
+  // parties — the EIP-712 vocabulary, which has exactly one authority for the reason its
+  // module header gives: Solidity verifies it, this package signs it, the backend relays it.
+  PARTY_ROLES,
+  PARTY_ROLE_MASK,
+  PROFILE_UPDATE_TYPES,
+  PROFILE_UPDATE_PRIMARY_TYPE,
+  MAX_DISPLAY_NAME_BYTES,
+  MAX_LEGAL_NAME_BYTES,
+  MAX_WEBSITE_BYTES,
+  countryToBytes2,
+  countryFromBytes2,
+  rolesToBitmask,
+  rolesFromBitmask,
 } from '@facture/shared';

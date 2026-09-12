@@ -40,6 +40,7 @@ import type {
   Mandate,
   MandateStatus,
   MinorUnits,
+  PartyRole,
   Quote,
   Rating,
   Refusal,
@@ -60,6 +61,7 @@ import {
   REFUSAL_CODES,
   SETTLEMENT_LEG_STATES,
   isRegulationKey,
+  PARTY_ROLES,
 } from '@/lib/domain';
 import { ApiError } from './problem';
 
@@ -1778,6 +1780,46 @@ export function readSeller(raw: unknown, path = 'seller'): SellerRecord {
   };
 }
 
+/**
+ * A funding desk, shaped exactly like a seller because it is the same act.
+ *
+ * Kept as its own type rather than aliased to {@link SellerRecord}. The two tables are not the
+ * same — `buyers` carries an `agentPolicy` the venue deliberately does not publish — and one being
+ * a structural subset of the other today is not a reason to make a rename on either side silently
+ * retype the other.
+ */
+export interface BuyerRecord {
+  id: string;
+  name: string;
+  email: string;
+  hederaAccountId: string | null;
+  arcAddress: string | null;
+}
+
+export interface BuyerSignIn {
+  buyer: BuyerRecord;
+  created: boolean;
+}
+
+export function readBuyer(raw: unknown, path = 'buyer'): BuyerRecord {
+  const body = readObject(raw, path);
+  return {
+    id: readString(field(body, 'id'), `${path}.id`),
+    name: readString(field(body, 'name'), `${path}.name`),
+    email: readString(field(body, 'email'), `${path}.email`),
+    hederaAccountId: readOptionalString(field(body, 'hederaAccountId'), `${path}.hederaAccountId`),
+    arcAddress: readOptionalString(field(body, 'arcAddress'), `${path}.arcAddress`),
+  };
+}
+
+export function readBuyerSignIn(raw: unknown, path = 'signIn'): BuyerSignIn {
+  const body = readObject(raw, path);
+  return {
+    buyer: readBuyer(field(body, 'buyer'), `${path}.buyer`),
+    created: readBoolean(field(body, 'created') ?? false, `${path}.created`),
+  };
+}
+
 export function readSellerSignIn(raw: unknown, path = 'signIn'): SellerSignIn {
   const body = readObject(raw, path);
   return {
@@ -1829,4 +1871,200 @@ export function readHealth(raw: unknown, path = 'health'): HealthResponse {
     facilitatorOk: field(facilitator, 'ok') === true,
     issuanceQueued: queued === undefined ? null : readNumber(queued, `${path}.issuance.queued`),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Parties                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What an address says about itself, read off `PartyRegistry`.
+ *
+ * The one record in this product the venue did not author. Every other public fact here is
+ * something Facture wrote — `postMandate` even records the venue as the buyer of every standing
+ * bid — whereas this is recovered from an EIP-712 signature, so the chain holds what the party
+ * said and nothing the venue could have put there instead.
+ *
+ * `roles` is a claim rather than a permission, and the decoder deliberately does not translate it
+ * into one: nothing a screen renders from this field should gate anything.
+ */
+export interface PartyProfileRecord {
+  address: string;
+  roles: PartyRole[];
+  /** Set when the record claims a role this build does not know. Rendered, never dropped. */
+  unknownRoleBits: number;
+  displayName: string;
+  legalName: string | null;
+  country: string | null;
+  websiteUri: string | null;
+  metadataHash: string | null;
+  nonce: number;
+  updatedAt: string;
+}
+
+/**
+ * A profile lookup, in three states rather than two.
+ *
+ * `checked: false` means no registry is wired or the node would not answer; `checked: true` with a
+ * null `profile` means this address has genuinely never written one. Folding those together would
+ * print a confident absence where there is only an unanswered question — the mistake `/health`
+ * made with its cursor and the proof view's registry block already avoids.
+ */
+export interface PartyLookup {
+  address: string | null;
+  checked: boolean;
+  profile: PartyProfileRecord | null;
+  /**
+   * The venue's own name for this party, on the endpoints that publish one.
+   *
+   * `/v1/parties/by-seller/:id` and `/by-buyer/:id` carry it, and it is the reason those joins
+   * exist: the venue has a name for a business whether or not that business has ever signed a
+   * profile. `/v1/parties/:address` does NOT — it is keyed by an address and the venue may know
+   * nothing about it — so `null` here means "this endpoint does not publish one" as often as it
+   * means "the venue has none". An earlier version of this comment claimed the field exists
+   * whenever a profile does not, which is false for one of its three producers.
+   */
+  venueName: string | null;
+  /** The nonce the next signature must carry. `null` when the registry could not be asked. */
+  nonce: string | null;
+  /** Where to sign, or `null` on a deployment with no registry. */
+  signing: { domain: PartySigningDomain; contractAddress: string } | null;
+}
+
+export interface PartySigningDomain {
+  name: string;
+  version: string;
+  chainId: number;
+  verifyingContract: string;
+}
+
+function readPartyProfile(raw: unknown, path: string): PartyProfileRecord {
+  const body = readObject(raw, path);
+  const roles = readArray(field(body, 'roles') ?? [], `${path}.roles`).map((role, i) =>
+    readEnum(role, `${path}.roles[${i}]`, PARTY_ROLES),
+  );
+
+  return {
+    address: readString(field(body, 'address'), `${path}.address`),
+    roles,
+    unknownRoleBits: readNumber(field(body, 'unknownRoleBits') ?? 0, `${path}.unknownRoleBits`),
+    displayName: readString(field(body, 'displayName'), `${path}.displayName`),
+    legalName: readOptionalString(field(body, 'legalName'), `${path}.legalName`),
+    country: readOptionalString(field(body, 'country'), `${path}.country`),
+    websiteUri: readOptionalString(field(body, 'websiteUri'), `${path}.websiteUri`),
+    metadataHash: readOptionalString(field(body, 'metadataHash'), `${path}.metadataHash`),
+    nonce: readNumber(field(body, 'nonce') ?? 0, `${path}.nonce`),
+    updatedAt: readString(field(body, 'updatedAt'), `${path}.updatedAt`),
+  };
+}
+
+function readSigningDomain(raw: unknown, path: string): PartySigningDomain {
+  const body = readObject(raw, path);
+  return {
+    name: readString(field(body, 'name'), `${path}.name`),
+    version: readString(field(body, 'version'), `${path}.version`),
+    chainId: readNumber(field(body, 'chainId'), `${path}.chainId`),
+    verifyingContract: readString(field(body, 'verifyingContract'), `${path}.verifyingContract`),
+  };
+}
+
+export function readPartyLookup(raw: unknown, path = 'party'): PartyLookup {
+  const body = readObject(raw, path);
+  const party = readObject(field(body, 'party'), `${path}.party`);
+  const profile = field(party, 'profile');
+  const signing = field(body, 'signing');
+
+  return {
+    address: readOptionalString(field(party, 'address'), `${path}.party.address`),
+    checked: readBoolean(field(party, 'checked') ?? false, `${path}.party.checked`),
+    profile: profile === undefined ? null : readPartyProfile(profile, `${path}.party.profile`),
+    venueName: readOptionalString(field(party, 'name'), `${path}.party.name`),
+    nonce: readOptionalString(field(party, 'nonce'), `${path}.party.nonce`),
+    signing:
+      signing === undefined
+        ? null
+        : {
+            domain: readSigningDomain(
+              field(readObject(signing, `${path}.signing`), 'domain'),
+              `${path}.signing.domain`,
+            ),
+            contractAddress: readString(
+              field(readObject(signing, `${path}.signing`), 'contractAddress'),
+              `${path}.signing.contractAddress`,
+            ),
+          },
+  };
+}
+
+/**
+ * What became of a relayed profile.
+ *
+ * Four states, because the fixes differ. `refused` is the party's to resolve by signing again;
+ * `unavailable` is nobody's fault and costs only the public copy; `not-configured` is a deployment
+ * without a registry and is not a failure at all. Collapsing any of them into "error" would send
+ * somebody to check their connection when they need to re-sign.
+ */
+export interface ProfileSaved {
+  address: string;
+  roles: PartyRole[];
+  displayName: string;
+  recording: {
+    state: 'recorded' | 'not-configured' | 'unavailable' | 'refused';
+    transactionHash: string | null;
+    detail: string;
+  };
+  sellerId: string | null;
+  buyerId: string | null;
+}
+
+export function readProfileSaved(raw: unknown, path = 'profile'): ProfileSaved {
+  const body = readObject(raw, path);
+  const party = readObject(field(body, 'party'), `${path}.party`);
+  const recording = readObject(field(body, 'recording'), `${path}.recording`);
+
+  return {
+    address: readString(field(party, 'address'), `${path}.party.address`),
+    roles: readArray(field(party, 'roles') ?? [], `${path}.party.roles`).map((role, i) =>
+      readEnum(role, `${path}.party.roles[${i}]`, PARTY_ROLES),
+    ),
+    displayName: readString(field(party, 'displayName'), `${path}.party.displayName`),
+    recording: {
+      state: readEnum(field(recording, 'state'), `${path}.recording.state`, [
+        'recorded',
+        'not-configured',
+        'unavailable',
+        'refused',
+      ] as const),
+      transactionHash: readOptionalString(
+        field(recording, 'transactionHash'),
+        `${path}.recording.transactionHash`,
+      ),
+      detail: readString(field(recording, 'detail'), `${path}.recording.detail`),
+    },
+    sellerId: readOptionalString(field(body, 'sellerId'), `${path}.sellerId`),
+    buyerId: readOptionalString(field(body, 'buyerId'), `${path}.buyerId`),
+  };
+}
+
+/**
+ * The message as it crosses the wire, which is not quite the message that was signed.
+ *
+ * `nonce` and `deadline` are `uint64` on chain and `bigint` in `@facture/shared`, and JSON has
+ * neither. They travel as decimal strings rather than numbers because a `uint64` past 2^53 would
+ * round silently through `number`, and a rounded nonce is a signature that recovers correctly and
+ * is then refused by the contract for a reason nothing on screen could explain.
+ *
+ * Every other field is carried verbatim. The signature covers these exact bytes, so nothing here
+ * may be recomputed on either side — see the note on `PROFILE_UPDATE_TYPES` in `@facture/shared`.
+ */
+export interface SignedProfileUpdate {
+  party: string;
+  roles: number;
+  displayName: string;
+  legalName: string;
+  country: string;
+  websiteUri: string;
+  metadataHash: string;
+  nonce: string;
+  deadline: string;
 }

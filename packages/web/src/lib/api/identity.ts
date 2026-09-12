@@ -36,18 +36,23 @@
 import { BUYER_ID, SELLER_ID } from './config';
 
 let signedInSellerId: string | null = null;
+let signedInBuyerId: string | null = null;
 const listeners = new Set<() => void>();
 
 /** The seller whose book should render. Session first, configuration second. */
 export const sellerId = (): string => signedInSellerId ?? SELLER_ID;
 
 /**
- * The buyer whose mandates should render.
+ * The buyer whose mandates should render. Session first, configuration second.
  *
- * Configuration only, for now. Onboarding covers sellers: a funder is still set up by hand
- * and there is no `POST /v1/buyers` behind which a session could produce one.
+ * **This used to be configuration only**, above a comment saying a funder was set up by hand and
+ * there was no `POST /v1/buyers` behind which a session could produce one. There is now, so the
+ * asymmetry has gone — and it was the sharpest version of the problem this module exists for:
+ * signing in changed whose book `/book` rendered and left `/mandates` showing whichever desk the
+ * build was configured with. A viewer was two different companies at once, and could only change
+ * one of them.
  */
-export const buyerId = (): string => BUYER_ID;
+export const buyerId = (): string => signedInBuyerId ?? BUYER_ID;
 
 /** True when the seller on screen is a signed-in one rather than the configured default. */
 export const isSignedIn = (): boolean => signedInSellerId !== null;
@@ -76,6 +81,22 @@ export function setSignedInSeller(id: string | null): void {
   for (const listener of listeners) listener();
 }
 
+/**
+ * The buyer half of {@link setSignedInSeller}, and separate from it on purpose.
+ *
+ * The venue mints two ids for one person and either can arrive without the other — a desk whose
+ * sign-in succeeded while the seller call was still in flight, or a deployment where one route is
+ * configured and the other is not. Collapsing them into one setter would make a half-resolved
+ * session indistinguishable from a signed-out one, and `/mandates` would quietly fall back to the
+ * configured desk while `/book` showed the right business.
+ */
+export function setSignedInBuyer(id: string | null): void {
+  const next = id === null || id.trim() === '' ? null : id.trim();
+  if (next === signedInBuyerId) return;
+  signedInBuyerId = next;
+  for (const listener of listeners) listener();
+}
+
 export function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -97,6 +118,10 @@ export function explainMissingIdentity(kind: 'seller' | 'buyer'): string | null 
 
   if (kind === 'seller' && signedInSellerId !== null) {
     return `Signed in, but the venue returned "${signedInSellerId}" as this business's id, which is not a UUID.`;
+  }
+
+  if (kind === 'buyer' && signedInBuyerId !== null) {
+    return `Signed in, but the venue returned "${signedInBuyerId}" as this desk's id, which is not a UUID.`;
   }
 
   const variable = kind === 'seller' ? 'NEXT_PUBLIC_SELLER_ID' : 'NEXT_PUBLIC_BUYER_ID';

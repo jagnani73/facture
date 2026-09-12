@@ -27,7 +27,12 @@ import { ASSET_CHAIN, CHAINS, isQuotable, tenorDays } from '@/lib/domain';
 import type { Position } from '@/lib/pricing';
 import { api } from '@/lib/api/client';
 import { buyerId, explainMissingIdentity, sellerId } from '@/lib/api/identity';
-import type { LiveQuoteResponse, TradeProofResponse, TradeRecord } from '@/lib/api/contract';
+import type {
+  LiveQuoteResponse,
+  PartyLookup,
+  TradeProofResponse,
+  TradeRecord,
+} from '@/lib/api/contract';
 import { ApiError } from '@/lib/api/problem';
 import { isSettledTrade } from '@/lib/settlement';
 import type { ConfirmationRecord, InvoicePricing, Market, ProofRecord } from './types';
@@ -130,10 +135,38 @@ function toPosition(
 }
 
 /**
- * No response carries the seller's own name — the book is scoped by an id, and there is no
- * session yet. The screens say "your book" rather than inventing a company name.
+ * Who the screens are looking at, in the party's own words.
+ *
+ * This used to be the literal `'Your business'`, above a comment saying no response carried a
+ * name and there was no session. **Both halves of that stopped being true** — `GET /v1/sellers/:id`
+ * has answered a name since seller onboarding shipped, and a signed-in seller's record comes back
+ * on every sign-in — and the literal outlived them, so the live product called every seller "Your
+ * business" and every funder "Your desk" while the fixture book was the only place a company was
+ * ever named.
+ *
+ * The order is deliberate. A profile on `PartyRegistry` is what the party **signed** for
+ * themselves, so it outranks the venue's own column, which before onboarding holds nothing better
+ * than `provisionalName`'s guess at the email domain. The venue's name is the fallback rather than
+ * the authority, and the last resort names nobody rather than inventing one.
  */
-const SELLER_NAME = 'Your business';
+function nameOf(party: PartyLookup | null, fallback: string): string {
+  return party?.profile?.displayName ?? party?.venueName ?? fallback;
+}
+
+/**
+ * A party lookup that cannot fail the page.
+ *
+ * A name is the least load-bearing thing on these screens, and the book behind it is the most.
+ * Letting an unreadable registry — or a venue that has not been told who this buyer is — take out
+ * the whole market view would trade something that matters for something that does not.
+ */
+async function lookupParty(read: () => Promise<PartyLookup>): Promise<PartyLookup | null> {
+  try {
+    return await read();
+  } catch {
+    return null;
+  }
+}
 
 /* -------------------------------------------------------------------------- */
 /* The market                                                                  */
@@ -144,12 +177,18 @@ export async function apiMarket(signal?: AbortSignal): Promise<Market> {
 
   const asOf = new Date();
 
-  const [book, mandatePage, sellerTrades, buyerTrades] = await Promise.all([
-    api.listInvoices({ sellerId: sellerId() }, signal),
-    api.listMandates({ buyerId: buyerId() }, signal),
-    api.listTrades({ sellerId: sellerId() }, signal),
-    api.listTrades({ buyerId: buyerId() }, signal),
-  ]);
+  const [book, mandatePage, sellerTrades, buyerTrades, sellerParty, buyerParty] = await Promise.all(
+    [
+      api.listInvoices({ sellerId: sellerId() }, signal),
+      api.listMandates({ buyerId: buyerId() }, signal),
+      api.listTrades({ sellerId: sellerId() }, signal),
+      api.listTrades({ buyerId: buyerId() }, signal),
+      // Two more round trips, in the same pass rather than after it. Serialising them would put a
+      // name lookup in front of the book, which is the wrong thing to make anyone wait for.
+      lookupParty(() => api.getPartyBySeller(sellerId(), signal)),
+      lookupParty(() => api.getPartyByBuyer(buyerId(), signal)),
+    ],
+  );
 
   const rows = book.items;
   const invoices = rows.map((row) => row.invoice);
@@ -225,15 +264,20 @@ export async function apiMarket(signal?: AbortSignal): Promise<Market> {
   return buildMarket({
     source: 'api',
     asOf,
-    seller: { id: sellerId(), name: SELLER_NAME },
-    viewer: { id: buyerId(), name: 'Your desk' },
+    seller: { id: sellerId(), name: nameOf(sellerParty, 'Your business') },
+    viewer: { id: buyerId(), name: nameOf(buyerParty, 'Your desk') },
     invoices,
     debtors: [...debtorsById.values()],
     mandates,
     positions,
     trades,
     pricing,
-    meta: new Map(mandates.map((mandate) => [mandate.id, derivedMeta(mandate)])),
+    meta: new Map(
+      mandates.map((mandate) => [
+        mandate.id,
+        derivedMeta(mandate, nameOf(buyerParty, 'This desk')),
+      ]),
+    ),
     // Confirmation links are minted by the venue and emailed to the customer. The seller's
     // screen never sees the token, which is the point of it being single-use.
     tokens: new Map(),

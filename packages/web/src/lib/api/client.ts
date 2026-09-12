@@ -21,9 +21,13 @@ import type {
   InvoiceListing,
   InvoiceRow,
   LiveQuoteResponse,
+  BuyerSignIn,
   MandateRecord,
   Page,
+  PartyLookup,
+  ProfileSaved,
   SellerSignIn,
+  SignedProfileUpdate,
   TradeChallenge,
   TradeProofResponse,
   TradeRecord,
@@ -43,6 +47,9 @@ import {
   readMandateRecord,
   readObject,
   readPage,
+  readBuyerSignIn,
+  readPartyLookup,
+  readProfileSaved,
   readSellerSignIn,
   readTrade,
   readTradeChallenge,
@@ -255,6 +262,110 @@ export const api = {
         headers: { authorization: `Bearer ${idToken}` },
       },
       (raw) => readSellerSignIn(raw),
+    );
+  },
+
+  /**
+   * `POST /v1/buyers` — the funding desk's half of the same act.
+   *
+   * Identical in shape to {@link signInSeller} and idempotent on the same verified email, which is
+   * what lets both be called on every sign-in without asking first which one a person is. That
+   * question is answered by their profile, and a profile is something they have to sign — so it
+   * cannot be the thing that decides whether they can be looked up at all.
+   *
+   * The cost of calling both is an empty desk for a party who only ever sells. That is the right
+   * side of the trade: the alternative is a sign-in that cannot resolve a buyer id until after a
+   * signature, and `/mandates` rendering somebody else's book in the meantime — which is the exact
+   * confusion this whole workstream exists to remove.
+   */
+  signInBuyer(idToken: string, signal?: AbortSignal): Promise<BuyerSignIn> {
+    return request(
+      '/buyers',
+      {
+        method: 'POST',
+        what: 'signing in',
+        signal,
+        headers: { authorization: `Bearer ${idToken}` },
+      },
+      (raw) => readBuyerSignIn(raw),
+    );
+  },
+
+  /* --- Parties: what an address says about itself ------------------------ */
+
+  /**
+   * `GET /v1/parties/:address` — the profile on `PartyRegistry`, plus what is needed to sign.
+   *
+   * Public, because the record is public: it is on a chain anyone can read, and a venue whose own
+   * copy were harder to reach than the chain's would be pure friction.
+   *
+   * The nonce and the signing domain come from the venue rather than being assembled here. There
+   * is one authority on what a signature must carry and it is the contract that will check it — a
+   * client that built its own domain could sign against a registry this venue does not read, and
+   * the failure would be a signature that verifies nowhere.
+   */
+  getParty(address: string, signal?: AbortSignal): Promise<PartyLookup> {
+    return request(
+      `/parties/${encodeURIComponent(address)}`,
+      { what: 'this party', signal },
+      (raw) => readPartyLookup(raw),
+    );
+  },
+
+  /**
+   * `GET /v1/parties/by-seller/:id` — the join the screens actually need.
+   *
+   * A screen holds a seller UUID; a profile is keyed by an EVM address. A party who has never
+   * connected a wallet comes back `checked: false` rather than as an error, because that is a
+   * normal state here and not a fault.
+   */
+  getPartyBySeller(sellerId: string, signal?: AbortSignal): Promise<PartyLookup> {
+    return request(
+      `/parties/by-seller/${encodeURIComponent(sellerId)}`,
+      { what: 'this business', signal },
+      (raw) => readPartyLookup(raw),
+    );
+  },
+
+  /** `GET /v1/parties/by-buyer/:id`. The buyer side of {@link getPartyBySeller}. */
+  getPartyByBuyer(buyerId: string, signal?: AbortSignal): Promise<PartyLookup> {
+    return request(
+      `/parties/by-buyer/${encodeURIComponent(buyerId)}`,
+      { what: 'this desk', signal },
+      (raw) => readPartyLookup(raw),
+    );
+  },
+
+  /**
+   * `POST /v1/parties/me` — relay a profile this wallet signed, and make the rows it implies.
+   *
+   * The venue pays the gas and authors nothing: `PartyRegistry` writes whichever address the
+   * EIP-712 signature recovers to, so a relay cannot put words in anyone's mouth. That is why the
+   * party needs no HBAR — signing is arithmetic, and the transaction is the venue's.
+   *
+   * The identity token is still required. The chain is safe without it, but the venue is paying
+   * and is about to write its own seller and buyer rows, and neither should be open to anyone
+   * holding a signed message off the wire.
+   *
+   * A 200 does **not** mean the chain took it. `recording.state` says which of four things
+   * happened, and a screen that reads the status code alone would tell a party their profile is
+   * public when only the venue's copy is.
+   */
+  saveProfile(
+    idToken: string,
+    body: { update: SignedProfileUpdate; signature: string },
+    signal?: AbortSignal,
+  ): Promise<ProfileSaved> {
+    return request(
+      '/parties/me',
+      {
+        method: 'POST',
+        what: 'saving your profile',
+        signal,
+        body,
+        headers: { authorization: `Bearer ${idToken}` },
+      },
+      (raw) => readProfileSaved(raw),
     );
   },
 

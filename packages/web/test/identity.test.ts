@@ -20,15 +20,18 @@ import {
   explainMissingIdentity,
   isSignedIn,
   sellerId,
+  setSignedInBuyer,
   setSignedInSeller,
   subscribe,
 } from '@/lib/api/identity';
 
 const A_SELLER = 'e37a8422-960d-5a77-9825-8964df79ed49';
 const ANOTHER = 'f888dd62-6df0-5600-925e-06469ef0aef6';
+const A_DESK = '2b6f0cc9-04a1-5e35-8f7c-3d1f9f0b1a2e';
 
 afterEach(() => {
   setSignedInSeller(null);
+  setSignedInBuyer(null);
 });
 
 describe('resolution order', () => {
@@ -61,11 +64,43 @@ describe('resolution order', () => {
   });
 
   /*
-   * The buyer side has no session because there is no `POST /v1/buyers` for one to come
-   * from. Pinned so that shipping half of it later is a deliberate act.
+   * The buyer half, which used to be pinned as ABSENT.
+   *
+   * The test that stood here asserted that signing a seller in left `buyerId()` on
+   * configuration, with a comment saying there was no `POST /v1/buyers` for a session to come
+   * from — "pinned so that shipping half of it later is a deliberate act". That route shipped
+   * and `buyerId()` reads a session first, and the test kept passing, because it never called
+   * `setSignedInBuyer` and so pinned nothing at all. A test describing a world that no longer
+   * exists is worse than no test: it reads as coverage.
+   *
+   * What is worth holding is the same ordering rule the seller side has, plus the property the
+   * split setters exist for — the two halves move independently, so a seller who resolved
+   * without a desk is a real state rather than a signed-out one.
    */
-  it('leaves the buyer on configuration', () => {
+  it('prefers a signed-in buyer over the configured desk', () => {
+    setSignedInBuyer(A_DESK);
+
+    expect(buyerId()).toBe(A_DESK);
+    expect(buyerId()).not.toBe(BUYER_ID);
+  });
+
+  it('leaves the buyer on configuration while only the seller has resolved', () => {
     setSignedInSeller(A_SELLER);
+
+    expect(sellerId()).toBe(A_SELLER);
+    expect(buyerId()).toBe(BUYER_ID);
+  });
+
+  it('returns to the configured desk on sign-out', () => {
+    setSignedInBuyer(A_DESK);
+    setSignedInBuyer(null);
+
+    expect(buyerId()).toBe(BUYER_ID);
+  });
+
+  /* The seller side's blank rule, which has to hold identically or the halves diverge. */
+  it('treats a blank desk id as signed out rather than as a desk called ""', () => {
+    setSignedInBuyer('   ');
     expect(buyerId()).toBe(BUYER_ID);
   });
 });
@@ -165,5 +200,24 @@ describe('explainMissingIdentity', () => {
   it('still explains the buyer from configuration', () => {
     setSignedInSeller(A_SELLER);
     expect(explainMissingIdentity('buyer')).toContain('NEXT_PUBLIC_BUYER_ID');
+  });
+
+  it('says nothing once a signed-in buyer supplies a usable id', () => {
+    setSignedInBuyer(A_DESK);
+    expect(explainMissingIdentity('buyer')).toBeNull();
+  });
+
+  /*
+   * The buyer half of the same rule, and the branch that arrived with `POST /v1/buyers`. A desk
+   * resolved from a session that the venue answered with something unusable must not send its
+   * owner to fix an environment variable nothing is reading.
+   */
+  it('blames the venue, not the environment, when a session desk id is unusable', () => {
+    setSignedInBuyer('not-a-uuid');
+
+    const message = explainMissingIdentity('buyer');
+    expect(message).toContain('Signed in');
+    expect(message).toContain('desk');
+    expect(message).not.toContain('NEXT_PUBLIC_BUYER_ID');
   });
 });

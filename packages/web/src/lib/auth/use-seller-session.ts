@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api/client';
 import { signInAvailable } from '@/lib/api/config';
 import type { SellerRecord } from '@/lib/api/contract';
-import { setSignedInSeller } from '@/lib/api/identity';
+import { setSignedInBuyer, setSignedInSeller } from '@/lib/api/identity';
 import { ApiError } from '@/lib/api/problem';
 
 /**
@@ -60,8 +60,31 @@ export type SellerSessionState =
   | { status: 'loading' }
   | { status: 'signed-out' }
   | { status: 'signing-in' }
-  | { status: 'signed-in'; seller: SellerRecord; created: boolean }
+  | { status: 'signed-in'; seller: SellerRecord; created: boolean; desk: DeskResolution }
   | { status: 'failed'; message: string };
+
+/**
+ * Whether the funding-desk half of this sign-in resolved, which is a separate question from
+ * whether the sign-in did.
+ *
+ * **Three values rather than two, and the third one is the bug this field exists for.** A buyer
+ * sign-in that fails does not fail the session — that is correct and deliberate, and the reason is
+ * written out at the call site — but it used to fail into a silence: the rejection was caught with
+ * an empty body, `signedInBuyerId` stayed null, and `buyerId()` fell back to `NEXT_PUBLIC_BUYER_ID`
+ * with nothing anywhere saying so. `setSignedInBuyer`'s own doc says the setters were split
+ * precisely so a half-resolved session could not be "indistinguishable from a signed-out one", and
+ * an empty catch is that collapse rebuilt one layer up.
+ *
+ * It stopped being cosmetic when `api-source.ts` began resolving real party names. The desk used to
+ * render as the generic "Your desk"; now a seller whose buyer half failed sees **the seeded demo
+ * desk's actual company name**, its capital and its exposure, presented as their own.
+ *
+ * `resolving` is separate from `unresolved` for the reason `/health` gives about its cursor and
+ * `ComplianceDecision.determinate` gives about a compliance read: "not asked yet" and "asked, no
+ * answer" are different facts, and folding them together is how a screen prints a claim nobody
+ * established. `unresolved` is the one that means the desk on screen is not this person's.
+ */
+export type DeskResolution = 'resolving' | 'resolved' | 'unresolved';
 
 export interface SellerSession {
   state: SellerSessionState;
@@ -95,6 +118,7 @@ export function useSellerSession(): SellerSession {
     if (!authenticated) {
       asked.current = null;
       setSignedInSeller(null);
+      setSignedInBuyer(null);
       setState({ status: 'signed-out' });
       return;
     }
@@ -123,11 +147,64 @@ export function useSellerSession(): SellerSession {
     const controller = new AbortController();
     setState({ status: 'signing-in' });
 
+    /*
+     * The desk answer lands after the seller's, so it must not resurrect a session that has since
+     * ended. Keying the functional update on the seller id is what makes a late answer to a
+     * sign-in somebody has already signed out of — or replaced — land on nothing at all.
+     */
+    const markDesk = (sellerId: string, desk: DeskResolution) =>
+      setState((current) =>
+        current.status === 'signed-in' && current.seller.id === sellerId
+          ? { ...current, desk }
+          : current,
+      );
+
     void (async () => {
       try {
         const result = await api.signInSeller(identityToken, controller.signal);
         setSignedInSeller(result.seller.id);
-        setState({ status: 'signed-in', seller: result.seller, created: result.created });
+        setState({
+          status: 'signed-in',
+          seller: result.seller,
+          created: result.created,
+          desk: 'resolving',
+        });
+
+        /*
+         * The desk, after the book and deliberately not beside it.
+         *
+         * Both routes are idempotent on the same verified email, so calling both on every sign-in
+         * is safe and is what makes `/mandates` yours rather than whichever desk the build was
+         * configured with. But only the seller half decides whether the session succeeded: a
+         * venue that cannot mint a buyer id must not knock a seller back to the demo book, which
+         * is what awaiting this inside the same try would do.
+         *
+         * The cost is an empty desk for somebody who only ever sells. That is the right side of
+         * the trade — the alternative is resolving a buyer id only after a profile is signed, and
+         * rendering a stranger's mandates until then.
+         *
+         * **Not awaited, and no longer silent.** The property above is preserved exactly — this
+         * stays outside the try and a rejection never reaches the seller's state machine — but the
+         * outcome is now recorded in {@link DeskResolution} and logged, because the fallback it
+         * leaves behind is not a neutral one. See that type for what the fallback renders.
+         */
+        void api
+          .signInBuyer(identityToken, controller.signal)
+          .then((desk) => {
+            setSignedInBuyer(desk.buyer.id);
+            markDesk(result.seller.id, 'resolved');
+          })
+          .catch((error: unknown) => {
+            if (error instanceof DOMException && error.name === 'AbortError') return;
+            /*
+             * Logged as well as recorded. The state says a desk did not resolve; only the error
+             * says whether the venue was unreachable, refused the token, or answered in a shape
+             * this build could not read — and none of that is recoverable from a screen that has
+             * already fallen back to the configured desk.
+             */
+            console.warn('Facture: this session has no funding desk of its own.', error);
+            markDesk(result.seller.id, 'unresolved');
+          });
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') return;
         /*
@@ -135,6 +212,7 @@ export function useSellerSession(): SellerSession {
          * book as though it were this person's. Clearing is what makes the failure visible.
          */
         setSignedInSeller(null);
+        setSignedInBuyer(null);
         asked.current = null;
         setState({
           status: 'failed',
@@ -151,6 +229,7 @@ export function useSellerSession(): SellerSession {
 
   const signOut = useCallback(() => {
     setSignedInSeller(null);
+    setSignedInBuyer(null);
     void logout();
   }, [logout]);
 

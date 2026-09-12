@@ -172,12 +172,19 @@ const UNKNOWN_DEBTOR: Debtor = {
  * the policy restated: "A or better, 60 days". That is not a placeholder — it is the only
  * honest name for a standing bid the screen has never been told the name of.
  */
-export function derivedMeta(mandate: MandateRecord): MandateMeta {
+export function derivedMeta(mandate: MandateRecord, ownerName = 'This desk'): MandateMeta {
   const floor =
     mandate.minRating === 'UNRATED' ? 'No default on record' : `${mandate.minRating} or better`;
   return {
     name: `${floor}, ${mandate.maxTenorDays} days`,
-    ownerName: 'This desk',
+    /*
+     * The desk's real name when the caller knows it, which on the live path it now does: the
+     * venue answers who a buyer is, and their own signed profile outranks that. `'This desk'`
+     * survives as the default because this function is also called where no name is in hand —
+     * and because a mandate the venue has no owner name for is honestly unnamed rather than
+     * wrongly attributed.
+     */
+    ownerName,
     /*
      * The venue's answer, not an assumption. This was hardcoded to `desk`, which presented
      * an agent-operated desk as a human one — and the product's claim is that an agent is
