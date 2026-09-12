@@ -49,6 +49,11 @@ const DEPLOYED = [
     name: 'UniquenessRegistry',
     address: '0x8eb9f00126bca50226e47b71a75f7b438e81d408',
   },
+  {
+    chainId: 296,
+    name: 'PartyRegistry',
+    address: '0x1C9882714e1ae2555531E1a7eb4E83EBeCA8B2ca',
+  },
   { chainId: 296, name: 'InvoiceRegistry', address: '0x44fe6E29aaDe69085CE53c4694b99EFe4639B7a7' },
   { chainId: 296, name: 'MandateBook', address: '0x361f9d4b1101898417b2b9148bc8aa522024a38f' },
   { chainId: 296, name: 'DvpEscrow', address: '0x35a8a43d2d840f02887cd0427e78f6b0205ded87' },

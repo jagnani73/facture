@@ -1,5 +1,5 @@
 /**
- * Deploy the BOOK, the GATE and the TWO REGISTRIES on Hedera testnet.
+ * Deploy the BOOK, the GATE and the THREE REGISTRIES on Hedera testnet.
  *
  *   pnpm --filter @facture/contracts deploy:hedera
  *
@@ -62,6 +62,15 @@ const GAS = {
    * must still cover `gasLimit x gasPrice` up front.
    */
   deployBook: 5_000_000n,
+  /**
+   * PartyRegistry, which is too big for the small class and nowhere near the book.
+   *
+   * 6,171 bytes of runtime, so 1,234,200 gas in code deposit before the constructor runs — against
+   * the 1,015,000 that `deploySmall` was sized around. Reusing that limit would leave 21% headroom
+   * where the class was built for roughly 47%, and an underestimate on Hedera fails the transaction
+   * while still billing the limit. EIP-712 and ECDSA are what put it in its own bracket.
+   */
+  deployPartyRegistry: 1_800_000n,
   /** Role grants and setter calls. Measured at ~180k on ATS; 300k leaves comfortable headroom. */
   adminCall: 300_000n,
 } as const;
@@ -107,9 +116,10 @@ async function main(): Promise<void> {
    *
    * With these, a redeploy is per-contract. Correcting the compliance gate — which shipped probing
    * three ATS selectors that do not exist, and refused every buyer on every instrument — is a
-   * one-contract deployment plus the `setComplianceGate` rewire in step 6, and nothing else moves.
+   * one-contract deployment plus the `setComplianceGate` rewire in step 7, and nothing else moves.
    */
   const existingUniquenessRegistry = optionalAddress('FACTURE_UNIQUENESS_REGISTRY');
+  const existingPartyRegistry = optionalAddress('FACTURE_PARTY_REGISTRY');
   const existingInvoiceRegistry = optionalAddress('FACTURE_INVOICE_REGISTRY');
   const existingComplianceGate = optionalAddress('FACTURE_COMPLIANCE_GATE');
   const existingDeliveryEscrow = optionalAddress('FACTURE_DELIVERY_ESCROW');
@@ -147,7 +157,29 @@ async function main(): Promise<void> {
     );
   }
 
-  // --- 2. InvoiceRegistry ------------------------------------------------------------------------
+  // --- 2. PartyRegistry --------------------------------------------------------------------------
+  // Independent of everything else in this script, and deliberately so. It records what each address
+  // says about itself; no other contract takes it as a constructor argument, and nothing here reads
+  // it to decide anything. So it can be redeployed on its own, and unlike the uniqueness registry a
+  // fresh one abandons no guarantee — it costs each party one re-signature, which they can produce,
+  // rather than costing the venue a claim it has no way to rebuild. Reuse is a convenience here
+  // rather than an obligation.
+  //
+  // It takes no owner. A record can only be written by the key it describes, so there is no issuer
+  // set to curate and no administrative action this contract could offer anyone.
+  let partyRegistry: Address;
+  if (existingPartyRegistry === undefined) {
+    const deployed = await viem.deployContract('PartyRegistry', [], {
+      gas: GAS.deployPartyRegistry,
+    });
+    partyRegistry = deployed.address;
+    console.log(`PartyRegistry       ${partyRegistry}`);
+  } else {
+    partyRegistry = existingPartyRegistry;
+    console.log(`PartyRegistry       ${partyRegistry}  (reused, from FACTURE_PARTY_REGISTRY)`);
+  }
+
+  // --- 3. InvoiceRegistry ------------------------------------------------------------------------
   // The source of invoice truth the book reads before it allows a match. It takes the uniqueness
   // registry as an immutable — listing verifies that the receivable was actually claimed against the
   // instrument being listed — so it deploys after it and before the book, which records it as an
@@ -177,13 +209,13 @@ async function main(): Promise<void> {
     console.log(`InvoiceRegistry     ${invoiceRegistry}  (reused, from FACTURE_INVOICE_REGISTRY)`);
   }
 
-  // --- 3. AtsComplianceGate ----------------------------------------------------------------------
+  // --- 4. AtsComplianceGate ----------------------------------------------------------------------
   // Stateless and immutable; one instance serves every instrument the venue lists. Must be on this
   // chain, because it staticcalls into the securities' diamonds directly.
   //
   // It is also the one contract here most likely to need replacing on its own, because it is the
   // only one coupled to a third party's selectors. The book holds it as a MUTABLE reference for
-  // exactly that reason, so a corrected gate is a deployment plus one owner call — see step 6.
+  // exactly that reason, so a corrected gate is a deployment plus one owner call — see step 7.
   let complianceGate: Address;
   if (existingComplianceGate === undefined) {
     const deployed = await viem.deployContract('AtsComplianceGate', [], { gas: GAS.deploySmall });
@@ -194,7 +226,7 @@ async function main(): Promise<void> {
     console.log(`AtsComplianceGate   ${complianceGate}  (reused, from FACTURE_COMPLIANCE_GATE)`);
   }
 
-  // --- 4. DvpEscrow (delivery leg) ---------------------------------------------------------------
+  // --- 5. DvpEscrow (delivery leg) ---------------------------------------------------------------
   // Before the book, which records it as an IMMUTABLE and reads every settlement proof out of it.
   // The payment-leg twin is deployed on Arc by deployArc.ts. They never communicate.
   //
@@ -211,7 +243,7 @@ async function main(): Promise<void> {
     console.log(`DvpEscrow           ${deliveryEscrow}  (reused, from FACTURE_DELIVERY_ESCROW)`);
   }
 
-  // --- 5. MandateBook ----------------------------------------------------------------------------
+  // --- 6. MandateBook ----------------------------------------------------------------------------
   // `settlementWindow` MUST exceed DvpEscrow's MAX_LOCK_DURATION. If it did not, the book could
   // release an allocation while the delivery leg was still claimable — paying nobody and handing
   // the buyer the bond for free. The constructor enforces this too; the check is repeated here only
@@ -277,7 +309,7 @@ async function main(): Promise<void> {
   const mandateBook = await viem.getContractAt('MandateBook', mandateBookAddress);
   const uniquenessContract = await viem.getContractAt('UniquenessRegistry', uniquenessRegistry);
 
-  // --- 6. Wiring ---------------------------------------------------------------------------------
+  // --- 7. Wiring ---------------------------------------------------------------------------------
   //
   // Authority comes from the contract, not from `FACTURE_OWNER`.
   //
