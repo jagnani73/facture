@@ -68,6 +68,21 @@ export const HEDERA_DEPLOYMENTS = {
    * entry. Pinned so that a redeployed book can bind to it rather than orphan it.
    */
   deliveryEscrow: '0x35a8A43d2D840f02887cd0427e78F6B0205ded87' as Address,
+
+  /**
+   * What each address says about itself, signed by that address. Deployed 2026-09-12.
+   *
+   * The only contract here a party writes to directly rather than the venue writing on their
+   * behalf, and that is its whole point: `MandateBook.postMandate` records `buyer = msg.sender`,
+   * so every standing bid on the public book belongs to the venue. A profile cannot, because the
+   * registry writes whoever the EIP-712 signature recovers to and the venue only relays.
+   *
+   * It has no owner and nothing takes it as a constructor argument, so unlike
+   * {@link HEDERA_DEPLOYMENTS.uniquenessRegistry} it can be redeployed alone. A fresh one costs
+   * each party one re-signature rather than abandoning a guarantee — but it does invalidate every
+   * signature in flight, because the EIP-712 domain binds to this address.
+   */
+  partyRegistry: '0x1C9882714e1ae2555531E1a7eb4E83EBeCA8B2ca' as Address,
 } as const;
 
 /** Arc testnet. Where mandate capital is escrowed and the cash leg settles. */
