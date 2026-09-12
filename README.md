@@ -15,7 +15,28 @@
   Hedera &middot; Arc &middot; ATS zero-coupon paper &middot; cross-chain DvP over x402
 </p>
 
+<p align="center">
+  <a href="https://github.com/jagnani73/facture/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/jagnani73/facture/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="https://facture-ethonline.vercel.app"><img alt="Live app" src="https://img.shields.io/badge/app-live-14a06a" /></a>
+  <a href="https://hashscan.io/testnet/contract/0x8eb9f00126bca50226e47b71a75f7b438e81d408"><img alt="Hedera testnet" src="https://img.shields.io/badge/Hedera-verified-1f4e6b" /></a>
+  <a href="./LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-blue" /></a>
+</p>
+
 ---
+
+Built for [ETHOnline 2026](https://ethglobal.com/events/ethonline) on the from-scratch track, so no
+project-specific code predates the event and the commit history is there to show the work.
+
+|            |                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Try it** | [the seller's book](https://facture-ethonline.vercel.app/book) &middot; [standing bids](https://facture-ethonline.vercel.app/mandates) &middot; [a trade proved end to end](https://facture-ethonline.vercel.app/proof/3d129208-a99e-4667-bc4a-1d7bc5a537eb) &middot; [one an agent bought for itself](https://facture-ethonline.vercel.app/proof/c0c8ed97-b01d-4c30-b9b2-0ddf7472fa3d) |
+| **Venue**  | <https://facture-backend-4p7y.onrender.com> and [`/health`](https://facture-backend-4p7y.onrender.com/health), which reports each chain as reachable, unreachable, or not yet asked                                                                                                                                                                                                     |
+| **Read**   | [four architecture diagrams](./docs/architecture.md) &middot; [every transaction, with ids to check them](./docs/deployments.md) &middot; [a thirteen-minute demo](./docs/demo.md) &middot; [a hands-on walkthrough](./docs/walkthrough.md) &middot; [which parts a model wrote](./docs/ai-usage.md)                                                                                    |
+
+<sub>The venue is a free Render instance and sleeps after fifteen idle minutes, so the first request
+after a quiet spell waits about fifty seconds while it wakes. It has no persistent disk either: the
+book ships as a snapshot inside the build, and whatever you do to the hosted copy is gone at the
+next deploy. A local venue keeps it.</sub>
 
 > **Status: running on testnet.** The five moves below have each happened on chain, more than
 > once, for real. A receivable was issued as an ATS zero-coupon bond, priced off a standing mandate,
@@ -449,91 +470,11 @@ Recorded here so they are not relitigated mid-build.
 
 Five packages, two chains, and exactly one moment where a person is asked to sign something.
 
-```mermaid
-flowchart LR
-    Seller["Seller"]
-    Debtor["Customer<br/><i>one sentence, two buttons</i>"]
+[docs/architecture.md](./docs/architecture.md) draws that, along with the path a receivable takes
+through it, how the cash leg picks a rail, and the lifecycle a status follows. Four diagrams, which
+GitHub renders in the page itself.
 
-    subgraph pkgs["pnpm workspace"]
-        Web["<b>@facture/web</b><br/>Next.js 15 · React 19"]
-        API["<b>@facture/backend</b><br/>Hono · SQLite/drizzle<br/>quote engine · settlement · issuance"]
-        Agent["<b>@facture/agent</b><br/>market maker<br/>Circle wallet · Hedera key"]
-        Shared["<b>@facture/shared</b><br/>curve · state machines<br/>refusal codes · ISIN · uniqueness hash"]
-        Contracts["<b>@facture/contracts</b><br/>Hardhat · imported by nothing"]
-    end
-
-    Privy["Privy<br/>email sign-in, wallet made from it"]
-    Circle["Circle<br/>developer-controlled wallets"]
-    Fac["Blocky402<br/>x402 facilitator"]
-
-    subgraph hed["Hedera testnet · the paper"]
-        ATS["ATS bond, one per invoice<br/>deployBond · hold · ControlList · Kyc"]
-        Uniq["UniquenessRegistry<br/>0x8eb9f001…"]
-        InvReg["InvoiceRegistry<br/>0x44fe6E29…"]
-        Topic["HCS topic 0.0.10342152<br/>refusal and match digests"]
-        Sched["Scheduled Transaction<br/>maturity pays the holder"]
-        Mirror["Mirror node"]
-        CashH["x402 cash leg<br/>HBAR transfer"]
-    end
-
-    subgraph arcnet["Arc testnet · the money"]
-        Vault["MandateVault<br/>0x217256d0…"]
-        Esc["DvpEscrow<br/>0x32e3511A…"]
-    end
-
-    Dead["<b>Deployed and verified, called by nothing</b><br/>DvpEscrow on Hedera"]
-
-    Seller -->|"adds invoices, watches the price move"| Web
-    Debtor -->|"confirms by link, no wallet"| Web
-    Web -->|"REST /v1"| API
-    Web -->|"sign-in"| Privy
-    API -->|"verifies the identity token"| Privy
-    Web -->|"claim: msg.sender must be the beneficiary"| Esc
-
-    Agent -->|"reads the book, arms a trade"| API
-    Agent -->|"payment-signature: a signed TransferTransaction"| API
-    Agent -->|"pnpm fund"| Circle
-    Circle -->|"deposit into this mandate's bucket"| Vault
-    Agent -.->|"HBAR balance, pre-flight"| Mirror
-
-    API -->|"deployBond · createHold · executeHold<br/>ControlList · Kyc · paused, before the match"| ATS
-    API -->|"checked when an invoice is added,<br/>claimed once its bond exists"| Uniq
-    API -->|"list after the claim · setStatus<br/>when the customer answers"| InvReg
-    API -->|"ScheduleCreate at maturity"| Sched
-    API -.->|"security ids · schedule status · /health"| Mirror
-    API -.->|"sha256 digests, never the reason"| Topic
-    API -->|"verify, then settle"| Fac
-    Fac -->|"adds its signature, pays the fee"| CashH
-
-    API -->|"registerMandate · registerMatch<br/>executePayout · executeRelease"| Vault
-    Vault -->|"locks the payout for the seller alone"| Esc
-    API -.->|"getLock, read only"| Esc
-
-    Web -.-> Shared
-    API -.-> Shared
-    Agent -.->|"one vocabulary"| Shared
-
-    Contracts -.->|"hardhat deploy, verified on Sourcify"| Uniq
-    Contracts -.-> InvReg
-    Contracts -.-> Vault
-    Contracts -.-> Esc
-    Contracts -.-> Dead
-
-    classDef hedera fill:#1f4e6b,stroke:#14384e,color:#fff
-    classDef arc fill:#0d5c4a,stroke:#08402f,color:#fff
-    classDef party fill:#3a3a3a,stroke:#222,color:#fff
-    classDef pkg fill:#4c3a72,stroke:#33284f,color:#fff
-    classDef ext fill:#6b4520,stroke:#4a2f14,color:#fff
-    classDef unwired fill:#2b2b2b,stroke:#6b6b6b,color:#bdbdbd
-    class ATS,Uniq,InvReg,Topic,Sched,Mirror,CashH hedera
-    class Vault,Esc arc
-    class Seller,Debtor party
-    class Web,API,Agent,Shared,Contracts pkg
-    class Privy,Circle,Fac ext
-    class Dead unwired
-```
-
-Two things the picture cannot say.
+Two things that diagram cannot say.
 
 `@facture/contracts` is a Hardhat workspace and **no package imports it.** Every ABI the backend
 calls is written out beside the call, so nothing in the build ties the TypeScript to the Solidity.
@@ -541,7 +482,7 @@ The one thread between them is a test in `@facture/agent` that reads `libraries/
 disk and fails if the on-chain refusal strings stop spelling what `@facture/shared` spells, because
 `tsc` cannot see a Solidity rename.
 
-The grey box is the other, and it now holds one contract rather than three. `MandateBook` and
+The other is the box that diagram greys out, and it now holds one contract rather than three. `MandateBook` and
 `AtsComplianceGate` were wired on 2026-09-06: the book answers `previewMatch` on every armed trade,
 reading the rating and the confirmation out of `InvoiceRegistry` rather than from whoever wants the
 match to succeed, and the gate decides eligibility with the security's own facets supplying the
@@ -697,6 +638,80 @@ New York 2026 with a NAV-appreciating credit fund and a secondary market on Sauc
 distinction is the one drawn under _Match_ above: an AMM cannot enforce compliance at the point of
 trade, because it has no point of trade at which to ask.
 
+# For developers
+
+## Repo layout
+
+A pnpm workspace of five packages, kept separable so anything on the cut list detaches without
+surgery.
+
+| package              | what it holds                                                                                         |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| `@facture/web`       | Next.js 15, React 19, Tailwind. Eight routes: the book, mandates, the proof view, the debtor's page.  |
+| `@facture/backend`   | Hono over SQLite and drizzle. Quote engine, settlement on both rails, issuance queue, compliance.     |
+| `@facture/shared`    | The curve, both state machines, the refusal vocabulary, ISIN generation, the uniqueness hash.         |
+| `@facture/agent`     | The market maker. Reads the book, prices it against its own mandate, arms a trade and pays for it.    |
+| `@facture/contracts` | Hardhat 3. Eight contracts across Hedera and Arc, verified on Sourcify, imported by no other package. |
+
+Each package has a README covering its own seams. `docs/` holds the four files written to be checked
+rather than believed, and `CLAUDE.md` is the working record underneath all of it: every constraint
+that cost a day to find, and what was decided after it.
+
+## Run it
+
+Node 22.15 or newer, pnpm 11.
+
+```bash
+pnpm install
+pnpm --filter @facture/shared build   # dist/ is gitignored and every workspace import resolves through it
+
+pnpm --filter @facture/backend dev    # the venue,   :8787
+pnpm --filter @facture/web dev        # the screens, :3000
+```
+
+The screens run with no backend at all: leave `NEXT_PUBLIC_API_BASE_URL` unset and they render the
+fixture book, which is fiction end to end and says so on the page. Pointing them at a running venue
+needs a seller and a buyer id, because every route is scoped by one. Each package carries a
+`.env.example` naming what it wants. Nothing that only reads needs a key; the keys are for issuing,
+settling and deploying.
+
+[docs/walkthrough.md](./docs/walkthrough.md) goes from an empty book to a matured receivable and
+says in place which steps spend testnet money.
+
+## Tests
+
+```bash
+pnpm test        # more than 1,500 across the five packages
+pnpm lint
+pnpm typecheck
+```
+
+The contract suite is Hardhat's and the rest are vitest. `pnpm typecheck` wants two builds ahead of
+it: `@facture/shared` because its `dist/` is gitignored, and `@facture/contracts` because its test
+types come from the compiled artifacts. That is the order the CI workflow runs in, and without them
+a clean checkout fails `tsc --noEmit` with an error about the test rather than the missing build.
+
+The web suite is component and unit only, with no browser harness, deliberately. What it guards is
+the class `tsc --noEmit` cannot see: a decoder reading the wrong field is well typed.
+
+## Deployed
+
+| what          | where                                                                                                                                                                                                 |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the screens   | Vercel. `vercel.json` builds `@facture/shared` before Next and filters the install to the web package, which keeps Hardhat and a native SQLite build out of a frontend deploy that needs neither.     |
+| the venue     | Render, free tier. No persistent disk, so `data/facture.snapshot.db` ships inside the build and a deploy resets the demo to a known state rather than accumulating half-finished trades.              |
+| the contracts | `deploy:hedera` and `deploy:arc` in `@facture/contracts`, then `verify`, which publishes to Sourcify — that lookup is what lights HashScan's badge. Addresses are pinned in `@facture/shared/chains`. |
+
+## Tech
+
+Hedera testnet carries the paper: Asset Tokenization Studio for the bonds, Consensus Service for
+refusal and match digests, a Scheduled Transaction for the maturity payout, the mirror node for
+every read the compliance gate makes. Arc testnet carries the money as USDC, where gas is USDC too.
+The cash leg is x402 v2 through the Blocky402 facilitator on one rail and the Arc escrow on the
+other. Privy signs sellers in by email and holds the key that claims a payout; Circle's
+developer-controlled wallets fund a mandate's escrow. Everything above that is TypeScript — Hono,
+drizzle, Next, viem, vitest, Hardhat.
+
 ## Licence
 
-Not yet chosen.
+[MIT](./LICENSE).

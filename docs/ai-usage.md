@@ -177,10 +177,11 @@ wallet is for, since it pays for neither settlement rail — and `src/fund.ts` i
 drives it: with no flags it reads the venue and the vault, prints the plan and moves nothing, and
 `--execute` is the only thing that authorises a spend.
 
-**The documentation**, including `docs/deployments.md`, the five package READMEs, and the upstream
-bug report in `docs/upstream/`. Every address and gas figure in the deployment record was read back
-from Hedera and pasted in by the model; a human decided that reading it back rather than copying a
-deploy log was the rule.
+**The documentation**, including `docs/deployments.md`, the five package READMEs, and an upstream
+bug report against Asset Tokenization Studio — cut from this repo before it was made public, and
+still in the history at `38fe478`. Every address and gas figure in the deployment record was read
+back from Hedera and pasted in by the model; a human decided that reading it back rather than
+copying a deploy log was the rule.
 
 **This file and `docs/demo.md`** were written by Claude Code as well, reading the repository and the
 running services. They are not exempt.

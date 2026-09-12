@@ -19,12 +19,31 @@ and is described last.
 
 ## Before you start
 
-Two processes, both already running in the sessions this was written in:
+There are two ways to run this, and the difference between them comes down to one thing: whether a
+step is allowed to spend.
+
+**Hosted**, which needs nothing installed:
+
+| what    | address                                     |
+| ------- | ------------------------------------------- |
+| screens | <https://facture-ethonline.vercel.app>      |
+| venue   | <https://facture-backend-4p7y.onrender.com> |
+
+That venue sleeps after fifteen idle minutes, so open `/health` first and give the first request
+about fifty seconds. It has no persistent disk either — the book is a snapshot shipped inside the
+build — so anything this script changes there is gone at the next deploy. Read the moves against it,
+click through every screen, and do the steps that issue, settle or mature against a local venue
+holding the keys.
+
+**Local**, two processes:
 
 | what    | command                              | address                 |
 | ------- | ------------------------------------ | ----------------------- |
 | venue   | `pnpm --filter @facture/backend dev` | `http://localhost:8787` |
 | screens | `pnpm --filter @facture/web dev`     | `http://localhost:3000` |
+
+Every URL below names the local pair. Both copies read the same seeded book, so the same paths work
+against either.
 
 ### Demo book, or your own
 
@@ -41,7 +60,8 @@ For a demo, **stay signed out**. The seeded book is where the settled trades and
 receivables are. Sign in only if someone asks to see onboarding, and expect an empty book on the
 other side, which is the correct answer for a business that has just arrived.
 
-Signed out, the screens read their identity from `packages/web/.env.local`:
+Signed out, the screens read their identity from `packages/web/.env.local`, and from the Vercel
+project's environment on the hosted copy:
 
 - seller `e37a8422-960d-5a77-9825-8964df79ed49` — Meridian Fabrication
 - buyer `f888dd62-6df0-5600-925e-06469ef0aef6` — Harrow Point
@@ -531,7 +551,7 @@ seller, because a seller who can read it can confirm their own invoices.
 
 ## URLs, collected
 
-### Screens — `http://localhost:3000`
+### Screens — `http://localhost:3000`, or <https://facture-ethonline.vercel.app>
 
 Eight addressable routes, plus a 404 page — nine page files under `src/app`. Each of the eight
 renders a loading, a failed and an empty state rather than only the happy path.

@@ -12,8 +12,12 @@ Three things before you start.
 - **Some steps spend real testnet money.** Each one says so in place, with the amount. Nothing in
   Parts 1–3 spends anything.
 - **Some steps change the demo book permanently.** There is no undo. Those say so too.
-- **The dev deployment is your machine.** There is no hosted environment. `localhost:8787` is the
-  venue and `localhost:3000` is the screens; the chains are shared public testnets, so the
+- **This one runs on your machine, and that is deliberate.** There is a hosted copy — the screens at
+  <https://facture-ethonline.vercel.app>, the venue at <https://facture-backend-4p7y.onrender.com> —
+  and it is the right place to read Part 3, which is read-only and needs nothing installed. It is
+  the wrong place for the rest: it has no persistent disk, so a book you change there resets at the
+  next deploy, and it sleeps after fifteen idle minutes. Locally, `localhost:8787` is the venue and
+  `localhost:3000` is the screens. The chains are shared public testnets either way, so the
   transactions you send are as real as any other transaction on them.
 
 ---
@@ -767,4 +771,5 @@ Stated plainly, because each is a decision with reasoning behind it rather than 
 | `docs/architecture.md` | four diagrams: the pieces, the path, the rails, the lifecycle |
 | `docs/deployments.md`  | every real transaction, with ids you can check                |
 | `docs/demo.md`         | the same ground as a thirteen-minute pitch to a judge         |
+| `docs/ai-usage.md`     | which parts a model wrote, and which were not its to decide   |
 | `CLAUDE.md`            | every constraint that cost a day to find, and why             |

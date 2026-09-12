@@ -2009,6 +2009,34 @@ Verified by booting the venue on the fourteen-line `.env` and pricing the live b
 typechecking: MF-2081 quotes 850 bps with nothing barred, and `canReceive` at the pinned gate
 answers `true` for the buyer that quote names.
 
+### The repo went public, and what that pass changed
+
+Prepared for submission 2026-09-12. The product did not change; what a stranger can check about it
+did.
+
+- **MIT, in `LICENSE`.** The README had said the licence was not yet chosen since the day it was
+  written. Every track requires a public repo, and a public one with no licence grants a reader
+  nothing.
+- **CI runs lint, typecheck and all five suites on every push** — 1,514 tests at this commit.
+  **Two builds have to precede the checks**, and a green local run hides both: `@facture/shared`
+  resolves through a `dist/` that is gitignored, and the contracts typecheck reads types Hardhat
+  generates from the compiled artifacts. On a clean tree without them, `tsc --noEmit` fails inside
+  `test/UniquenessRegistry.test.ts` with an error about the test rather than about the missing
+  build. Established by cloning HEAD and running it, not by reading the config.
+- **`format:check` is deliberately not in CI.** Twenty-seven files at HEAD are unformatted, so adding
+  it would open the repo with a red badge on the first push. Formatting them is a separate commit,
+  and a large one.
+- **`docs/upstream/` is gone** — 528 lines on how to submit an Asset Tokenization Studio PR that was
+  never submitted. `docs/ai-usage.md` still counts it among the documentation the model wrote, and
+  now names the commit it survives in.
+- **Both demo docs said there was no hosted environment.** There is one: the screens on Vercel, the
+  venue on Render's free tier, which sleeps after fifteen idle minutes and holds no persistent disk.
+  The book therefore ships as `data/facture.snapshot.db` inside the build and a deploy resets it, so
+  each doc now says which copy to do a spending step on and which to only read.
+- **The README's workspace diagram was a second copy of `docs/architecture.md` §1**, and is a pointer
+  now. Two copies of one diagram drift apart the way the two copies of `escrow.backed` did, and the
+  Arc tracks require the standalone file regardless.
+
 ## Cut list
 
 Ordered by what leaves the product most intact, not by which track is cheapest to lose. A prize is
@@ -2037,6 +2065,8 @@ If a change threatens that path, it is the change that goes.
 
 - pnpm workspace. Keep packages small and separable so cut-list items detach cleanly.
 - Verify with `pnpm lint` and `tsc --noEmit` rather than full builds during development.
+- `pnpm test` runs every suite. CI runs it with lint and typecheck on each push, after building
+  `@facture/shared` and `@facture/contracts` — both checks fail on a clean tree without them.
 - Real commit history matters here — ETHGlobal disqualifies single-commit repos and large
   unexplained drops. Commit incrementally throughout.
 - AI tool usage must be documented in the submission: which parts, which files. Keep spec and
