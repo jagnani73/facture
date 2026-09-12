@@ -8,8 +8,8 @@
  * reads, and the copy that turns a rating into a sentence.
  */
 
-import type { Mandate, MinorUnits, Rating } from './domain';
-import { tenorDays } from './domain';
+import type { Invoice, Mandate, MinorUnits, Rating } from './domain';
+import { RATINGS, meetsRatingFloor, tenorDays } from './domain';
 
 /* -------------------------------------------------------------------------- */
 /* Rating copy                                                                 */
@@ -60,6 +60,128 @@ export function curveFrom(
       label: labelOf(m),
     }))
     .sort((a, b) => a.tenorDays - b.tenorDays);
+}
+
+/* -------------------------------------------------------------------------- */
+/* The book, in figures                                                        */
+/* -------------------------------------------------------------------------- */
+
+export interface BookSummary {
+  /** Receivables outstanding: listed or confirmed, not yet sold, matured or defaulted. */
+  live: number;
+  /** Distinct customers behind them. The reason the paper is not one asset. */
+  debtors: number;
+  faceValue: MinorUnits;
+  /** What the standing bids would pay for the ones they will take, today. */
+  proceeds: MinorUnits;
+  /** How many of `live` nothing on the curve will take. */
+  unpriced: number;
+}
+
+/**
+ * The book in five numbers.
+ *
+ * Deliberately not a chart. These are headline figures rather than a distribution, and the
+ * shape that answers "what is outstanding and what is it worth" is a row of figures — a plot
+ * of two dozen unrelated receivables is a cloud that has to be decoded before it says
+ * anything, which is the opposite of the claim being made beside it.
+ *
+ * `proceeds` sums only the invoices that actually carry a price. Adding face value for the
+ * ones nothing will take would report capital the book cannot raise.
+ */
+export function summariseBook(
+  invoices: readonly Invoice[],
+  quoteFor: (invoiceId: string) => { proceeds: MinorUnits } | null,
+  debtorIdOf: (invoice: Invoice) => string,
+): BookSummary {
+  const live = invoices.filter(
+    (invoice) =>
+      invoice.status !== 'matured' && invoice.status !== 'defaulted' && invoice.status !== 'sold',
+  );
+
+  let faceValue = 0n;
+  let proceeds = 0n;
+  let unpriced = 0;
+  const debtors = new Set<string>();
+
+  for (const invoice of live) {
+    faceValue += invoice.faceValue;
+    debtors.add(debtorIdOf(invoice));
+    const quote = quoteFor(invoice.id);
+    if (quote) proceeds += quote.proceeds;
+    else unpriced += 1;
+  }
+
+  return { live: live.length, debtors: debtors.size, faceValue, proceeds, unpriced };
+}
+
+export interface BidSummary {
+  standing: number;
+  /** Tightest bid on the curve, in bps. `null` when nothing is standing. */
+  tightestBps: number | null;
+  longestTenorDays: number;
+  committed: MinorUnits;
+}
+
+/**
+ * The demand side in three numbers, mirroring {@link summariseBook} on the supply side.
+ *
+ * The pair is what makes the argument: a book of unique receivables on one side, a handful of
+ * standing bids on the other, and every invoice priced off the second without anyone quoting
+ * the first.
+ */
+export function summariseBids(mandates: readonly Mandate[]): BidSummary {
+  const standing = mandates.filter((m) => m.status === 'active');
+
+  return {
+    standing: standing.length,
+    tightestBps: standing.reduce<number | null>(
+      (best, m) => (best === null || m.annualisedYieldBps < best ? m.annualisedYieldBps : best),
+      null,
+    ),
+    longestTenorDays: standing.reduce((max, m) => Math.max(max, m.maxTenorDays), 0),
+    committed: standing.reduce((total, m) => total + m.totalCommitted, 0n),
+  };
+}
+
+export interface LadderRung {
+  rating: Rating;
+  /** Tightest standing bid that would take this rating at this tenor. `null` when none will. */
+  bestRateBps: number | null;
+  /** How many standing bids would take it. */
+  takers: number;
+}
+
+/**
+ * What the curve pays for identical paper at each rating.
+ *
+ * Read off the standing bids on two dimensions only — the rating floor and the tenor
+ * ceiling — which is what makes it a reading of the curve rather than a quote. A real quote
+ * also clears capital headroom, concentration and currency against one specific invoice,
+ * so a rung here says "the bid exists and would take this rating", never "you would get
+ * this price". The screen has to say so too.
+ *
+ * `D` is included precisely because nothing takes it: a mandate written at the widest floor
+ * accepts a cold start and still refuses a customer who has actually failed to pay, so the
+ * ladder ending in a rung with no bar is the permanence of a default made visible.
+ */
+export function ratingLadderFrom(
+  mandates: readonly Mandate[],
+  atTenorDays: number,
+): LadderRung[] {
+  const standing = mandates.filter(
+    (m) => m.status === 'active' && m.maxTenorDays >= atTenorDays,
+  );
+
+  return RATINGS.map((rating) => {
+    const takers = standing.filter((m) => meetsRatingFloor(rating, m.minRating));
+    const best = takers.reduce<number | null>(
+      (tightest, m) =>
+        tightest === null || m.annualisedYieldBps < tightest ? m.annualisedYieldBps : tightest,
+      null,
+    );
+    return { rating, bestRateBps: best, takers: takers.length };
+  });
 }
 
 /* -------------------------------------------------------------------------- */

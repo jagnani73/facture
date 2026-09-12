@@ -1,12 +1,16 @@
 'use client';
 
-import { formatDate, formatMoney } from '@/lib/format';
+import type { ReactNode } from 'react';
+
+import { formatDate, formatMoney, formatRate } from '@/lib/format';
 import type { Invoice } from '@/lib/domain';
 import type { Market } from '@/lib/data';
 import { isDemoBook } from '@/lib/data';
 import { useMarket } from '@/lib/data/hooks';
-import { curveFrom } from '@/lib/pricing';
+import { curveFrom, ratingLadderFrom, summariseBids, summariseBook } from '@/lib/pricing';
 import { CurveStrip } from '@/components/curve-strip';
+import { RatingLadder } from '@/components/rating-ladder';
+import { Stat } from '@/components/ui/primitives';
 import { PriceCell } from '@/components/price-cell';
 import { RatingChip } from '@/components/rating-chip';
 import { FailureLine } from '@/components/ui/async';
@@ -26,7 +30,7 @@ export function HeroQuote({ invoiceId = 'INV-2041' }: { invoiceId?: string }) {
 
   if (market.status === 'loading') {
     return (
-      <div className="card ledger-lines px-6 py-6" aria-busy="true">
+      <div className="card px-6 py-6" aria-busy="true">
         <Label>An invoice in the book right now</Label>
         <div className="mt-6 h-9 w-2/3 rounded-xs bg-sunken" aria-hidden />
         <p className="mt-5 text-xs text-faint">Reading the book…</p>
@@ -63,7 +67,7 @@ export function HeroQuote({ invoiceId = 'INV-2041' }: { invoiceId?: string }) {
   const pricing = market.data.pricingFor(invoice.id);
 
   return (
-    <div className="card ledger-lines px-6 py-6">
+    <div className="card px-6 py-6">
       <div className="flex items-start justify-between gap-4">
         <div>
           <Label>An invoice in the book right now</Label>
@@ -114,6 +118,168 @@ function pickHeadline(market: Market, preferred?: string): Invoice | undefined {
   return market.invoices
     .filter((invoice) => market.pricingFor(invoice.id).quote !== null)
     .sort((a, b) => (b.faceValue > a.faceValue ? 1 : b.faceValue < a.faceValue ? -1 : 0))[0];
+}
+
+/**
+ * The book in figures, beside the claim that nothing on it repeats.
+ *
+ * A row of numbers rather than a plot, because these are headline figures and not a
+ * distribution — and because the count of distinct customers is the number that actually
+ * carries the argument. Twenty-odd receivables spread over nearly as many customers is what
+ * "no two are the same asset" means, stated rather than left to be decoded off a cloud.
+ */
+export function BookSummaryRow() {
+  const market = useMarket();
+
+  if (market.status !== 'ready') {
+    return (
+      <div className="mt-auto pt-8">
+        {market.status === 'failed' ? (
+          <FailureLine error={market.error} what="the book" />
+        ) : (
+          <div className="h-16 rounded-sm bg-sunken" aria-hidden />
+        )}
+      </div>
+    );
+  }
+
+  const summary = summariseBook(
+    market.data.invoices,
+    (invoiceId) => market.data.pricingFor(invoiceId).quote,
+    (invoice) => invoice.debtorId,
+  );
+
+  if (summary.live === 0) {
+    return <p className="mt-auto pt-8 text-sm text-muted">Nothing is outstanding on the book today.</p>;
+  }
+
+  return (
+    <StatBand>
+      <Stat
+        label="Outstanding"
+        value={formatMoney(summary.faceValue, { fractionDigits: 0 })}
+        sub={`${summary.live} receivable${summary.live === 1 ? '' : 's'}`}
+      />
+      <Stat
+        label="Customers"
+        value={String(summary.debtors)}
+        sub={summary.debtors === summary.live ? 'one per invoice' : `across ${summary.live} invoices`}
+      />
+      <Stat
+        label="Priced today"
+        value={formatMoney(summary.proceeds, { fractionDigits: 0 })}
+        sub={
+          summary.unpriced === 0
+            ? 'all of them carry a bid'
+            : `${summary.unpriced} have no bid yet`
+        }
+      />
+    </StatBand>
+  );
+}
+
+/**
+ * The supply side's counterpart: what is standing to buy it.
+ *
+ * The two bands exist as a pair and are pinned to the bottom of their columns by {@link
+ * StatBand}, which is the only thing that makes the two halves of this argument the same
+ * height at every width. Matching them by writing paragraphs of equal length does not
+ * survive the first rewrap.
+ */
+export function BidSummaryRow() {
+  const market = useMarket();
+
+  if (market.status !== 'ready') {
+    return (
+      <div className="mt-auto pt-8">
+        {market.status === 'failed' ? (
+          <FailureLine error={market.error} what="the standing bids" />
+        ) : (
+          <div className="h-16 rounded-sm bg-sunken" aria-hidden />
+        )}
+      </div>
+    );
+  }
+
+  const bids = summariseBids(market.data.mandates);
+
+  if (bids.standing === 0) {
+    return <p className="mt-auto pt-8 text-sm text-muted">No bids are standing on this book today.</p>;
+  }
+
+  return (
+    <StatBand>
+      <Stat
+        label="Standing bids"
+        value={String(bids.standing)}
+        sub={bids.standing === 1 ? 'one funded mandate' : 'funded mandates'}
+      />
+      <Stat
+        label="Tightest"
+        value={bids.tightestBps === null ? '—' : formatRate(bids.tightestBps)}
+        sub={`out to ${bids.longestTenorDays} days`}
+      />
+      <Stat
+        label="Committed"
+        value={formatMoney(bids.committed, { fractionDigits: 0 })}
+        sub="escrowed, not indicated"
+      />
+    </StatBand>
+  );
+}
+
+/**
+ * A three-figure band pinned to the bottom of its column.
+ *
+ * `mt-auto` is what equalises the two columns it sits in: the grid already stretches them to
+ * one height, and this drops each band onto that shared baseline however differently the prose
+ * above it has wrapped. The rule above the band is not decoration — it is what makes the space
+ * it opens up read as a divider rather than as a hole, which is the difference between this and
+ * the same trick applied to a bare paragraph.
+ */
+function StatBand({ children }: { children: ReactNode }) {
+  return (
+    /*
+     * The gap above the rule is on the wrapper rather than on the band, because `mt-auto` is the
+     * pin and cannot also be a minimum. Whichever column's prose runs longest ends flush against
+     * the divider otherwise, and that is the column that sets where the pair sits.
+     */
+    <div className="mt-auto pt-8">
+      <div className="grid grid-cols-3 gap-4 border-t border-rule pt-5">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * What identical paper costs at each rating, read off the same standing bids the curve draws.
+ *
+ * The tenor is fixed rather than taken from any one invoice on purpose: the comparison is
+ * only worth anything if the single thing that differs between the rungs is the credit.
+ */
+const LADDER_TENOR_DAYS = 60;
+
+export function LandingRatingLadder() {
+  const market = useMarket();
+
+  if (market.status !== 'ready') {
+    return (
+      <div className="mt-4">
+        {market.status === 'failed' ? (
+          <FailureLine error={market.error} what="the standing bids" />
+        ) : (
+          <div className="h-[160px] rounded-sm bg-sunken" aria-hidden />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <RatingLadder
+      rungs={ratingLadderFrom(market.data.mandates, LADDER_TENOR_DAYS)}
+      atTenorDays={LADDER_TENOR_DAYS}
+      className="mt-4"
+    />
+  );
 }
 
 /**

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { isDemoBook } from '@/lib/data';
 import { proofExample, proofExampleLabel } from '@/lib/links';
+import { FactureMark } from './facture-mark';
 import { MarketTicker } from './market-ticker';
 import { SignIn } from './sign-in';
 import { SiteNav } from './site-nav';
@@ -24,8 +25,12 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen flex-col">
       <header className="border-b border-rule bg-raised">
         <div className="mx-auto flex max-w-[76rem] items-center justify-between gap-6 px-6 py-3.5">
-          <div className="flex items-baseline gap-4">
-            <Link href="/" className="font-serif text-[1.4rem] leading-none tracking-tight">
+          <div className="flex items-center gap-4">
+            <Link
+              href="/"
+              className="flex items-center gap-2.5 font-serif text-[1.4rem] leading-none tracking-tight"
+            >
+              <FactureMark className="h-[1.2em] w-auto shrink-0" />
               Facture
             </Link>
             <span aria-hidden className="hidden h-4 w-px bg-rule-strong sm:block" />

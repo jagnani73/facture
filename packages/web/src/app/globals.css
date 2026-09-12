@@ -243,17 +243,6 @@
   font-feature-settings: 'zero';
 }
 
-/* Faint horizontal ruling, like a bought ledger book. */
-@utility ledger-lines {
-  background-image: repeating-linear-gradient(
-    to bottom,
-    transparent 0,
-    transparent 27px,
-    var(--rule) 27px,
-    var(--rule) 28px
-  );
-}
-
 @layer components {
   .card {
     background-color: var(--paper-raised);

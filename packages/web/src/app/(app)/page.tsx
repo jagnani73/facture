@@ -1,9 +1,15 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 
-import { HeroQuote, LandingCurve } from '@/components/views/hero-quote';
+import {
+  BidSummaryRow,
+  BookSummaryRow,
+  HeroQuote,
+  LandingCurve,
+  LandingRatingLadder,
+} from '@/components/views/hero-quote';
 import { Card, Label, buttonClasses } from '@/components/ui/primitives';
-import { proofExample } from '@/lib/links';
+import { proofExample, proofExampleLabel } from '@/lib/links';
 
 /**
  * The argument, in the order it has to be made: the instrument was always a
@@ -43,55 +49,86 @@ export default function LandingPage() {
         <HeroQuote />
       </section>
 
-      <section className="grid gap-10 border-t border-rule pt-12 lg:grid-cols-2">
-        <div>
-          <h2 className="text-2xl leading-tight">Why invoice finance never got a market</h2>
-          <p className="mt-4 text-sm text-muted">
-            Not regulation, and not custody. It is that <strong>invoices are not fungible.</strong>{' '}
-            Every receivable is a different customer, a different amount and a different number of
-            days to maturity, so no two are the same asset. An order book needs something to book,
-            and there is nothing here that repeats.
-          </p>
-          <p className="mt-4 text-sm text-muted">
-            So price stays bilateral. It gets negotiated once, in private, by whoever picked up the
-            phone.
-          </p>
+      <section className="border-t border-rule pt-12">
+        {/*
+          `flex flex-col` on both columns, with each stat band pinned by `mt-auto`. The two
+          halves of this argument carry different shapes — one is three paragraphs, the other is
+          two around a pull quote — so their prose cannot be made to end on the same line, and at
+          a different width it ends on a different one. Pinning the bands is what makes the
+          columns finish together at every width instead of at the one they were checked at.
+        */}
+        <div className="grid gap-10 lg:grid-cols-2">
+          <div className="flex flex-col">
+            <h2 className="text-2xl leading-tight">Why invoice finance never got a market</h2>
+            <p className="mt-4 text-sm text-muted">
+              Not regulation, and not custody. It is that{' '}
+              <strong>invoices are not fungible.</strong> Every receivable is a different customer,
+              a different amount and a different number of days to maturity, so no two are the same
+              asset. An order book needs something to book, and there is nothing here that repeats.
+            </p>
+            <p className="mt-4 text-sm text-muted">
+              So price stays bilateral. It gets negotiated once, in private, by whoever picked up
+              the phone.
+            </p>
+            <p className="mt-4 text-sm text-muted">
+              The book itself shows it: almost as many customers as invoices, each owed a
+              different amount on a different day.
+            </p>
+
+            <BookSummaryRow />
+          </div>
+
+          <div className="flex flex-col">
+            <h2 className="text-2xl leading-tight">So standardise the bid instead</h2>
+            <p className="mt-4 text-sm text-muted">
+              A buyer does not offer for one invoice. They post a standing quote over a bucket, the
+              way money-market desks have always quoted short paper:
+            </p>
+            <blockquote className="mt-5 border-l-2 border-accent bg-sunken px-5 py-4 font-serif text-lg italic">
+              Any A-rated paper, sixty days or less, at 8% annualised, up to $200k of exposure.
+            </blockquote>
+            <p className="mt-4 text-sm text-muted">
+              Now the assets stay unique and the <strong>buyers</strong> become fungible. Anything
+              that arrives is priced immediately by reading the curve at its own rating and tenor.
+              Nobody waits for a counterparty.
+            </p>
+
+            <BidSummaryRow />
+          </div>
         </div>
 
-        <div>
-          <h2 className="text-2xl leading-tight">So standardise the bid instead</h2>
-          <p className="mt-4 text-sm text-muted">
-            A buyer does not offer for one invoice. They post a standing quote over a bucket, the
-            way money-market desks have always quoted short paper:
-          </p>
-          <blockquote className="mt-5 border-l-2 border-accent bg-sunken px-5 py-4 font-serif text-lg italic">
-            Any A-rated paper, sixty days or less, at 8% annualised, up to $200k of exposure.
-          </blockquote>
-          <p className="mt-4 text-sm text-muted">
-            Now the assets stay unique and the <strong>buyers</strong> become fungible. Anything
-            that arrives is priced immediately by reading the curve at its own rating and tenor.
-            Nobody waits for a counterparty.
-          </p>
-        </div>
       </section>
 
-      <section className="grid gap-8 lg:grid-cols-[1fr_20rem] lg:items-center">
-        <Card className="px-6 py-6">
-          <h2 className="text-xl">The curve is just the bids, plotted</h2>
-          <LandingCurve />
-          <p className="mt-4 text-sm text-muted">
-            There is no model behind this line. Each point is somebody&rsquo;s standing bid with
-            escrowed capital behind it, which is what makes a quote firm rather than indicative.
-          </p>
-        </Card>
-
-        <div>
+      <section>
+        <div className="grid gap-x-10 gap-y-4 lg:grid-cols-[18rem_1fr]">
           <h2 className="text-2xl leading-tight">The instrument was always a bond</h2>
-          <p className="mt-4 text-sm text-muted">
+          <p className="max-w-3xl text-sm text-muted">
             A discounted invoice is bought below par and redeems at face on a fixed date, with the
             discount being the yield. That is not a metaphor — it is the same instrument, and it is
-            why a receivable can be described honestly as something tradeable.
+            why a receivable can be described honestly as something tradeable. So it can be quoted
+            the way short paper has always been quoted: off a curve, at a rating and a tenor.
           </p>
+        </div>
+
+        <div className="mt-8 grid gap-8 lg:grid-cols-2">
+          <Card className="flex flex-col px-6 py-6">
+            <h2 className="text-xl">The curve is just the bids, plotted</h2>
+            <LandingCurve />
+            {/*
+              `mt-auto` on both cards' closing note, so the two land on one baseline however
+              differently their figures are sized. Without it the shorter card's slack dangles
+              below its last line and reads as a rendering fault rather than as spacing.
+            */}
+            <p className="mt-auto pt-4 text-sm text-muted">
+              There is no model behind this line. Each point is somebody&rsquo;s standing bid with
+              escrowed capital behind it, which is what makes a quote firm rather than indicative.
+            </p>
+          </Card>
+
+          <Card className="flex flex-col px-6 py-6">
+            <h2 className="text-xl">What a rating is worth</h2>
+            <LandingRatingLadder />
+          </Card>
         </div>
       </section>
 
@@ -159,9 +196,18 @@ export default function LandingPage() {
           <Link href="/book" className={buttonClasses('primary', 'lg')}>
             Open the book
           </Link>
-          <Link href={proofExample()} className={buttonClasses('quiet', 'lg')}>
-            Or see how a trade is proven
-          </Link>
+          {/*
+            Against a live venue there is no trade id known at build time, so `proofExample`
+            falls back to the book — and a second button to the same place, promising a screen
+            it does not land on, reads as a broken link rather than a considered fallback. The
+            label is what `links.ts` exports for exactly this case, and the button only appears
+            when it goes somewhere the first one does not.
+          */}
+          {proofExample() === '/book' ? null : (
+            <Link href={proofExample()} className={buttonClasses('quiet', 'lg')}>
+              {proofExampleLabel()}
+            </Link>
+          )}
         </div>
       </section>
     </div>

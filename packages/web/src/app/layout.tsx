@@ -36,7 +36,7 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: 'Facture — short-dated receivable paper',
+    default: 'Facture · short-dated receivable paper',
     template: '%s · Facture',
   },
   description:

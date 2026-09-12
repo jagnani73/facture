@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="packages/web/public/logo-dark.svg">
+    <img src="packages/web/public/logo.svg" alt="" width="240">
+  </picture>
+</p>
+
 <h1 align="center">Facture</h1>
 
 <p align="center">
