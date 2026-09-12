@@ -175,9 +175,9 @@ describe('with no registry configured', () => {
     });
   });
 
-  it('refuses to claim, naming the variable', async () => {
+  it('refuses to claim, saying no registry is wired', async () => {
     await expect(createDisabledUniquenessRegistry().claim('0xabc', OURS)).rejects.toMatchObject({
-      detail: expect.stringContaining('HEDERA_UNIQUENESS_REGISTRY_ADDRESS'),
+      detail: expect.stringContaining('No uniqueness registry is wired'),
     });
   });
 });

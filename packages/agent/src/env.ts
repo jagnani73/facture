@@ -47,23 +47,6 @@ const baseEnvSchema = z.object({
     .string()
     .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 20-byte EVM address')
     .default(ARC_TESTNET.tokens.USDC.address),
-  /**
-   * `MandateVault` on Arc. **Optional, and unset disables funding rather than relaxing it**
-   * — the same shape as the Hedera pair below and as the venue's own issuance with no ATS
-   * factory. With no address `pnpm fund` refuses by name; it does not fall back to
-   * anything.
-   *
-   * Spelled exactly as the backend spells it, and that is not an accident. A separate
-   * `AGENT_MANDATE_VAULT_ADDRESS` is how a deployment comes to hold two addresses for one
-   * contract, and the wrong one here is a deposit into a vault the venue never reads.
-   *
-   * There is no second variable to forget, because the RPC below has a working default. The
-   * capability is one switch.
-   */
-  ARC_MANDATE_VAULT_ADDRESS: z
-    .string()
-    .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 20-byte EVM address')
-    .optional(),
   /** Arc JSON-RPC. Defaults to the shared chain config; override only for a private node. */
   ARC_RPC_URL: z.string().url().default(ARC_TESTNET.rpcUrl),
 

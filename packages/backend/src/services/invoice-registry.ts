@@ -123,7 +123,7 @@ export function createDisabledInvoiceRegistry(): InvoiceRegistry {
   const refuse = (what: string): Promise<never> =>
     Promise.reject(
       badRequest(
-        `${what} needs the invoice registry. HEDERA_INVOICE_REGISTRY_ADDRESS is not set, so a ` +
+        `${what} needs the invoice registry. No registry is wired, so a ` +
           "receivable's terms and its debtor confirmation live only in this database.",
       ),
     );

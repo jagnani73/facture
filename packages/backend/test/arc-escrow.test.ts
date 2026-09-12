@@ -258,9 +258,9 @@ describe('funding with no vault configured', () => {
     expect(res.body.escrowVerified).toBe(false);
   });
 
-  it('refuses to register a mandate, naming the variable', async () => {
+  it('refuses to register a mandate, saying no vault is wired', async () => {
     await expect(createDisabledArcEscrow().registerMandate('any', '0xabc')).rejects.toMatchObject({
-      detail: expect.stringContaining('ARC_MANDATE_VAULT_ADDRESS'),
+      detail: expect.stringContaining('No vault is wired'),
     });
   });
 });
@@ -567,7 +567,7 @@ describe('opening a mandate cash leg', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.escrowRegistration.state).toBe('disabled');
-    expect(res.body.escrowRegistration.detail).toContain('ARC_MANDATE_VAULT_ADDRESS');
+    expect(res.body.escrowRegistration.detail).toContain('No Arc vault is wired');
   });
 
   /*
@@ -937,11 +937,11 @@ describe('closing a mandate cash leg', () => {
     expect(res.body.mandate.status).toBe('withdrawn');
   });
 
-  it('refuses to release with no vault, naming the variable', async () => {
+  it('refuses to release with no vault, saying so', async () => {
     await expect(
       createDisabledArcEscrow().executeRelease({ mandateUuid: 'any', amountUsdcMinor: 1n }),
     ).rejects.toMatchObject({
-      detail: expect.stringContaining('ARC_MANDATE_VAULT_ADDRESS'),
+      detail: expect.stringContaining('No vault is wired'),
     });
   });
 });

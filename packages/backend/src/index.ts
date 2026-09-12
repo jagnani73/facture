@@ -6,6 +6,7 @@
  */
 
 import { serve } from '@hono/node-server';
+import { ARC_DEPLOYMENTS, HEDERA_DEPLOYMENTS } from '@facture/shared';
 import { createApp } from './app.js';
 import { hedera } from './chain.js';
 import type { Config } from './config.js';
@@ -64,17 +65,16 @@ function boot(): void {
   setStoreFactory(() => createSqliteStore(getDb()));
   setNotifier(createLoggingNotifier(log));
   /*
-   * With a gate address the eligibility decision is a contract call anyone can reproduce; without
-   * one it is four RPC reads out of this process. The same three facts either way — this is the one
-   * address on the list whose absence is not a relaxation. See `services/compliance.ts`.
+   * The eligibility decision is a contract call anyone can reproduce. `createAtsComplianceGate`
+   * is still what supplies the sentence when the gate refuses — the on-chain gate holds one
+   * internally for that — so the direct-facet reader has not lost a caller here, only the
+   * branch that chose it instead. See `services/compliance.ts`.
    */
   setComplianceGate(
-    env.HEDERA_COMPLIANCE_GATE_ADDRESS === undefined
-      ? createAtsComplianceGate({ logger: log })
-      : createOnChainComplianceGate({
-          gateAddress: env.HEDERA_COMPLIANCE_GATE_ADDRESS as `0x${string}`,
-          logger: log,
-        }),
+    createOnChainComplianceGate({
+      gateAddress: HEDERA_DEPLOYMENTS.complianceGate,
+      logger: log,
+    }),
   );
 
   /*
@@ -83,7 +83,7 @@ function boot(): void {
    */
   setMandateBook(
     createMandateBook({
-      bookAddress: env.HEDERA_MANDATE_BOOK_ADDRESS,
+      bookAddress: HEDERA_DEPLOYMENTS.mandateBook,
       operatorKey: env.HEDERA_OPERATOR_KEY,
       logger: log,
     }),
@@ -126,8 +126,7 @@ function boot(): void {
   });
 
   initArcEscrow({
-    // Unset leaves funding recorded rather than verified; it does not fake an escrow.
-    vaultAddress: env.ARC_MANDATE_VAULT_ADDRESS,
+    vaultAddress: ARC_DEPLOYMENTS.mandateVault,
     settlementPrivateKey: env.ARC_SETTLEMENT_PRIVATE_KEY,
     maxFeePerGasGwei: env.ARC_MAX_FEE_PER_GAS_GWEI,
     // The same scale the Hedera cash leg settles at, so one receivable costs one amount.
@@ -145,15 +144,13 @@ function boot(): void {
   });
 
   initUniquenessRegistry({
-    // Unset leaves uniqueness to the database's index rather than faking a chain guarantee.
-    registryAddress: env.HEDERA_UNIQUENESS_REGISTRY_ADDRESS,
+    registryAddress: HEDERA_DEPLOYMENTS.uniquenessRegistry,
     operatorKey: env.HEDERA_OPERATOR_KEY,
     logger: log,
   });
 
   initInvoiceRegistry({
-    // Unset leaves confirmation a fact only this venue can see.
-    registryAddress: env.HEDERA_INVOICE_REGISTRY_ADDRESS,
+    registryAddress: HEDERA_DEPLOYMENTS.invoiceRegistry,
     operatorKey: env.HEDERA_OPERATOR_KEY,
     logger: log,
   });

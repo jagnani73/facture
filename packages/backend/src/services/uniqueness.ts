@@ -86,7 +86,7 @@ export function createDisabledUniquenessRegistry(): UniquenessRegistry {
       Promise.reject(
         badRequest(
           'Claiming a receivable needs the uniqueness registry. ' +
-            'HEDERA_UNIQUENESS_REGISTRY_ADDRESS is not set, so one-receivable-one-instrument ' +
+            'No uniqueness registry is wired, so one-receivable-one-instrument ' +
             'is enforced by this database alone on this deployment.',
         ),
       ),

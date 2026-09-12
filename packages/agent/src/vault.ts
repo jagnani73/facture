@@ -264,8 +264,6 @@ export function createArcVaultReader(config: ArcVaultReaderConfig): VaultReader 
  * money, which is a different act with a different audience — an operator, not a seller.
  */
 export type DepositRefusalCode =
-  /** No `ARC_MANDATE_VAULT_ADDRESS` on this process. The capability is off, not relaxed. */
-  | 'VAULT_NOT_CONFIGURED'
   /** The venue runs no vault, or could not read it, so there is no requirement to meet. */
   | 'VENUE_REPORTED_NO_VAULT'
   /** Arc could not be read. Indeterminate, and an indeterminate answer must not move money. */
@@ -353,8 +351,9 @@ export function planDeposit(input: PlanDepositInput): Result<DepositPlan, Deposi
     return refuse(
       'VENUE_REPORTED_NO_VAULT',
       'The venue publishes no escrow figure for this mandate, so there is no requirement ' +
-        'to fund. Set ARC_MANDATE_VAULT_ADDRESS on the venue; this process will not derive ' +
-        'a requirement of its own.',
+        'to fund. Both processes read the vault address from the same pin in ' +
+        '`@facture/shared`, so this is the venue unable to read Arc rather than the two ' +
+        'naming different deployments; this process will not derive a requirement of its own.',
     );
   }
 
@@ -362,8 +361,9 @@ export function planDeposit(input: PlanDepositInput): Result<DepositPlan, Deposi
     return refuse(
       'SETTLEMENT_TOKEN_MISMATCH',
       `The vault escrows ${input.settlementToken} and this process is configured to approve ` +
-        `${input.usdcAddress}. Approving the wrong asset is a deposit that reverts; check ` +
-        'ARC_USDC_ADDRESS and ARC_MANDATE_VAULT_ADDRESS name the same deployment.',
+        `${input.usdcAddress}. Approving the wrong asset is a deposit that reverts; the vault ` +
+        'address is pinned in `@facture/shared`, so check `ARC_USDC_ADDRESS` against the ' +
+        'deployment that pin names.',
     );
   }
 

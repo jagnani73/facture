@@ -172,11 +172,11 @@ describe('with no registry configured', () => {
     });
   });
 
-  it('refuses to write, naming the variable', async () => {
+  it('refuses to write, saying no registry is wired', async () => {
     await expect(
       createDisabledInvoiceRegistry().setStatus('any', INVOICE_STATUS.Confirmed),
     ).rejects.toMatchObject({
-      detail: expect.stringContaining('HEDERA_INVOICE_REGISTRY_ADDRESS'),
+      detail: expect.stringContaining('No registry is wired'),
     });
   });
 });

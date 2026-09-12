@@ -538,7 +538,7 @@ export async function attachClaimPolicy(
  *
  * It needs the Arc vault, because the address it scopes to is the vault's own
  * `paymentEscrow()` immutable and there is nowhere else honest to read it from. Provision
- * with `PRIVY_APP_ID`, `PRIVY_APP_SECRET` and `ARC_MANDATE_VAULT_ADDRESS` set, put the id it
+ * with `PRIVY_APP_ID` and `PRIVY_APP_SECRET` set, put the id it
  * returns into `PRIVY_WALLET_POLICY_ID`, and restart.
  */
 export async function provisionClaimPolicy(): Promise<{ policyId: string; body: PolicyBody }> {

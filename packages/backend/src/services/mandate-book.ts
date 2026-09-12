@@ -159,7 +159,7 @@ export function createDisabledMandateBook(): MandateBook {
   const refuse = (what: string): Promise<never> =>
     Promise.reject(
       badRequest(
-        `${what} needs the mandate book. HEDERA_MANDATE_BOOK_ADDRESS is not set, so this ` +
+        `${what} needs the mandate book. No book is wired, so this ` +
           "venue's match decisions are visible only inside this database.",
       ),
     );
@@ -415,7 +415,7 @@ export async function ensureMandatePosted(
       chainMandateId: null,
       transactionHash: null,
       detail:
-        'HEDERA_MANDATE_BOOK_ADDRESS is not set, so this mandate is not published on chain and ' +
+        'No mandate book is wired, so this mandate is not published on chain and ' +
         'its matches are checkable only against this database.',
     };
   }

@@ -22,6 +22,7 @@
  * literal here is how those two come to disagree.
  */
 
+import { ARC_DEPLOYMENTS } from '@facture/shared';
 import { loadConfig } from './config.js';
 import { EnvValidationError } from './env.js';
 import { createLogger, setRootLogger } from './logger.js';
@@ -53,15 +54,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (env.ARC_MANDATE_VAULT_ADDRESS === undefined) {
-    process.stderr.write(
-      'ARC_MANDATE_VAULT_ADDRESS must be set. The policy names the escrow the vault pays into, ' +
-        'and that address is read from the vault rather than guessed.\n',
-    );
-    process.exitCode = 1;
-    return;
-  }
-
   initPrivyPolicyClient({
     appId: env.PRIVY_APP_ID,
     appSecret: env.PRIVY_APP_SECRET,
@@ -70,7 +62,7 @@ async function main(): Promise<void> {
   });
 
   initArcEscrow({
-    vaultAddress: env.ARC_MANDATE_VAULT_ADDRESS,
+    vaultAddress: ARC_DEPLOYMENTS.mandateVault,
     settlementPrivateKey: env.ARC_SETTLEMENT_PRIVATE_KEY,
     maxFeePerGasGwei: env.ARC_MAX_FEE_PER_GAS_GWEI,
     settlementScalePpm: env.X402_SETTLEMENT_SCALE_PPM,

@@ -481,7 +481,7 @@ export function createDisabledArcEscrow(scalePpm = 1): ArcEscrow {
 
 const noVault = (what: string) =>
   badRequest(
-    `${what} needs the Arc vault. ARC_MANDATE_VAULT_ADDRESS is not set, so mandate capital ` +
+    `${what} needs the Arc vault. No vault is wired, so mandate capital ` +
       'is not escrowed on this deployment and the cash leg settles over x402 instead.',
   );
 
@@ -855,7 +855,7 @@ export async function ensureMandateRegistered(
       buyer: null,
       transactionHash: null,
       detail:
-        'ARC_MANDATE_VAULT_ADDRESS is not set, so this mandate has no cash leg on Arc and its ' +
+        'No Arc vault is wired, so this mandate has no cash leg on Arc and its ' +
         'funding is recorded rather than escrowed.',
     };
   }
@@ -1002,7 +1002,7 @@ export async function readMandateBacking(
       requiredUsdcMinor,
       backed: false,
       detail:
-        'ARC_MANDATE_VAULT_ADDRESS is not set, so there is no vault to verify this against ' +
+        'No Arc vault is wired, so there is no vault to verify this against ' +
         'and the funding is recorded rather than escrowed.',
     };
   }
@@ -1192,7 +1192,7 @@ export async function planCapitalRelease(
         amountUsdcMinor: 0n,
         remainingUsdcMinor: 0n,
         detail:
-          'ARC_MANDATE_VAULT_ADDRESS is not set, so no capital is escrowed on this deployment ' +
+          'No Arc vault is wired, so no capital is escrowed on this deployment ' +
           'and the withdrawal moves nothing but the book.',
       },
     };

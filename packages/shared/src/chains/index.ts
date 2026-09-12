@@ -10,6 +10,7 @@ export * from './arc.js';
 export * from './hedera.js';
 export * from './x402.js';
 export * from './ats.js';
+export * from './deployments.js';
 
 /** Every chain this build touches. Two, deliberately: paper on one, cash on the other. */
 export const CHAINS = {

@@ -124,50 +124,6 @@ export const envSchema = z
     HCS_REFUSAL_TOPIC_ID: ACCOUNT_ID.optional(),
 
     /**
-     * `UniquenessRegistry` on Hedera. Unset leaves one-receivable-one-instrument enforced by
-     * this database's unique index alone — which stops this venue listing a receivable twice
-     * and says nothing about it being financed somewhere else. See `services/uniqueness.ts`.
-     */
-    HEDERA_UNIQUENESS_REGISTRY_ADDRESS: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{40}$/)
-      .optional(),
-
-    /**
-     * `InvoiceRegistry` on Hedera. Unset leaves a receivable's terms and its debtor
-     * confirmation visible only inside this database — see `services/invoice-registry.ts`.
-     */
-    HEDERA_INVOICE_REGISTRY_ADDRESS: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{40}$/)
-      .optional(),
-
-    /**
-     * `AtsComplianceGate` on Hedera — the venue's eligibility decision, on chain and callable
-     * by anyone.
-     *
-     * Unset is NOT a relaxation here, unlike every other address on this list. The same three
-     * facts are read either way; the address only decides whether they are read by a contract
-     * a buyer can call themselves or by four RPC reads out of this process. See
-     * `services/compliance.ts` for why the on-chain answer is the one that decides, and for
-     * what happens when the two disagree.
-     */
-    HEDERA_COMPLIANCE_GATE_ADDRESS: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{40}$/)
-      .optional(),
-
-    /**
-     * `MandateBook` on Hedera. Unset leaves the venue's match decisions checkable only against
-     * this database — see `services/mandate-book.ts`. The book decides nothing here: it is
-     * asked, and its answer is published beside the venue's own.
-     */
-    HEDERA_MANDATE_BOOK_ADDRESS: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{40}$/)
-      .optional(),
-
-    /**
      * Privy, for seller sign-in. Unset disables the route rather than letting it accept an
      * unverified email — see `services/privy.ts`.
      *
@@ -198,14 +154,6 @@ export const envSchema = z
 
     // Arc
     ARC_SETTLEMENT_PRIVATE_KEY: HEX_32,
-    /**
-     * `MandateVault` on Arc, which holds the cash leg. Unset means funding is recorded but
-     * not verified against capital that exists — see `services/arc.ts`.
-     */
-    ARC_MANDATE_VAULT_ADDRESS: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]{40}$/)
-      .optional(),
     ARC_MAX_FEE_PER_GAS_GWEI: z.coerce
       .number()
       .int()

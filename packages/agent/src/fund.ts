@@ -33,6 +33,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAddress, type Address } from 'viem';
+import { ARC_DEPLOYMENTS } from '@facture/shared';
 import { loadEnv, secretsOf, type Env } from './env.js';
 import { createLogger, registerSecret, scrub, type Logger } from './logger.js';
 import { createVenueClient, type VenueClient } from './venue.js';
@@ -385,14 +386,6 @@ async function main(): Promise<void> {
     bindings: { svc: 'facture-agent-fund', buyerId: env.AGENT_BUYER_ID },
   });
 
-  if (env.ARC_MANDATE_VAULT_ADDRESS === undefined) {
-    throw new Error(
-      'ARC_MANDATE_VAULT_ADDRESS is not set, so there is no vault to fund. Unset disables ' +
-        'this capability rather than relaxing it; take the address from the venue’s own ' +
-        'environment so both name the same deployment.',
-    );
-  }
-
   const wallet = createWalletClient({
     apiKey: env.CIRCLE_API_KEY,
     entitySecret: env.CIRCLE_ENTITY_SECRET,
@@ -413,7 +406,7 @@ async function main(): Promise<void> {
       tradeTimeoutMs: env.FACTURE_API_TRADE_TIMEOUT_MS,
     }),
     reader: createArcVaultReader({
-      vaultAddress: env.ARC_MANDATE_VAULT_ADDRESS,
+      vaultAddress: ARC_DEPLOYMENTS.mandateVault,
       rpcUrl: env.ARC_RPC_URL,
       usdcAddress: env.ARC_USDC_ADDRESS,
     }),
